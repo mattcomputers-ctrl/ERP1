@@ -21,7 +21,7 @@ const BASELINE_PROGRAMS = [
 ];
 
 async function main() {
-  const adminEmail = process.env.ADMIN_EMAIL ?? 'admin@erp1.local';
+  const adminEmail = process.env.ADMIN_EMAIL ?? 'mcartwright@precisioninkcorp.com';
   const adminPassword = process.env.ADMIN_INITIAL_PASSWORD;
 
   // Administrator role (system role — cannot be deleted via UI).

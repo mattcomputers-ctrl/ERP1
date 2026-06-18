@@ -97,7 +97,7 @@ if [ ! -f "${ENV_FILE}" ]; then
   POSTGRES_PASSWORD="$(rand_hex 24)"
   SESSION_SECRET="$(rand_hex 32)"
   ADMIN_INITIAL_PASSWORD="$(rand_hex 16)"
-  ADMIN_EMAIL="${ERP1_ADMIN_EMAIL:-admin@erp1.local}"
+  ADMIN_EMAIL="${ERP1_ADMIN_EMAIL:-mcartwright@precisioninkcorp.com}"
 
   SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
   [ -n "${SERVER_IP}" ] || SERVER_IP="localhost"

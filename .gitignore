@@ -31,4 +31,3 @@ packages/db/generated/
 
 # Discovery scratch / extracted vendor text & build logs (local only).
 /docs/discovery/
-.github/workflows/
