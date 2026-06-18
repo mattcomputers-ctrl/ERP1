@@ -8,13 +8,25 @@ const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
 const MIN_PASSWORD_LENGTH = 12;
 
+// A precomputed hash to verify against when the account does not exist, so the
+// unknown-user path costs the same as the known-user path (defeats username
+// enumeration via response timing). Computed lazily once.
+let dummyHashPromise: Promise<string> | null = null;
+function getDummyHash(): Promise<string> {
+  dummyHashPromise ??= hash('timing-equalizer-not-a-real-password', ARGON_OPTS);
+  return dummyHashPromise;
+}
+
 @Injectable()
 export class AuthService {
   constructor(private readonly prisma: PrismaService) {}
 
   async validateUser(email: string, password: string) {
     const user = await this.prisma.user.findUnique({ where: { email } });
+
     if (!user || !user.passwordHash) {
+      // Equalize timing with the real verify path, then fail generically.
+      await verify(await getDummyHash(), password).catch(() => false);
       throw new UnauthorizedException('Invalid credentials');
     }
     if (user.status === 'DISABLED') {
@@ -24,9 +36,13 @@ export class AuthService {
       throw new UnauthorizedException('Account is temporarily locked. Try again later.');
     }
 
+    // A previously-expired lock grants a fresh attempt window.
+    const lockExpired = !!user.lockedUntil && user.lockedUntil <= new Date();
+    const priorFailed = lockExpired ? 0 : user.failedLoginCount;
+
     const ok = await verify(user.passwordHash, password).catch(() => false);
     if (!ok) {
-      const failed = user.failedLoginCount + 1;
+      const failed = priorFailed + 1;
       await this.prisma.user.update({
         where: { id: user.id },
         data: {

@@ -38,7 +38,7 @@ export function useLogout() {
   return useMutation({
     mutationFn: () => api.post('/auth/logout'),
     onSuccess: () => {
-      qc.setQueryData(['me'], null);
+      // clear() drops the ['me'] entry too; App then refetches and lands on Login.
       qc.clear();
     },
   });

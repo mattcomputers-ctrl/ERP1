@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Logger, Post, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
 import type { Request } from 'express';
 import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -9,6 +9,8 @@ import { SessionAuthGuard } from './session-auth.guard';
 
 @Controller('auth')
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
   constructor(
     private readonly auth: AuthService,
     private readonly audit: AuditService,
@@ -18,9 +20,17 @@ export class AuthController {
   @Post('login')
   async login(@Body() dto: LoginDto, @Req() req: Request) {
     const user = await this.auth.validateUser(dto.email, dto.password);
+
+    // Rotate the session ID across the privilege change (prevents fixation).
+    await new Promise<void>((resolve, reject) =>
+      req.session.regenerate((err) => (err ? reject(err) : resolve())),
+    );
     req.session.userId = user.id;
     req.session.actorLabel = user.displayName;
     req.session.mustChangePassword = user.mustChangePassword;
+    await new Promise<void>((resolve, reject) =>
+      req.session.save((err) => (err ? reject(err) : resolve())),
+    );
 
     const ttlHours = Number(process.env.SESSION_TTL_HOURS ?? '12');
     await this.prisma.session
@@ -33,7 +43,7 @@ export class AuthController {
           userAgent: req.headers['user-agent'] ?? null,
         },
       })
-      .catch(() => undefined);
+      .catch((e) => this.logger.warn(`Failed to record session row: ${e?.message ?? e}`));
 
     await this.audit.record({
       action: 'auth.login',
@@ -60,7 +70,7 @@ export class AuthController {
     }
     await this.prisma.session
       .updateMany({ where: { id: sid }, data: { revokedAt: new Date() } })
-      .catch(() => undefined);
+      .catch((e) => this.logger.warn(`Failed to revoke session row: ${e?.message ?? e}`));
     await new Promise<void>((resolve) => req.session.destroy(() => resolve()));
     return { ok: true };
   }
