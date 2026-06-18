@@ -50,7 +50,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 ## 3. Inventory management (UG ch.4)
 | Feature | Status | Notes |
 |---|---|---|
-| Inventory status & sublot expiry | ⬜ | `Inventory`/`Release.ExpiryDate` |
+| Inventory status & sublot expiry | 🟡 | Inventory browser + import live (37,934 rows); expiry pending |
 | Storage rules | ⬜ | `StorageRule` |
 | Adjust / consume / reweigh / remeasure | ⬜ | |
 | Empty / merge / dispense from containers | ⬜ | `Location`/`InvMovement` |
@@ -58,7 +58,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Container & lot disposal + reversal | ⬜ | reversing `ChangeSet` |
 | Move & staging | ⬜ | `LcnMovement` |
 | Inventory count, cycle count, verify location, mark/write-off missing | ⬜ | `InventoryCount*` |
-| Trace children / trace parents (genealogy) | ⬜ | `SublotParent` graph |
+| Trace children / trace parents (genealogy) | 🟡 | Trace + recall built (recursive CTE over `SublotParent`); ⚠️ `SublotParent` is EMPTY in this install — real lineage lives in the transaction/order history (`InvMovement`/`ChangeSet`/`OrdDetail`/`InventoryUsed`), so derived genealogy lands with the Manufacturing increment |
 | Label printing / reprinting | ⬜ | |
 | Update container/lot/sublot info | ⬜ | |
 | Costing (standard, replacement, actual) | ⬜ | `InventoryCost*` |
