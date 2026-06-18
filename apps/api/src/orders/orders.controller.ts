@@ -18,4 +18,9 @@ export class OrdersController {
   get(@Param('id', ParseIntPipe) id: number) {
     return this.orders.get(id);
   }
+
+  @Get(':id/batch-sheet')
+  batchSheet(@Param('id', ParseIntPipe) id: number) {
+    return this.orders.batchSheet(id);
+  }
 }

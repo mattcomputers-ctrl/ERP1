@@ -729,6 +729,28 @@ model OrdDetail {
   @@map("OrdDetail")
 }
 
+// QC / in-process test spec attached to an order line (mirrors legacy). Powers
+// the Quality Control section of the batch sheet: Test + Min/Max/Target/
+// Specification -> spec range, with a blank Result for hand-recording.
+model OrdDetailTest {
+  id            Int     @id @default(autoincrement()) @map("OrdDetailTest")
+  ordDetailId   Int?    @map("OrdDetail")
+  test          String? @map("Test") @db.VarChar(20)
+  qualifier     String? @map("Qualifier") @db.VarChar(40)
+  min           Float?  @map("Min")
+  max           Float?  @map("Max")
+  target        Float?  @map("Target")
+  testGroup     String? @map("TestGroup") @db.VarChar(20)
+  grade         String? @map("Grade") @db.VarChar(6)
+  specification String? @map("Specification") @db.Text
+  comment       String? @map("Comment") @db.Text
+  line          Int?    @map("Line")
+  version       Int?    @map("Version")
+
+  @@index([ordDetailId])
+  @@map("OrdDetailTest")
+}
+
 // Commitment link (mirrors legacy): ties a consumption line (OrdDetail, the
 // "use ingredient" UI line) to the source production line it drew from
 // (SrcOrdDetail, a "PK" packaged-product line). Resolved through Lot.OrdDetail

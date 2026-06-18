@@ -221,6 +221,15 @@ const TABLES: TableSpec[] = [
     where: (d) => ({ id: d.id }),
     map: (r) => ({ id: r.LotIngredient, lot: r.Lot, itemId: r.Item, percent: r.Percent }),
   },
+  {
+    name: 'OrdDetailTest', legacyTable: 'dbo.OrdDetailTest', delegate: 'ordDetailTest', idColumn: 'OrdDetailTest',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.OrdDetailTest, ordDetailId: r.OrdDetail, test: r.Test, qualifier: r.Qualifier,
+      min: r.Min, max: r.Max, target: r.Target, testGroup: r.TestGroup, grade: r.Grade,
+      specification: r.Specification, comment: r.Comment, line: r.Line, version: r.Version,
+    }),
+  },
 ];
 
 @Injectable()
@@ -251,9 +260,18 @@ export class LegacyImportService {
     };
   }
 
-  async run(triggeredBy?: string) {
+  async run(triggeredBy?: string, only?: string[]) {
+    const selected = only?.length
+      ? TABLES.filter((t) => only.includes(t.name))
+      : TABLES;
+    if (only?.length && selected.length === 0) {
+      throw new BadRequestException(
+        `No matching tables for: ${only.join(', ')}. Known: ${TABLES.map((t) => t.name).join(', ')}`,
+      );
+    }
+
     const runRecord = await this.prisma.importRun.create({
-      data: { status: 'running', mode: 'full', triggeredBy: triggeredBy ?? null },
+      data: { status: 'running', mode: only?.length ? 'partial' : 'full', triggeredBy: triggeredBy ?? null },
     });
 
     const tables: Array<{ name: string; source: number; target: number; processed: number; rejected: number }> = [];
@@ -261,7 +279,7 @@ export class LegacyImportService {
     try {
       pool = await new sql.ConnectionPool(this.config()).connect();
 
-      for (const spec of TABLES) {
+      for (const spec of selected) {
         const result = await pool.request().query(`SELECT * FROM ${spec.legacyTable}`);
         const rows = result.recordset as Record<string, any>[];
         let processed = 0;
