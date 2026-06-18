@@ -15,7 +15,7 @@ COPY . .
 
 # Install workspace deps, generate the Prisma client, compile the API.
 # (devDeps are intentionally kept: the migrate step needs the Prisma CLI + tsx.)
-RUN pnpm install --no-frozen-lockfile \
+RUN pnpm install --frozen-lockfile \
   && pnpm --filter @erp1/db generate \
   && pnpm --filter @erp1/api build
 

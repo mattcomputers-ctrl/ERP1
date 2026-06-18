@@ -57,7 +57,9 @@ export class AuditService {
   }
 
   private async appendLocked(tx: Prisma.TransactionClient, entry: AuditEntry) {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(${AUDIT_CHAIN_LOCK_KEY})`;
+    // $executeRaw (not $queryRaw): pg_advisory_xact_lock returns void, which
+    // $queryRaw cannot deserialize. executeRaw returns a row count instead.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${AUDIT_CHAIN_LOCK_KEY})`;
 
     const prev = await tx.auditLog.findFirst({
       orderBy: { id: 'desc' },

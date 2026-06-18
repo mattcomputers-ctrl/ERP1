@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim AS build
 RUN corepack enable
 WORKDIR /app
 COPY . .
-RUN pnpm install --no-frozen-lockfile && pnpm --filter @erp1/web build
+RUN pnpm install --frozen-lockfile && pnpm --filter @erp1/web build
 
 # ---- Serve static assets + reverse-proxy /api via Caddy ----
 FROM caddy:2

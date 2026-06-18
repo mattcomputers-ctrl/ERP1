@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Queue, Worker } from 'bullmq';
+import { type ConnectionOptions, Queue, Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 
 /**
@@ -11,9 +11,11 @@ import { Redis } from 'ioredis';
  * email notifications.
  */
 
+// BullMQ accepts an ioredis instance at runtime; cast to its ConnectionOptions
+// type (BullMQ bundles its own ioredis types, which differ from the workspace's).
 const connection = new Redis(process.env.REDIS_URL ?? 'redis://redis:6379', {
   maxRetriesPerRequest: null,
-});
+}) as unknown as ConnectionOptions;
 
 const SYSTEM_QUEUE = 'system';
 

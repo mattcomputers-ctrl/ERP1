@@ -4,7 +4,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 
 **Legend:** ⬜ Not started · 🟡 In progress · ✅ Done (with tests) · ⏸️ Intentionally deferred (present in product but **0 rows** in this install — schema parity kept, UI deferred until needed)
 
-> Status today: Phase 0 (discovery) ✅. Architecture proposal ✅ (awaiting approval). **No feature code started** — build begins after the review gate.
+> Status today: Phase 0 ✅, Architecture ✅ (approved). **Foundation increment built and validated locally** (full `docker compose` build + run + login/RBAC/audit smoke test all green) and pushed to GitHub with an Ubuntu installer.
 
 ---
 
@@ -13,13 +13,15 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 |---|---|---|
 | Phase 0 schema & data discovery | ✅ | [SCHEMA_REPORT.md](docs/SCHEMA_REPORT.md) |
 | Architecture proposal | ✅ | [ARCHITECTURE.md](docs/ARCHITECTURE.md) — awaiting approval |
-| Monorepo + Docker + CI scaffold | ⬜ | |
-| Auth (Argon2id, MFA, OIDC SSO, sessions) | ⬜ | |
-| Users / Roles / Groups / Secured Items / Response Levels admin | ⬜ | Model reverse-engineered (Schema Report §7) |
+| Monorepo + Docker + unattended Ubuntu installer | ✅ | Validated: build + up + smoke all green |
+| CI (GitHub Actions) | 🟡 | Pipeline pushed; lockfile committed; awaiting green run |
+| Auth — Argon2id, Redis sessions, lockout, session-fixation hardening | ✅ | login/logout/me/change-password live |
+| Auth — MFA (TOTP), OIDC SSO | ⬜ | Modeled (`User.mfaSecret`/`ssoSubject`); not wired yet |
+| Users / Roles / Programs / Secured Items / Response Levels | 🟡 | Schema + server enforcement (ProgramGuard) + Users admin UI; secured-item/role admin UI pending |
 | Approvals & Workflow chains | ⬜ | `Workflow` 0 rows today, but build the engine |
 | Supervisor override / approve-on-behalf | ⬜ | Brief §5 priority |
-| Audit trail (field-level, append-only, hash-chained) | ⬜ | Mirrors `Log`/`LogResult` |
-| Electronic-signature ledger | ⬜ | Mirrors `LogSecuredItem` |
+| Audit trail (field-level, append-only, hash-chained) | ✅ | Live + `verifyChain` confirmed; advisory-lock serialized; atomic with mutations |
+| Electronic-signature ledger | 🟡 | Table/model built; capture flow (reason/sig/witness UI) pending |
 | Reusable filterable/exportable grid (set-viewer platform) | ⬜ | One component powers ~60 viewers |
 | Import/sync engine + reconciliation report | ⬜ | Log-driven incremental (Schema Report §9) |
 
