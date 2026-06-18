@@ -14,6 +14,7 @@ interface ProcedureLine {
   itemCode: string | null;
   description: string;
   pounds: number | null;
+  grams: number | null;
 }
 interface TestRow {
   test: string | null;
@@ -21,6 +22,7 @@ interface TestRow {
 }
 interface BatchSheetModel {
   header: {
+    companyName: string;
     batchOrderId: number;
     context: string | null;
     recipeNumber: string | null;
@@ -38,8 +40,6 @@ interface BatchSheetModel {
   tests: TestRow[];
 }
 
-const COMPANY = 'Precision Ink';
-
 const fmtDate = (v: string | null | undefined) => {
   if (!v) return '';
   const d = new Date(v);
@@ -47,6 +47,7 @@ const fmtDate = (v: string | null | undefined) => {
   return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
 };
 const wt = (n: number | null | undefined) => (n == null ? '' : n.toFixed(3));
+const grams = (n: number | null | undefined) => (n == null ? '' : n.toFixed(2));
 
 export function BatchSheet() {
   const { id } = useParams<{ id: string }>();
@@ -77,7 +78,7 @@ export function BatchSheet() {
 
       {/* Header */}
       <div className="flex items-baseline justify-between border-b border-slate-300 pb-1 text-xs text-slate-600">
-        <span className="font-semibold">{COMPANY}</span>
+        <span className="font-semibold">{h.companyName}</span>
         <span>{new Date().toLocaleString()}</span>
       </div>
       <div className="mt-2 grid grid-cols-2 gap-x-8 gap-y-0.5">
@@ -122,7 +123,7 @@ export function BatchSheet() {
               <tr key={i}>
                 <Td className="font-medium">{l.itemCode}</Td>
                 <Td>{l.description}</Td>
-                <Td className="text-right">&nbsp;</Td>
+                <Td className="text-right tabular-nums">{grams(l.grams)}</Td>
                 <Td className="text-right tabular-nums">{wt(l.pounds)}</Td>
                 <Td className="text-center">&nbsp;</Td>
               </tr>

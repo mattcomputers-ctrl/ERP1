@@ -146,7 +146,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Feature | Status | Notes |
 |---|---|---|
 | Entity/installation/site config | ⬜ | `Entity` IsCMS/IsInstallation/IsSite |
-| Config tabs (general, batch-exec, host, inventory, mail, order, print, purchase-receipt, recipe-manager, user) | ⬜ | `Params*` |
+| Config tabs (general, batch-exec, host, inventory, mail, order, print, purchase-receipt, recipe-manager, user) | 🟡 | `Params*`. **App settings foundation** in place: `app_settings` key/value table + `SettingsService` + admin API (`GET /api/settings`, `PUT /api/settings/:key`, program `admin.config`), seeded with `company.name` + `batchSheet.gramsThresholdLb` (drives the batch ticket). Full config tabs/UI pending |
 | Document logo/branding; bins, location groups, storage rules, units, zones | ⬜ | |
 | Workstation & agent config; scheduled procedures; barcode scanners; licensing | ⬜ | `Workstation*`/`Job` |
 

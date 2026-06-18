@@ -1,6 +1,9 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { buildList, type ListQuery } from '../common/list';
 import { PrismaService } from '../prisma/prisma.service';
+import { SettingsService } from '../settings/settings.service';
+
+const LB_TO_GRAMS = 453.59237;
 
 const SORTABLE = ['id', 'context', 'status', 'dateOrdered', 'dateRequired', 'dateCompleted'];
 
@@ -15,7 +18,10 @@ export interface OrdersListQuery extends ListQuery {
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly settings: SettingsService,
+  ) {}
 
   async list(query: OrdersListQuery) {
     const { skip, take, orderBy, page, pageSize } = buildList(query, {
@@ -165,13 +171,21 @@ export class OrdersService {
     const totalWeight = order.actualBatchSize ?? productLine?.qtyReqd ?? (sumUi || null);
     const weightUnit = recipe?.weightUnit ?? productLine?.entityUnit ?? 'lb';
 
-    const entities = await this.entityCodes([order.entityId, order.billToId]);
+    const [entities, companyName, gramsThresholdLb] = await Promise.all([
+      this.entityCodes([order.entityId, order.billToId]),
+      this.settings.get('company.name', 'Precision Ink'),
+      this.settings.getNumber('batchSheet.gramsThresholdLb', 0.05),
+    ]);
 
+    // Small quantities are weighed in grams (configurable threshold); larger
+    // ones in pounds. A material row populates exactly one of the two columns.
     const procedure = lines
       .filter((l) => ['UI', 'INSTR', 'FT', 'UB'].includes(l.context ?? ''))
       .map((l) => {
         const item = l.itemId != null ? itemById.get(l.itemId) : undefined;
         const instruction = l.context !== 'UI';
+        const lb = l.qtyReqd;
+        const useGrams = !instruction && lb != null && lb <= gramsThresholdLb;
         return {
           kind: instruction ? 'instruction' : 'material',
           execOrder: l.execOrder,
@@ -180,12 +194,14 @@ export class OrdersService {
           description: instruction
             ? (l.description ?? l.comment ?? item?.description ?? '')
             : [item?.description ?? l.description, l.comment].filter(Boolean).join(' '),
-          pounds: instruction ? null : l.qtyReqd,
+          pounds: instruction || useGrams ? null : lb,
+          grams: useGrams && lb != null ? lb * LB_TO_GRAMS : null,
         };
       });
 
     return {
       header: {
+        companyName,
         batchOrderId: order.id,
         context: order.context,
         recipeNumber: recipe?.recipeNumber ?? null,

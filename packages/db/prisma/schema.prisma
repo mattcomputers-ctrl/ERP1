@@ -249,6 +249,19 @@ model ESignature {
   @@map("esignature")
 }
 
+// Application configuration (key/value). Runtime-editable settings (e.g.
+// company name, batch-sheet grams threshold). Foundation for the full
+// Configuration module; seeded with defaults.
+model AppSetting {
+  key         String   @id
+  value       String
+  description String?
+  updatedAt   DateTime @updatedAt
+  updatedBy   String?
+
+  @@map("app_settings")
+}
+
 // ===========================================================================
 // Master data — mirrors legacy Mar-Kov table/column names (PascalCase via
 // @map / @@map) for 1:1 import and tool compatibility. Names/addresses live in

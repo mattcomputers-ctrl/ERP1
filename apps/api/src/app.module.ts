@@ -9,6 +9,7 @@ import { ManufacturingModule } from './manufacturing/manufacturing.module';
 import { MasterDataModule } from './master-data/master-data.module';
 import { OrdersModule } from './orders/orders.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { SettingsModule } from './settings/settings.module';
 import { UsersModule } from './users/users.module';
 
 @Module({
@@ -24,6 +25,7 @@ import { UsersModule } from './users/users.module';
     ManufacturingModule,
     OrdersModule,
     GenealogyModule,
+    SettingsModule,
   ],
 })
 export class AppModule {}

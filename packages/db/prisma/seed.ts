@@ -27,6 +27,14 @@ const BASELINE_PROGRAMS = [
   { key: 'inventory.trace', name: 'Trace Genealogy', folder: 'Transactions/Inventory' },
   { key: 'inventory.recall', name: 'Recall', folder: 'Transactions/Inventory' },
   { key: 'admin.import', name: 'Legacy Import', folder: 'Administration' },
+  { key: 'admin.config', name: 'Configuration', folder: 'Administration' },
+];
+
+// Default application settings (seeded only if absent — never overwrite an
+// operator-changed value). Foundation for the Configuration module.
+const DEFAULT_SETTINGS = [
+  { key: 'company.name', value: 'Precision Ink', description: 'Company name shown on printed documents (batch tickets, labels).' },
+  { key: 'batchSheet.gramsThresholdLb', value: '0.05', description: 'Batch-ticket quantities at or below this many pounds are shown in grams instead.' },
 ];
 
 async function main() {
@@ -58,6 +66,15 @@ async function main() {
       where: { roleId_programId: { roleId: adminRole.id, programId: prog.id } },
       update: { allow: true },
       create: { roleId: adminRole.id, programId: prog.id, allow: true },
+    });
+  }
+
+  // Default settings — create if absent; never overwrite an operator-changed value.
+  for (const s of DEFAULT_SETTINGS) {
+    await prisma.appSetting.upsert({
+      where: { key: s.key },
+      update: { description: s.description },
+      create: { key: s.key, value: s.value, description: s.description },
     });
   }
 
