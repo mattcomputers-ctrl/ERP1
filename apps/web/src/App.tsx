@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { type Me, useLogout, useMe } from './lib/auth';
+import { Audit } from './pages/Audit';
 import { BatchSheet } from './pages/BatchSheet';
 import { ChangePassword } from './pages/ChangePassword';
 import { Dashboard } from './pages/Dashboard';
@@ -51,6 +52,7 @@ export function App() {
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
+        <Route path="/audit" element={<Audit />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/change-password" element={<ChangePassword />} />
         <Route path="*" element={<Navigate to="/" replace />} />
@@ -72,6 +74,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/inventory', label: 'Inventory' },
     { to: '/recall', label: 'Lot Trace' },
     { to: '/users', label: 'Users' },
+    { to: '/audit', label: 'Audit' },
     { to: '/import', label: 'Import' },
   ];
 

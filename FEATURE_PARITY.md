@@ -20,7 +20,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Users / Roles / Programs / Secured Items / Response Levels | 🟡 | Schema + server enforcement (ProgramGuard) + Users admin UI; secured-item/role admin UI pending |
 | Approvals & Workflow chains | ⬜ | `Workflow` 0 rows today, but build the engine |
 | Supervisor override / approve-on-behalf | ⬜ | Brief §5 priority |
-| Audit trail (field-level, append-only, hash-chained) | ✅ | Live + `verifyChain` confirmed; advisory-lock serialized; atomic with mutations |
+| Audit trail (field-level, append-only, hash-chained) | ✅ | Live + `verifyChain` confirmed; advisory-lock serialized; atomic with mutations. **Web Audit viewer** added: searchable trail with expandable field-level diffs + one-click chain-integrity verification (now populated by the order-lifecycle actions) |
 | Electronic-signature ledger | 🟡 | Table/model built; capture flow (reason/sig/witness UI) pending |
 | Reusable filterable/exportable grid (set-viewer platform) | ✅ | DataGrid: search/sort/paginate/CSV export; powers all module lists |
 | Import/sync engine + reconciliation report | ⬜ | Log-driven incremental (Schema Report §9) |
