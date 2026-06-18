@@ -75,7 +75,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 ## 5. Batch order processing (UG ch.6–7)
 | Feature | Status | Notes |
 |---|---|---|
-| Create orders from recipes; import orders | ⬜ | `Ordr` Context=`MFBA` |
+| Create orders from recipes; import orders | 🟡 | `Ordr`/`OrdDetail` mirrored + imported (75K/505K rows); unified **Orders browser** (type filter PO/MFBA/MFPP/SH, search, hold/open filters) with full line detail + party/item/recipe decoration. Order *creation* + execution pending |
 | Release, specify packouts, print batch sheets | ⬜ | |
 | Complete/close with workflow approvals | ⬜ | |
 | Material variance analysis; multi-batch | ⬜ | |

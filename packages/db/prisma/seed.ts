@@ -22,6 +22,7 @@ const BASELINE_PROGRAMS = [
   { key: 'master.items', name: 'Items', folder: 'Master Tables' },
   { key: 'master.units', name: 'Units', folder: 'Master Tables' },
   { key: 'recipe.manager', name: 'Recipe Manager', folder: 'Master Tables/Recipe Manager' },
+  { key: 'orders.browser', name: 'Order Browser', folder: 'Transactions/Orders' },
   { key: 'inventory.browser', name: 'Inventory Browser', folder: 'Transactions/Inventory' },
   { key: 'inventory.trace', name: 'Trace Genealogy', folder: 'Transactions/Inventory' },
   { key: 'inventory.recall', name: 'Recall', folder: 'Transactions/Inventory' },

@@ -171,6 +171,42 @@ const TABLES: TableSpec[] = [
       percentOver: r.PercentOver, tag: r.Tag,
     }),
   },
+  {
+    name: 'Ordr', legacyTable: 'dbo.Ordr', delegate: 'ordr', idColumn: 'Ordr',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.Ordr, version: r.Version, context: r.Context, ownerId: r.Owner, entityId: r.Entity,
+      divisionId: r.Division, shipToId: r.ShipTo, billToId: r.BillTo, salesmanId: r.Salesman,
+      currency: r.Currency, recipeId: r.Recipe, status: r.Status, userHold: r.UserHold,
+      executionHold: r.ExecutionHold, creditHold: b(r.CreditHold), ordSubType: r.OrdSubType,
+      poNumber: r.PoNumber, processingType: r.ProcessingType, isQuote: b(r.IsQuote),
+      reference: r.Reference, placedBy: r.PlacedBy, terms: r.Terms, securityGroup: r.SecurityGroup,
+      dateOrdered: r.DateOrdered, dateRequired: r.DateRequired, dateReleased: r.DateReleased,
+      dateStarted: r.DateStarted, dateCompleted: r.DateCompleted, dateScheduled: r.DateScheduled,
+      planStartDate: r.PlanStartDate, actualBatchSize: r.ActualBatchSize, manfLot: r.ManfLot,
+      labourHours: r.LabourHours, machineHours: r.MachineHours, parentId: r.Parent,
+      revision: r.Revision, comment: r.Comment,
+    }),
+  },
+  {
+    name: 'OrdDetail', legacyTable: 'dbo.OrdDetail', delegate: 'ordDetail', idColumn: 'OrdDetail',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.OrdDetail, ordrId: r.Ordr, context: r.Context, itemId: r.Item, status: r.Status,
+      parentId: r.Parent, ownerId: r.Owner, qtyReqd: r.QtyReqd, qtyCommitted: r.QtyCommitted,
+      qtyUsed: r.QtyUsed, stdQty: r.StdQty, qtyYield: r.QtyYield, baseQty: r.BaseQty,
+      yieldPercent: r.YieldPercent, numberOfBatches: r.NumberOfBatches,
+      line: r.Line == null ? null : BigInt(r.Line), execOrder: r.ExecOrder,
+      execSubOrder: r.ExecSubOrder, sortOrder: r.SortOrder, phase: r.Phase, qualifier: r.Qualifier,
+      batchType: r.BatchType, execStatus: r.ExecStatus, sublotId: r.Sublot, lot: r.Lot,
+      manufacturerId: r.Manufacturer, pkgTypeId: r.PkgType, entityUnit: r.EntityUnit,
+      description: r.Description, comment: r.Comment, mustPreweigh: r.MustPreweigh ?? 0,
+      percentUnder: r.PercentUnder, percentOver: r.PercentOver,
+      recipeDetailReference: r.RecipeDetailReference, price: r.Price, datePromised: r.DatePromised,
+      dateUpdated: r.DateUpdated, reference: r.Reference, tag: r.Tag, isOpen: b(r.IsOpen),
+      discarded: b(r.Discarded), inactive: b(r.Inactive), version: r.Version,
+    }),
+  },
 ];
 
 @Injectable()

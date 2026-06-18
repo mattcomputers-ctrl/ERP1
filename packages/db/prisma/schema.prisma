@@ -615,3 +615,116 @@ model RecipeDetail {
   @@index([itemId])
   @@map("RecipeDetail")
 }
+
+// ===========================================================================
+// Orders (mirrors legacy). Ordr is the UNIVERSAL order header — Purchasing
+// (Context=PO), Manufacturing batching (MFBA) & packaging (MFPP), and
+// Sales/Shipping (SH) are all the same two tables, discriminated by Context.
+// OrdDetail is the line item for every order type; Parent (self-ref) + Phase
+// model the recipe/BOM hierarchy inside an order. Lot.OrdDetail ties each
+// produced/received lot back to the order line that created it — the backbone
+// of the derived genealogy (real SublotParent edges are empty in this install).
+// Faithful column subset (legacy Ordr has 105 cols, OrdDetail 118); extended to
+// full parity per-need.
+// ===========================================================================
+
+model Ordr {
+  id              Int       @id @default(autoincrement()) @map("Ordr")
+  version         Int?      @map("Version")
+  context         String?   @map("Context") @db.VarChar(32)
+  ownerId         Int?      @map("Owner")
+  entityId        Int?      @map("Entity")
+  divisionId      Int?      @map("Division")
+  shipToId        Int?      @map("ShipTo")
+  billToId        Int?      @map("BillTo")
+  salesmanId      Int?      @map("Salesman")
+  currency        String?   @map("Currency") @db.VarChar(10)
+  recipeId        Int?      @map("Recipe")
+  status          String?   @map("Status") @db.VarChar(6)
+  userHold        String?   @map("UserHold") @db.VarChar(20)
+  executionHold   String?   @map("ExecutionHold") @db.VarChar(20)
+  creditHold      Boolean?  @map("CreditHold")
+  ordSubType      String?   @map("OrdSubType") @db.VarChar(6)
+  poNumber        String?   @map("PoNumber") @db.VarChar(25)
+  processingType  String?   @map("ProcessingType") @db.VarChar(10)
+  isQuote         Boolean?  @map("IsQuote")
+  reference       String?   @map("Reference") @db.VarChar(20)
+  placedBy        String?   @map("PlacedBy") @db.VarChar(255)
+  terms           String?   @map("Terms") @db.VarChar(20)
+  securityGroup   String?   @map("SecurityGroup") @db.VarChar(20)
+  dateOrdered     DateTime? @map("DateOrdered")
+  dateRequired    DateTime? @map("DateRequired")
+  dateReleased    DateTime? @map("DateReleased")
+  dateStarted     DateTime? @map("DateStarted")
+  dateCompleted   DateTime? @map("DateCompleted")
+  dateScheduled   DateTime? @map("DateScheduled")
+  planStartDate   DateTime? @map("PlanStartDate")
+  actualBatchSize Float?    @map("ActualBatchSize")
+  manfLot         String?   @map("ManfLot") @db.VarChar(256)
+  labourHours     Float?    @map("LabourHours")
+  machineHours    Float?    @map("MachineHours")
+  parentId        Int?      @map("Parent")
+  revision        Int?      @map("Revision")
+  comment         String?   @map("Comment") @db.Text
+  createdAt       DateTime  @default(now()) @map("erp1_created_at")
+  updatedAt       DateTime  @updatedAt @map("erp1_updated_at")
+
+  @@index([context])
+  @@index([entityId])
+  @@index([status])
+  @@index([recipeId])
+  @@map("Ordr")
+}
+
+model OrdDetail {
+  id                    Int       @id @default(autoincrement()) @map("OrdDetail")
+  ordrId                Int?      @map("Ordr")
+  context               String?   @map("Context") @db.VarChar(32)
+  itemId                Int?      @map("Item")
+  status                String?   @map("Status") @db.VarChar(6)
+  parentId              Int?      @map("Parent")
+  ownerId               Int?      @map("Owner")
+  qtyReqd               Float?    @map("QtyReqd")
+  qtyCommitted          Float?    @map("QtyCommitted")
+  qtyUsed               Float?    @map("QtyUsed")
+  stdQty                Float?    @map("StdQty")
+  qtyYield              Float?    @map("QtyYield")
+  baseQty               Float?    @map("BaseQty")
+  yieldPercent          Float?    @map("YieldPercent")
+  numberOfBatches       Float?    @map("NumberOfBatches")
+  line                  BigInt?   @map("Line")
+  execOrder             Int?      @map("ExecOrder")
+  execSubOrder          Int?      @map("ExecSubOrder")
+  sortOrder             Int?      @map("SortOrder")
+  phase                 String?   @map("Phase") @db.VarChar(50)
+  qualifier             String?   @map("Qualifier") @db.VarChar(40)
+  batchType             String?   @map("BatchType") @db.VarChar(1)
+  execStatus            String?   @map("ExecStatus") @db.VarChar(6)
+  sublotId              Int?      @map("Sublot")
+  lot                   String?   @map("Lot") @db.VarChar(50)
+  manufacturerId        Int?      @map("Manufacturer")
+  pkgTypeId             Int?      @map("PkgType")
+  entityUnit            String?   @map("EntityUnit") @db.VarChar(6)
+  description           String?   @map("Description") @db.VarChar(256)
+  comment               String?   @map("Comment") @db.Text
+  mustPreweigh          Int       @default(0) @map("MustPreweigh")
+  percentUnder          Float?    @map("PercentUnder")
+  percentOver           Float?    @map("PercentOver")
+  recipeDetailReference Int?      @map("RecipeDetailReference")
+  price                 Decimal?  @map("Price") @db.Money
+  datePromised          DateTime? @map("DatePromised")
+  dateUpdated           DateTime? @map("DateUpdated")
+  reference             String?   @map("Reference") @db.VarChar(20)
+  tag                   String?   @map("Tag") @db.VarChar(20)
+  isOpen                Boolean?  @map("IsOpen")
+  discarded             Boolean?  @map("Discarded")
+  inactive              Boolean?  @map("Inactive")
+  version               Int?      @map("Version")
+
+  @@index([ordrId])
+  @@index([itemId])
+  @@index([parentId])
+  @@index([sublotId])
+  @@index([lot])
+  @@map("OrdDetail")
+}
