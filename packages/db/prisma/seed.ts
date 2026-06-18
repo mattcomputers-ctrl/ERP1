@@ -18,6 +18,8 @@ const BASELINE_PROGRAMS = [
   { key: 'admin.securedItems', name: 'Secured Items', folder: 'Administration' },
   { key: 'admin.audit', name: 'Audit Log', folder: 'Administration' },
   { key: 'admin.sessions', name: 'Active Sessions', folder: 'Administration' },
+  { key: 'master.entities', name: 'Entities', folder: 'Master Tables' },
+  { key: 'master.items', name: 'Items', folder: 'Master Tables' },
 ];
 
 async function main() {

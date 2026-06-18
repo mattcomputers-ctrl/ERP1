@@ -3,6 +3,8 @@ import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { type Me, useLogout, useMe } from './lib/auth';
 import { ChangePassword } from './pages/ChangePassword';
 import { Dashboard } from './pages/Dashboard';
+import { Entities } from './pages/Entities';
+import { Items } from './pages/Items';
 import { Login } from './pages/Login';
 import { Users } from './pages/Users';
 
@@ -33,6 +35,8 @@ export function App() {
     <Shell me={me}>
       <Routes>
         <Route path="/" element={<Dashboard />} />
+        <Route path="/entities" element={<Entities />} />
+        <Route path="/items" element={<Items />} />
         <Route path="/users" element={<Users />} />
         <Route path="/change-password" element={<ChangePassword />} />
         <Route path="*" element={<Navigate to="/" replace />} />
@@ -46,6 +50,8 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
   const loc = useLocation();
   const nav = [
     { to: '/', label: 'Dashboard' },
+    { to: '/entities', label: 'Entities' },
+    { to: '/items', label: 'Items' },
     { to: '/users', label: 'Users' },
   ];
 

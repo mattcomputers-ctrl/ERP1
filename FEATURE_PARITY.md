@@ -22,16 +22,16 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Supervisor override / approve-on-behalf | ⬜ | Brief §5 priority |
 | Audit trail (field-level, append-only, hash-chained) | ✅ | Live + `verifyChain` confirmed; advisory-lock serialized; atomic with mutations |
 | Electronic-signature ledger | 🟡 | Table/model built; capture flow (reason/sig/witness UI) pending |
-| Reusable filterable/exportable grid (set-viewer platform) | ⬜ | One component powers ~60 viewers |
+| Reusable filterable/exportable grid (set-viewer platform) | ✅ | DataGrid: search/sort/paginate/CSV export; powers all module lists |
 | Import/sync engine + reconciliation report | ⬜ | Log-driven incremental (Schema Report §9) |
 
 ## 1. Master data (UG ch.2)
 | Feature | Status | Notes |
 |---|---|---|
-| Items (incl. names, packages, packaging prototypes, services) | ⬜ | `Item` Context-typed |
+| Items (incl. names, packages, packaging prototypes, services) | 🟡 | Item core list/search/filter/create/edit (Context-typed); satellites pending |
 | Item chemical/safety, custom, components, units, tests, kits | ⬜ | `ItemChemical`/`ItemCustom`/`ItemComponent`/`ItemUnit`/`ItemTest` |
-| Suppliers & Manufacturers | ⬜ | `Entity` role flags |
-| Customers & Ship-Tos | ⬜ | `Entity` IsBillTo/IsShipTo |
+| Suppliers & Manufacturers | 🟡 | `Entity` role flags; list/search/create/edit |
+| Customers & Ship-Tos | 🟡 | `Entity` IsBillTo/IsShipTo; in Entities module |
 | Salesmen, Ship Via | ⬜ | |
 | Warehouses & Labs | ⬜ | |
 | Pricing (price versions & price lists) | ⬜ | `PriceVersion`/`PriceDetail` |

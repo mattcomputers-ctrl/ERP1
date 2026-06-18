@@ -248,3 +248,184 @@ model ESignature {
   @@index([masterTable, masterId])
   @@map("esignature")
 }
+
+// ===========================================================================
+// Master data — mirrors legacy Mar-Kov table/column names (PascalCase via
+// @map / @@map) for 1:1 import and tool compatibility. Names/addresses live in
+// Address, linked polymorphically through AddressReference. (Modern audit/auth
+// tables above intentionally use snake_case; domain tables mirror the legacy.)
+// `createdAt`/`updatedAt` are additive (legacy has none) for new-record tracking.
+// ===========================================================================
+
+model Entity {
+  id             Int      @id @default(autoincrement()) @map("Entity")
+  entityCode     String   @unique @map("EntityCode") @db.VarChar(20)
+  version        Int?     @map("Version")
+  prototype      Boolean? @map("Prototype")
+  parentId       Int?     @map("Parent")
+  currency       String?  @map("Currency") @db.VarChar(10)
+  theirCode      String?  @map("TheirCode") @db.VarChar(20)
+  inactive       Boolean? @map("Inactive")
+  leadTime       Int?     @map("LeadTime")
+  reviewDate     DateTime? @map("ReviewDate")
+  shipViaId      Int?     @map("ShipVia")
+  terms          String?  @map("Terms") @db.VarChar(20)
+  incoterms      String?  @map("Incoterms") @db.VarChar(20)
+  isSupplier     Boolean? @map("IsSupplier")
+  isManufacturer Boolean? @map("IsManufacturer")
+  isSite         Boolean? @map("IsSite")
+  isLab          Boolean? @map("IsLab")
+  isWarehouse    Boolean? @map("IsWarehouse")
+  isShipVia      Boolean? @map("IsShipVia")
+  isInstallation Boolean? @map("IsInstallation")
+  isCMS          Boolean? @map("IsCMS")
+  isShipTo       Boolean? @map("IsShipTo")
+  isBillTo       Boolean? @map("IsBillTo")
+  isRetain       Boolean? @map("IsRetain")
+  isPriceList    Boolean? @map("IsPriceList")
+  isSalesman     Boolean? @map("IsSalesman")
+  isDivision     Boolean  @default(false) @map("IsDivision")
+  salesmanId     Int?     @map("Salesman")
+  priceListId    Int?     @map("PriceList")
+  territory      String?  @map("Territory") @db.VarChar(20)
+  poRequired     Boolean? @map("PoRequired")
+  doNotShip      Boolean? @map("DoNotShip")
+  sendMsds       Boolean? @map("SendMSDS")
+  sendCofA       Boolean? @map("SendCertificateOfAnalysis")
+  tax1Group      String?  @map("Tax1Group") @db.VarChar(20)
+  tax2Group      String?  @map("Tax2Group") @db.VarChar(20)
+  tax3Group      String?  @map("Tax3Group") @db.VarChar(20)
+  creditLimit    Decimal? @map("CreditLimit") @db.Money
+  group          String?  @map("Group") @db.VarChar(50)
+  buyer          String?  @map("Buyer") @db.VarChar(10)
+  customerType   String?  @map("CustomerType") @db.VarChar(20)
+  language       Int?     @map("Language") @db.SmallInt
+  processingType String?  @map("ProcessingType") @db.VarChar(10)
+  noBill         Boolean? @map("NoBill")
+  context        String   @default("") @map("Context") @db.VarChar(41)
+  createdAt      DateTime @default(now()) @map("erp1_created_at")
+  updatedAt      DateTime @updatedAt @map("erp1_updated_at")
+
+  @@index([isSupplier])
+  @@index([isBillTo])
+  @@index([isShipTo])
+  @@map("Entity")
+}
+
+model Address {
+  id               Int      @id @default(autoincrement()) @map("Address")
+  name             String   @map("Name") @db.VarChar(255)
+  department       String?  @map("Department") @db.VarChar(20)
+  addrLine1        String?  @map("AddrLine1") @db.VarChar(255)
+  addrLine2        String?  @map("AddrLine2") @db.VarChar(255)
+  addrLine3        String?  @map("AddrLine3") @db.VarChar(255)
+  city             String?  @map("City") @db.VarChar(255)
+  state            String?  @map("State") @db.Char(2)
+  zipCode          String?  @map("ZipCode") @db.VarChar(20)
+  country          String?  @map("Country") @db.VarChar(2)
+  contact          String?  @map("Contact") @db.VarChar(255)
+  email            String?  @map("Email") @db.VarChar(100)
+  fax              String?  @map("Fax") @db.VarChar(30)
+  phone            String?  @map("Phone") @db.VarChar(30)
+  stateName        String?  @map("StateName") @db.VarChar(10)
+  countryName      String?  @map("CountryName") @db.VarChar(20)
+  url              String?  @map("URL") @db.VarChar(1000)
+  residential      Boolean? @map("Residential")
+  addressCheckSum  Int?     @map("AddressCheckSum")
+  emergencyContact String?  @map("EmergencyContact") @db.Text
+
+  @@map("Address")
+}
+
+// Polymorphic link: an Address attached to any record (TableName + TableID),
+// labelled by Reference (e.g. "Main", "Ship-To", "Bill-To").
+model AddressReference {
+  address   Int    @map("Address")
+  tableId   Int    @map("TableID")
+  tableName String @map("TableName") @db.VarChar(128)
+  reference String @map("Reference") @db.VarChar(128)
+
+  @@id([address, tableName, tableId, reference])
+  @@index([tableName, tableId])
+  @@map("AddressReference")
+}
+
+model Unit {
+  code         String   @id @map("Unit") @db.VarChar(6)
+  baseUnit     String?  @map("BaseUnit") @db.VarChar(6)
+  baseQty      Float?   @map("BaseQty")
+  description  String   @map("Description") @db.VarChar(256)
+  version      Int?     @map("Version")
+  category     String   @default("") @map("Category") @db.VarChar(6)
+  systemUnit   Boolean? @map("SystemUnit")
+  showOnScreen Boolean? @map("ShowOnScreen")
+  context      String   @default("") @map("Context") @db.VarChar(6)
+
+  @@map("Unit")
+}
+
+model Currency {
+  code        String  @id @map("Currency") @db.VarChar(10)
+  description String? @map("Description") @db.VarChar(256)
+  version     Int?    @map("Version")
+
+  @@map("Currency")
+}
+
+model Terms {
+  code        String  @id @map("Terms") @db.VarChar(20)
+  description String? @map("Description") @db.VarChar(256)
+  version     Int?    @map("Version")
+
+  @@map("Terms")
+}
+
+model Item {
+  id                    Int      @id @default(autoincrement()) @map("Item")
+  itemCode              String   @unique @map("ItemCode") @db.VarChar(30)
+  version               Int?     @map("Version")
+  prototype             Boolean? @map("Prototype")
+  description           String?  @map("Description") @db.VarChar(256)
+  altDescription        String?  @map("AltDescription") @db.VarChar(256)
+  context               String?  @map("Context") @db.VarChar(32)
+  unit                  String?  @map("Unit") @db.VarChar(6)
+  pkgTypeId             Int?     @map("PkgType")
+  qtyPerPackage         Float?   @map("QtyPerPackage")
+  outerTypeId           Int?     @map("OuterType")
+  pkgPerOuter           Int?     @map("PkgPerOuter")
+  lotRequired           Int?     @map("LotRequired") @db.SmallInt
+  replacedById          Int?     @map("ReplacedBy")
+  ownerId               Int?     @map("Owner")
+  status                String?  @map("Status") @db.VarChar(4)
+  retestPeriod          Int?     @map("RetestPeriod")
+  maximumLife           Int?     @map("MaximumLife")
+  specificGravity       Float?   @map("SpecificGravity")
+  noExpiry              Boolean? @map("NoExpiry")
+  securityGroup         String?  @map("SecurityGroup") @db.VarChar(20)
+  standardCost          Decimal? @map("StandardCost") @db.Money
+  standardPurchasePrice Decimal? @map("StandardPurchasePrice") @db.Money
+  standardCurrency      String?  @map("StandardCurrency") @db.VarChar(10)
+  purchasePrice         Decimal? @map("PurchasePrice") @db.Money
+  salesPrice            Decimal? @map("SalesPrice") @db.Money
+  targetPrice           Decimal? @map("TargetPrice") @db.Money
+  replacementCost       Decimal? @map("ReplacementCost") @db.Money
+  supplierId            Int?     @map("Supplier")
+  glGroup               String?  @map("GLGroup") @db.VarChar(20)
+  abcCode               String?  @map("ABCCode") @db.VarChar(10)
+  tax1Group             String?  @map("Tax1Group") @db.VarChar(20)
+  isKit                 Boolean? @map("IsKit")
+  controlledSubstance   Boolean? @map("ControlledSubstance")
+  certifiedOrganic      Boolean? @map("CertifiedOrganic")
+  weight                Float?   @map("Weight")
+  weightUnit            String?  @map("WeightUnit") @db.VarChar(6)
+  serviceGroup          String?  @map("ServiceGroup") @db.VarChar(20)
+  service               String?  @map("Service") @db.VarChar(10)
+  comment               String?  @map("Comment") @db.Text
+  createdAt             DateTime @default(now()) @map("erp1_created_at")
+  updatedAt             DateTime @updatedAt @map("erp1_updated_at")
+
+  @@index([context])
+  @@index([status])
+  @@index([controlledSubstance])
+  @@map("Item")
+}
