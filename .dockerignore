@@ -1,0 +1,14 @@
+**/node_modules
+**/dist
+**/build
+**/.turbo
+**/coverage
+.git
+.gitignore
+.env
+.env.*
+secrets/
+*.log
+reference/
+docs/
+*.md

@@ -1,0 +1,34 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+.turbo/
+coverage/
+
+# environment & secrets (NEVER commit real secrets)
+.env
+.env.*
+!.env.example
+secrets/
+
+# prisma generated client
+packages/db/generated/
+
+# editor / OS
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# Proprietary vendor reference material — kept LOCAL ONLY, never published.
+# (Mar-Kov CMS User Guide & release notes are vendor-confidential.)
+/reference/*.pdf
+/reference/_*.txt
+
+# Discovery scratch / extracted vendor text & build logs (local only).
+/docs/discovery/
+.github/workflows/

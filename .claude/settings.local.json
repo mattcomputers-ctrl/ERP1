@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__mssql__execute_sql",
+      "PowerShell(& \"C:\\\\Program Files\\\\Git\\\\mingw64\\\\bin\\\\pdftotext.exe\" -f 1 -l 20 -layout \"C:\\\\Claude Sessions\\\\ERP1\\\\reference\\\\CMS User Guide - Mar-Kov.pdf\" \"C:\\\\Claude Sessions\\\\ERP1\\\\reference\\\\_toc_extract.txt\")"
+    ]
+  }
+}

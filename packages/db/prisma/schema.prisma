@@ -1,0 +1,250 @@
+// ERP1 database schema — PostgreSQL.
+//
+// This file covers the FOUNDATION increment: the security, session, and audit
+// model (a clean, modern reimplementation of the legacy Mar-Kov CMS
+// Users/Roles/Secured-Items/Response-Levels/E-signature design — see
+// docs/SCHEMA_REPORT.md §7). Business-domain tables (Entity, Item, Ordr,
+// Lot/Sublot, Inventory, Recipe, etc.) are added in later increments and will
+// mirror the legacy schema names for parity.
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../generated/client"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  INVITED
+  ACTIVE
+  DISABLED
+  LOCKED
+}
+
+model User {
+  id                 String     @id @default(uuid())
+  email              String     @unique
+  username           String?    @unique
+  displayName        String
+  status             UserStatus @default(ACTIVE)
+  passwordHash       String? // Argon2id; null for SSO-only users
+  mustChangePassword Boolean    @default(false)
+  mfaEnabled         Boolean    @default(false)
+  mfaSecret          String? // TOTP secret (encrypted at rest in a later increment)
+  ssoSubject         String?    @unique // OIDC subject for SSO users
+  lastLoginAt        DateTime?
+  failedLoginCount   Int        @default(0)
+  lockedUntil        DateTime?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  roles     UserRole[]
+  sessions  Session[]
+  auditLogs AuditLog[] @relation("AuditActor")
+
+  @@map("users")
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  name        String
+  description String?
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users              UserRole[]
+  programs           RoleProgram[]
+  securedItems       RoleSecuredItem[]
+  assignableParents  AssignableRole[]  @relation("ParentRole")
+  assignableChildren AssignableRole[]  @relation("ChildRole")
+
+  @@map("roles")
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+// Delegated administration: which roles a role is permitted to assign.
+model AssignableRole {
+  id           String @id @default(uuid())
+  parentRoleId String
+  childRoleId  String
+  parentRole   Role   @relation("ParentRole", fields: [parentRoleId], references: [id], onDelete: Cascade)
+  childRole    Role   @relation("ChildRole", fields: [childRoleId], references: [id], onDelete: Cascade)
+
+  @@unique([parentRoleId, childRoleId])
+  @@map("assignable_roles")
+}
+
+// Programs = screens/modules a role may run (legacy RoleProgram/Program).
+model Program {
+  id        String        @id @default(uuid())
+  key       String        @unique // e.g. "inventory.adjust"
+  name      String
+  folder    String? // menu grouping (legacy Program.Folder)
+  createdAt DateTime      @default(now())
+  roles     RoleProgram[]
+
+  @@map("programs")
+}
+
+model RoleProgram {
+  roleId    String
+  programId String
+  allow     Boolean @default(true)
+  role      Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  program   Program @relation(fields: [programId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, programId])
+  @@map("role_programs")
+}
+
+// Secured items = granular field/table/action/event controls with response
+// levels (reason / signature / witness). Legacy SecuredItem.
+model SecuredItem {
+  id               String   @id @default(uuid())
+  key              String   @unique // stable permission key, e.g. "sublot.disposition"
+  dataset          String?
+  tableName        String?
+  fieldName        String?
+  method           String?
+  description      String?
+  requireReason    Boolean  @default(false)
+  requireSignature Boolean  @default(false)
+  requireWitness   Boolean  @default(false)
+  disabled         Boolean  @default(false)
+  securityGroupId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  securityGroup SecurityGroup?    @relation(fields: [securityGroupId], references: [id])
+  roles         RoleSecuredItem[]
+
+  @@map("secured_items")
+}
+
+model RoleSecuredItem {
+  roleId        String
+  securedItemId String
+  allow         Boolean     @default(false)
+  allowWitness  Boolean     @default(false) // may act as witness only
+  role          Role        @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  securedItem   SecuredItem @relation(fields: [securedItemId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, securedItemId])
+  @@map("role_secured_items")
+}
+
+// Row-level data segregation tag (legacy SecurityGroup).
+model SecurityGroup {
+  id           String        @id @default(uuid())
+  code         String        @unique
+  name         String
+  securedItems SecuredItem[]
+
+  @@map("security_groups")
+}
+
+// Server-side session record (also held in Redis). Gives a visible,
+// revocable list of active sessions (brief §5).
+model Session {
+  id         String    @id // session id
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  expiresAt  DateTime
+  ip         String?
+  userAgent  String?
+  revokedAt  DateTime?
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Audit trail & electronic signatures (append-only, hash-chained)
+// ---------------------------------------------------------------------------
+
+// One row per logged operation (legacy Log). Append-only + tamper-evident:
+// `hash` = H(prevHash ‖ canonical(this row)). The app's runtime DB role is
+// granted no UPDATE/DELETE on audit tables (enforced in a later migration).
+model AuditLog {
+  id          BigInt   @id @default(autoincrement())
+  at          DateTime @default(now())
+  actorUserId String?
+  actorLabel  String? // denormalized actor identity at time of action
+  action      String // e.g. "user.create"
+  program     String?
+  workstation String?
+  ip          String?
+  resultCode  Int      @default(0)
+  summary     String?
+  prevHash    String?
+  hash        String
+
+  actor      User?              @relation("AuditActor", fields: [actorUserId], references: [id])
+  changes    AuditFieldChange[]
+  signatures ESignature[]
+
+  @@index([at])
+  @@index([action])
+  @@map("audit_log")
+}
+
+// Field-level before/after (legacy LogResult).
+model AuditFieldChange {
+  id         BigInt   @id @default(autoincrement())
+  auditLogId BigInt
+  auditLog   AuditLog @relation(fields: [auditLogId], references: [id], onDelete: Cascade)
+  tableName  String
+  recordId   String?
+  fieldName  String
+  oldValue   String?
+  newValue   String?
+
+  @@index([tableName, recordId])
+  @@map("audit_field_change")
+}
+
+// Electronic-signature ledger (legacy LogSecuredItem). Captures user + witness
+// identities, explanations, signing meaning, and the affected master record.
+model ESignature {
+  id                 BigInt    @id @default(autoincrement())
+  auditLogId         BigInt?
+  securedItemKey     String
+  meaning            String?
+  userId             String
+  userLabel          String
+  userExplanation    String?
+  witnessUserId      String?
+  witnessLabel       String?
+  witnessExplanation String?
+  masterTable        String?
+  masterId           String?
+  at                 DateTime  @default(now())
+  prevHash           String?
+  hash               String
+
+  auditLog AuditLog? @relation(fields: [auditLogId], references: [id])
+
+  @@index([masterTable, masterId])
+  @@map("esignature")
+}

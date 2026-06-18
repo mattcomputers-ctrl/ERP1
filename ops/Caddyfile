@@ -1,0 +1,27 @@
+{
+	admin off
+	auto_https off
+}
+
+# Single entrypoint: serve the SPA and reverse-proxy the API under /api.
+:80 {
+	encode gzip
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy api:3000
+	}
+
+	# SPA fallback for client-side routing.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+}
