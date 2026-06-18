@@ -36,6 +36,20 @@ const BASELINE_PROGRAMS = [
   { key: 'admin.config', name: 'Configuration', folder: 'Administration' },
 ];
 
+// Secured items = granular actions with a response level (reason / signature /
+// witness). Created with sensible defaults; the require* flags are NOT reset on
+// re-seed so operator tuning survives upgrades. Order completion requires an
+// electronic signature + reason out of the box (witness optional).
+const SECURED_ITEMS = [
+  {
+    key: 'order.complete',
+    description: 'Sign-off on completing a batch order',
+    requireReason: true,
+    requireSignature: true,
+    requireWitness: false,
+  },
+];
+
 // Default application settings (seeded only if absent — never overwrite an
 // operator-changed value). Foundation for the Configuration module.
 const DEFAULT_SETTINGS = [
@@ -72,6 +86,22 @@ async function main() {
       where: { roleId_programId: { roleId: adminRole.id, programId: prog.id } },
       update: { allow: true },
       create: { roleId: adminRole.id, programId: prog.id, allow: true },
+    });
+  }
+
+  // Secured items — create with defaults; on re-seed only refresh the description
+  // (preserve operator-tuned require* flags). Grant the Administrator role both
+  // the action and the right to witness it.
+  for (const si of SECURED_ITEMS) {
+    const item = await prisma.securedItem.upsert({
+      where: { key: si.key },
+      update: { description: si.description },
+      create: si,
+    });
+    await prisma.roleSecuredItem.upsert({
+      where: { roleId_securedItemId: { roleId: adminRole.id, securedItemId: item.id } },
+      update: { allow: true, allowWitness: true },
+      create: { roleId: adminRole.id, securedItemId: item.id, allow: true, allowWitness: true },
     });
   }
 

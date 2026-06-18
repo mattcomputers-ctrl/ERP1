@@ -3,6 +3,7 @@ import { type ReactNode, useState } from 'react';
 import { DataGrid, type GridColumn } from '../components/DataGrid';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
+import { useMe } from '../lib/auth';
 
 const lifeState = (status: string | null) => (status && status.trim() ? status : 'NST');
 const STATUS_LABEL: Record<string, string> = {
@@ -119,12 +120,10 @@ export function Orders() {
   });
 
   const qc = useQueryClient();
-  const [batchSize, setBatchSize] = useState('');
   const [reason, setReason] = useState('');
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['order', selected] });
     qc.invalidateQueries({ queryKey: ['orders'] });
-    setBatchSize('');
     setReason('');
   };
   const action = useMutation({
@@ -238,11 +237,7 @@ export function Orders() {
               <ActionButton pending={action.isPending} onClick={() => action.mutate({ id: detail.data!.id, verb: 'release' })}>Release</ActionButton>
             )}
             {lifeState(detail.data.status) === 'RLS' && (
-              <>
-                <input value={batchSize} onChange={(e) => setBatchSize(e.target.value)} placeholder="Actual batch size" inputMode="decimal" className="w-32 rounded border border-slate-300 px-2 py-1" />
-                <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" className="w-48 rounded border border-slate-300 px-2 py-1" />
-                <ActionButton pending={action.isPending} onClick={() => action.mutate({ id: detail.data!.id, verb: 'complete', body: { actualBatchSize: batchSize ? Number(batchSize) : undefined, reason: reason || undefined } })}>Complete</ActionButton>
-              </>
+              <CompleteControls orderId={detail.data.id} onDone={refresh} />
             )}
             {lifeState(detail.data.status) === 'CMP' && (
               <>
@@ -402,6 +397,80 @@ function Detail({ label, value }: { label: string; value: string | null | undefi
     <div>
       <dt className="text-xs uppercase tracking-wide text-slate-400">{label}</dt>
       <dd className="text-slate-800">{value || <span className="text-slate-300">—</span>}</dd>
+    </div>
+  );
+}
+
+// Complete an order with the electronic signature its secured item requires:
+// re-auth the signer's password (+ an optional/required second-person witness),
+// plus the actual batch size and reason. Requirements are fetched so the form
+// only asks for what's needed.
+function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => void }) {
+  const me = useMe();
+  // Key by user: signature/witness requirements are resolved per-user server-side.
+  const req = useQuery({
+    queryKey: ['complete-requirement', me.data?.id],
+    queryFn: () =>
+      api.get<{ requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>(
+        '/orders/complete-requirement',
+      ),
+  });
+  const [batchSize, setBatchSize] = useState('');
+  const [reason, setReason] = useState('');
+  const [password, setPassword] = useState('');
+  const [showWitness, setShowWitness] = useState(false);
+  const [witnessEmail, setWitnessEmail] = useState('');
+  const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessExplanation, setWitnessExplanation] = useState('');
+
+  const r = req.data;
+  const sig = !!r?.requireSignature;
+  const reasonRequired = !!r?.requireReason;
+  const witnessRequired = !!r?.requireWitness;
+  const witnessOpen = witnessRequired || showWitness;
+
+  const m = useMutation({
+    mutationFn: () =>
+      api.post(`/orders/${orderId}/complete`, {
+        actualBatchSize: batchSize ? Number(batchSize) : undefined,
+        reason: reason || undefined,
+        password: password || undefined,
+        witnessEmail: witnessOpen && witnessEmail ? witnessEmail : undefined,
+        witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
+        witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
+      }),
+    onSuccess: onDone,
+  });
+
+  // Mirror the server's requirements so the button can't be clicked into a 400.
+  const canSubmit =
+    !req.isLoading &&
+    (!reasonRequired || !!reason.trim()) &&
+    (!sig || !!password) &&
+    (!witnessRequired || (!!witnessEmail && !!witnessPassword));
+
+  if (req.isLoading) return <span className="text-sm text-slate-400">Loading…</span>;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {req.isError && <span className="text-sm text-red-600">Couldn’t load signing requirements.</span>}
+      <input value={batchSize} onChange={(e) => setBatchSize(e.target.value)} type="number" min="0" step="any" placeholder="Actual batch size" className="w-36 rounded border border-slate-300 px-2 py-1" />
+      <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={reasonRequired ? 'Reason (required)' : 'Reason (optional)'} className="w-48 rounded border border-slate-300 px-2 py-1" />
+      {sig && (
+        <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password (sign)" className="w-44 rounded border border-slate-300 px-2 py-1" />
+      )}
+      {sig && witnessOpen && (
+        <>
+          <input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} placeholder={`Witness email${witnessRequired ? ' (required)' : ''}`} className="w-48 rounded border border-slate-300 px-2 py-1" />
+          <input type="password" autoComplete="off" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} placeholder="Witness password" className="w-44 rounded border border-slate-300 px-2 py-1" />
+          <input value={witnessExplanation} onChange={(e) => setWitnessExplanation(e.target.value)} maxLength={500} placeholder="Witness note (optional)" className="w-48 rounded border border-slate-300 px-2 py-1" />
+        </>
+      )}
+      {sig && !witnessRequired && !showWitness && (
+        <button type="button" onClick={() => setShowWitness(true)} className="text-xs text-indigo-600 hover:underline">+ add witness</button>
+      )}
+      <ActionButton pending={m.isPending || !canSubmit} onClick={() => m.mutate()}>Complete</ActionButton>
+      {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
     </div>
   );
 }

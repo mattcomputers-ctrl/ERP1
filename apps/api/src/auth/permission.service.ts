@@ -46,6 +46,18 @@ export class PermissionService {
     };
   }
 
+  /** Whether a user holds a role permitted to WITNESS the given secured item. */
+  async canWitness(userId: string, key: string): Promise<boolean> {
+    const count = await this.prisma.roleSecuredItem.count({
+      where: {
+        allowWitness: true,
+        securedItem: { key },
+        role: { users: { some: { userId } } },
+      },
+    });
+    return count > 0;
+  }
+
   async listProgramsForUser(userId: string): Promise<string[]> {
     const rows = await this.prisma.roleProgram.findMany({
       where: { allow: true, role: { users: { some: { userId } } } },

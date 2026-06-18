@@ -21,7 +21,7 @@ function getDummyHash(): Promise<string> {
 export class AuthService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async validateUser(email: string, password: string) {
+  async validateUser(email: string, password: string, updateLastLogin = true) {
     const user = await this.prisma.user.findUnique({ where: { email } });
 
     if (!user || !user.passwordHash) {
@@ -29,6 +29,32 @@ export class AuthService {
       await verify(await getDummyHash(), password).catch(() => false);
       throw new UnauthorizedException('Invalid credentials');
     }
+    return this.verifyAndTrack(user, password, updateLastLogin);
+  }
+
+  /**
+   * Re-authenticate an already-identified user by password (e-signature sign-off
+   * / step-up). Same lockout + tracking as login, but does NOT advance
+   * lastLoginAt — signing is not logging in. The caller supplies the user id
+   * (e.g. the current session user).
+   */
+  async verifyPasswordById(userId: string, password: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.passwordHash) {
+      // Equalize timing with the verify path for defensive consistency, even
+      // though userId comes from the session rather than user input.
+      await verify(await getDummyHash(), password).catch(() => false);
+      throw new UnauthorizedException('Invalid credentials');
+    }
+    return this.verifyAndTrack(user, password, false);
+  }
+
+  /** Verify a password and apply the shared lockout/tracking side effects. */
+  private async verifyAndTrack(
+    user: { id: string; status: string; passwordHash: string | null; lockedUntil: Date | null; failedLoginCount: number },
+    password: string,
+    updateLastLogin = true,
+  ) {
     if (user.status === 'DISABLED') {
       throw new UnauthorizedException('Account is disabled');
     }
@@ -40,7 +66,7 @@ export class AuthService {
     const lockExpired = !!user.lockedUntil && user.lockedUntil <= new Date();
     const priorFailed = lockExpired ? 0 : user.failedLoginCount;
 
-    const ok = await verify(user.passwordHash, password).catch(() => false);
+    const ok = await verify(user.passwordHash as string, password).catch(() => false);
     if (!ok) {
       const failed = priorFailed + 1;
       await this.prisma.user.update({
@@ -54,11 +80,14 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    await this.prisma.user.update({
+    return this.prisma.user.update({
       where: { id: user.id },
-      data: { failedLoginCount: 0, lockedUntil: null, lastLoginAt: new Date() },
+      data: {
+        failedLoginCount: 0,
+        lockedUntil: null,
+        ...(updateLastLogin ? { lastLoginAt: new Date() } : {}),
+      },
     });
-    return user;
   }
 
   hashPassword(plain: string): Promise<string> {

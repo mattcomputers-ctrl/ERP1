@@ -33,6 +33,13 @@ export class OrdersController {
     return this.orders.recipeOptions(q);
   }
 
+  // E-signature requirements for completing an order (drives the complete form).
+  @Get('complete-requirement')
+  @RequireProgram('orders.complete')
+  completeRequirement(@CurrentUser() actor: Actor) {
+    return this.orders.completeRequirement(actor.id);
+  }
+
   @Get(':id')
   get(@Param('id', ParseIntPipe) id: number) {
     return this.orders.get(id);

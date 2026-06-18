@@ -21,7 +21,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Approvals & Workflow chains | ⬜ | `Workflow` 0 rows today, but build the engine |
 | Supervisor override / approve-on-behalf | ⬜ | Brief §5 priority |
 | Audit trail (field-level, append-only, hash-chained) | ✅ | Live + `verifyChain` confirmed; advisory-lock serialized; atomic with mutations. **Web Audit viewer** added: searchable trail with expandable field-level diffs + one-click chain-integrity verification (now populated by the order-lifecycle actions) |
-| Electronic-signature ledger | 🟡 | Table/model built; capture flow (reason/sig/witness UI) pending |
+| Electronic-signature ledger | 🟡 | **Capture flow live**: append-only hash-chained `ESignature` ledger (`ESignatureService`, own advisory-lock + `verifyChain`), wired into order **Complete** — the signer re-enters their password (Argon2 re-auth, lockout-tracked) and an optional second-person **witness** co-signs; the signature commits atomically with the status change + audit row. Driven by the `order.complete` **secured item** (`requireReason`/`requireSignature`/`requireWitness`, operator-configurable, seeded). Ledger viewer + integrity check at `GET /audit/signatures[/verify]`. MFA/TOTP factor + signing on other actions pending |
 | Reusable filterable/exportable grid (set-viewer platform) | ✅ | DataGrid: search/sort/paginate/CSV export; powers all module lists |
 | Import/sync engine + reconciliation report | ⬜ | Log-driven incremental (Schema Report §9) |
 
@@ -77,7 +77,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 |---|---|---|
 | Create orders from recipes; import orders | 🟡 | `Ordr`/`OrdDetail` mirrored + imported (75K/505K rows); unified **Orders browser** (type filter PO/MFBA/MFPP/SH, search, hold/open filters) with full line detail + party/item/recipe decoration. **Native batch-order creation now live**: pick an RMBA recipe + batch size on the Orders page → `POST /orders` (program `orders.create`) scales every `RecipeDetail` line into `OrdDetail` (UI ingredients + PK product × batch size; structural/instruction lines copied), seeds the product's `ItemTest` OnProduction specs onto an IPT line as `OrdDetailTest` (so the batch ticket's QC section is populated), born Not-started and flowing straight into batch-sheet → release → complete → close. Atomic hash-chained audit; native ids in a high range (≥1e9) so a later legacy import can't clobber them. Multi-batch / order edits / live execution pending |
 | Release, specify packouts, print batch sheets | 🟡 | **Batch ticket** reconstructed to match the plant's real paper format (validated field-for-field vs their PDF on order 189170): header (Formula#/recipe, Batch & Required dates, product + total weight, Batch Order, This Lot, Last Lot=prior lot of same item, Customer), Procedure (raw-material lines w/ Grams\|Pounds\|Done + inline instructions), blank Batch Additions, Quality Control (Test\|Specification from `OrdDetailTest` Min/Max\|Result), blank Packaging, and QC'd/Weighed/Mixed/Packed/Closed-by sign-offs. Server-side `GET /orders/:id/batch-sheet`. Order release/complete lifecycle pending |
-| Complete/close with workflow approvals | 🟡 | **Order lifecycle** live: Release (NST→RLS) / Complete (RLS→CMP, records actual batch size + reason) / Close (CMP→CLS), each a mutating endpoint with its own program (`orders.release`/`.complete`/`.close`), invalid-transition guards, and **atomic hash-chained audit** (validated end-to-end on order 189299). Workflow-approval chains + e-signature on completion pending |
+| Complete/close with workflow approvals | 🟡 | **Order lifecycle** live: Release (NST→RLS) / Complete (RLS→CMP, records actual batch size + reason) / Close (CMP→CLS), each a mutating endpoint with its own program (`orders.release`/`.complete`/`.close`), invalid-transition guards, and **atomic hash-chained audit** (validated end-to-end on order 189299). **E-signature on Complete now enforced**: password re-auth (+ optional witness) → hash-chained `ESignature`, gated by the `order.complete` secured item; completion is blocked until signed. Multi-step workflow-approval chains still pending |
 | Material variance analysis; multi-batch | ⬜ | |
 | Full Batch Execution (preweigh, resources, procedure, release, express blend, packaging, reversing, yields, review, scale, auto next/scale) | ⬜ | |
 | Express Execution; batch testing | ⬜ | |
@@ -160,7 +160,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Feature | Status | Notes |
 |---|---|---|
 | Users, roles, secured items, response levels | ⬜ | |
-| Electronic signatures / witness, approvals, workflow | ⬜ | |
+| Electronic signatures / witness, approvals, workflow | 🟡 | E-signature capture (re-auth + optional witness → hash-chained ledger) live on order completion, driven by secured-item response levels; multi-step approval/workflow chains pending |
 
 ## 17. Notifications (UG ch.22)
 | Feature | Status | Notes |

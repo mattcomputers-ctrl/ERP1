@@ -1,7 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
 import { AuditService } from '../audit/audit.service';
+import { ESignatureService } from '../audit/esignature.service';
+import { AuthService } from '../auth/auth.service';
 import type { Actor } from '../auth/current-user.decorator';
+import { PermissionService } from '../auth/permission.service';
 import { buildList, type ListQuery } from '../common/list';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
@@ -24,6 +27,10 @@ const NATIVE_ORDER_LOCK_KEY = 906090906n;
 // Recipe-line contexts whose quantity scales with batch size (ingredients +
 // produced product); structural/instruction lines (INSTR/BA/UB/IPT) copy as-is.
 const SCALABLE_CONTEXTS = new Set(['UI', 'PK']);
+
+// Secured item governing order completion — its response level (reason /
+// signature / witness) is seeded and operator-configurable.
+const COMPLETE_SECURED_ITEM = 'order.complete';
 
 // Order lifecycle: Not started -> Released -> Completed -> Closed (legacy
 // Ordr.Status NST/RLS/CMP/CLS). A null/empty status is treated as Not started.
@@ -51,6 +58,9 @@ export class OrdersService {
     private readonly settings: SettingsService,
     private readonly audit: AuditService,
     private readonly party: PartyService,
+    private readonly auth: AuthService,
+    private readonly permissions: PermissionService,
+    private readonly esign: ESignatureService,
   ) {}
 
   async list(query: OrdersListQuery) {
@@ -504,9 +514,66 @@ export class OrdersService {
     });
   }
 
-  /** Complete an order, recording actual batch size/yield (Released -> Completed). */
+  /** The effective e-signature/reason requirements for completing an order. */
+  async completeRequirement(actorId: string) {
+    return this.completeRequirements(actorId);
+  }
+
+  /**
+   * Effective requirements for completing an order. Fail-safe: a missing or
+   * disabled `order.complete` secured item must NOT silently drop the control, so
+   * a signature + reason are required unless an *enabled* item explicitly relaxes
+   * them; a required witness implies a required signature.
+   */
+  private async completeRequirements(actorId: string) {
+    const item = await this.permissions.resolveSecuredItem(actorId, COMPLETE_SECURED_ITEM);
+    const requireWitness = item.requireWitness;
+    return {
+      requireReason: !item.exists || item.requireReason,
+      requireSignature: !item.exists || item.requireSignature || requireWitness,
+      requireWitness,
+    };
+  }
+
+  /**
+   * Complete an order, recording actual batch size/yield (Released -> Completed).
+   *
+   * Gated by the `order.complete` secured item: when it requires a signature the
+   * caller must re-enter their password (and, if the item requires a witness, a
+   * second authorized user must co-sign). Credentials are verified up front (the
+   * slow Argon2 path stays outside the transaction); then the status change, its
+   * audit row, and the hash-chained e-signature all commit atomically.
+   */
   async complete(id: number, dto: CompleteOrderDto, actor: Actor) {
     const order = await this.requireTransition(id, 'RLS', 'complete');
+
+    const req = await this.completeRequirements(actor.id);
+    if (req.requireReason && !dto.reason?.trim()) {
+      throw new BadRequestException('A reason is required to complete this order.');
+    }
+
+    // Verify signatures before opening the transaction (Argon2 verify is slow).
+    let witness: { id: string; label: string } | null = null;
+    if (req.requireSignature) {
+      if (!dto.password) {
+        throw new BadRequestException('Your password is required to sign this completion.');
+      }
+      await this.auth.verifyPasswordById(actor.id, dto.password);
+
+      if (req.requireWitness && !dto.witnessEmail) {
+        throw new BadRequestException('A witness signature is required to complete this order.');
+      }
+      if (dto.witnessEmail) {
+        if (!dto.witnessPassword) throw new BadRequestException('Witness password is required.');
+        const w = await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false);
+        if (w.id === actor.id) throw new BadRequestException('The witness must be a different user.');
+        if (!(await this.permissions.canWitness(w.id, COMPLETE_SECURED_ITEM))) {
+          throw new ForbiddenException('That user is not permitted to witness order completion.');
+        }
+        witness = { id: w.id, label: w.displayName };
+      }
+    }
+
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
       const u = await tx.ordr.update({
@@ -528,18 +595,42 @@ export class OrdersService {
           newValue: String(dto.actualBatchSize),
         });
       }
-      await this.audit.record(
+      const auditLog = await this.audit.record(
         {
           action: 'order.complete',
           actorUserId: actor.id,
           actorLabel: actor.label,
           program: 'orders.complete',
-          summary: `Order #${id} completed${dto.reason ? ` — ${dto.reason}` : ''}`,
+          summary:
+            `Order #${id} completed${dto.reason ? ` — ${dto.reason}` : ''}` +
+            (witness
+              ? ` (witnessed by ${witness.label}${dto.witnessExplanation ? `: ${dto.witnessExplanation}` : ''})`
+              : ''),
           changes,
         },
         tx,
       );
-      return { id, status: u.status };
+
+      if (req.requireSignature) {
+        await this.esign.sign(
+          {
+            securedItemKey: COMPLETE_SECURED_ITEM,
+            meaning: 'Order completion',
+            userId: actor.id,
+            userLabel: actor.label ?? actor.id,
+            userExplanation: dto.reason ?? null,
+            witnessUserId: witness?.id ?? null,
+            witnessLabel: witness?.label ?? null,
+            witnessExplanation: witness ? dto.witnessExplanation ?? null : null,
+            masterTable: 'Ordr',
+            masterId: String(id),
+            auditLogId: auditLog.id,
+          },
+          tx,
+        );
+      }
+
+      return { id, status: u.status, signed: req.requireSignature, witness: witness?.label ?? null };
     });
   }
 
