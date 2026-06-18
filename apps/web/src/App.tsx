@@ -13,6 +13,8 @@ import { Invoices } from './pages/Invoices';
 import { Items } from './pages/Items';
 import { Login } from './pages/Login';
 import { Orders } from './pages/Orders';
+import { PackingSlipDoc } from './pages/PackingSlipDoc';
+import { PackingSlips } from './pages/PackingSlips';
 import { Recall } from './pages/Recall';
 import { Recipes } from './pages/Recipes';
 import { Units } from './pages/Units';
@@ -53,6 +55,8 @@ export function App() {
         <Route path="/orders/:id/sheet" element={<BatchSheet />} />
         <Route path="/invoices" element={<Invoices />} />
         <Route path="/invoices/:id/print" element={<InvoiceDoc />} />
+        <Route path="/packing-slips" element={<PackingSlips />} />
+        <Route path="/packing-slips/:id/print" element={<PackingSlipDoc />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
@@ -76,6 +80,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/recipes', label: 'Recipes' },
     { to: '/orders', label: 'Orders' },
     { to: '/invoices', label: 'Invoices' },
+    { to: '/packing-slips', label: 'Packing Slips' },
     { to: '/inventory', label: 'Inventory' },
     { to: '/recall', label: 'Lot Trace' },
     { to: '/users', label: 'Users' },

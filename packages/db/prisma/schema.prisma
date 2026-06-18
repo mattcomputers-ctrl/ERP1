@@ -890,3 +890,44 @@ model TransDetail {
   @@index([ordDetailId])
   @@map("TransDetail")
 }
+
+// Transaction envelope (mirrors legacy). For shipping, the SH ChangeSet PK is
+// the printed PACKING SLIP number; it links the order, the invoice (Trans), and
+// (1:1 via ChangeSetShipment) the physical Waybill. See sales-docs-mapping.
+model ChangeSet {
+  id                 Int       @id @default(autoincrement()) @map("ChangeSet")
+  context            String?   @map("Context") @db.VarChar(32)
+  ordrId             Int?      @map("Ordr")
+  transId            Int?      @map("Trans")
+  ownerId            Int?      @map("Owner")
+  changeDate         DateTime? @map("ChangeDate")
+  poNumber           String?   @map("PoNumber") @db.VarChar(25)
+  reverseChangeSetId Int?      @map("ReverseChangeSet")
+
+  @@index([ordrId])
+  @@index([transId])
+  @@index([context])
+  @@map("ChangeSet")
+}
+
+// 1:1 bridge ChangeSet -> Waybill (mirrors legacy).
+model ChangeSetShipment {
+  changeSetId Int  @id @map("ChangeSet")
+  waybillId   Int? @map("Waybill")
+
+  @@index([waybillId])
+  @@map("ChangeSetShipment")
+}
+
+// Physical shipment (mirrors legacy).
+model Waybill {
+  id            Int       @id @default(autoincrement()) @map("Waybill")
+  ownerId       Int?      @map("Owner")
+  dateShipped   DateTime? @map("DateShipped")
+  status        String?   @map("Status") @db.VarChar(6)
+  shipViaId     Int?      @map("ShipVia")
+  poNumber      String?   @map("PoNumber") @db.VarChar(25)
+  trailerNumber String?   @map("TrailerNumber") @db.VarChar(20)
+
+  @@map("Waybill")
+}

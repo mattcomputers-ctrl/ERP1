@@ -108,7 +108,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 |---|---|---|
 | Shipping Orders (quotes, POS) | ⬜ | `Ordr` Context=`SH` |
 | Reserve/unreserve containers, shipping assemblies | ⬜ | |
-| Waybills, invoices | 🟡 | **Customer invoices** done: `Trans`(Context='CI')/`TransDetail` mirrored+imported (21,954 invoices); Invoices browser + a print-faithful **invoice document** (reconstructed field-for-field vs the real PDF N00126742 = $166.80 — header/terms/carrier/FOB, Bill-To/Ship-To/remit-to addresses, lines, computed amounts/backorder/totals). Reusable party/address resolver (`AddressReference`→`Address`, since `Entity` has no Name col). Waybills/packing slip + supplier `Bill` pending |
+| Waybills, invoices | 🟡 | **Customer invoices + packing slips** done. Invoices = `Trans`(CI)/`TransDetail` (21,954); packing slip = the SH `ChangeSet` PK → `ChangeSetShipment`→`Waybill` (17,784). Both have a browser + print-faithful document, reconstructed field-for-field vs the real PDFs (Invoice N00126742 = $166.80; Packing Slip 84768). Shared party/address resolver (`AddressReference`→`Address`). Supplier `Bill` + 3rd-party shipping integration pending |
 | Warehouse/lab transfers, bill-and-hold, returns/credits | ⬜ | |
 | Till reconciliation | ⬜ | |
 | 3rd-party shipping software integration | ⬜ | |

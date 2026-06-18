@@ -2,25 +2,19 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { buildList, type ListQuery } from '../common/list';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import { PartyService } from './party.service';
 
 // Customer invoices are Trans rows with these contexts (CI = customer invoice).
 const INVOICE_CONTEXTS = ['CI', 'TI'];
 const num = (v: unknown) => (v == null ? 0 : Number(v));
 const FOB: Record<string, string> = { Dest: 'DESTINATION', Orig: 'ORIGIN', PPD: 'PREPAID', COL: 'COLLECT' };
 
-interface Party {
-  entityCode: string | null;
-  name: string | null;
-  line1: string | null;
-  line2: string | null;
-  cityStateZip: string | null;
-}
-
 @Injectable()
 export class InvoicesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
+    private readonly party: PartyService,
   ) {}
 
   async list(query: ListQuery) {
@@ -51,7 +45,7 @@ export class InvoicesService {
     ]);
 
     const subtotalByTrans = await this.subtotals(rows.map((r) => r.id));
-    const parties = await this.resolveParties(rows.map((r) => r.billToId));
+    const parties = await this.party.resolve(rows.map((r) => r.billToId));
 
     return {
       rows: rows.map((r) => ({
@@ -99,7 +93,7 @@ export class InvoicesService {
     const [terms, currencyRow, parties] = await Promise.all([
       order?.terms ? this.prisma.terms.findUnique({ where: { code: order.terms }, select: { description: true } }) : Promise.resolve(null),
       trans.currency ? this.prisma.currency.findUnique({ where: { code: trans.currency }, select: { description: true } }) : Promise.resolve(null),
-      this.resolveParties([trans.billToId, order?.shipToId, trans.ownerId, trans.salesmanId, order?.shipViaId]),
+      this.party.resolve([trans.billToId, order?.shipToId, trans.ownerId, trans.salesmanId, order?.shipViaId]),
     ]);
 
     const docLines = lines.map((l) => {
@@ -160,50 +154,5 @@ export class InvoicesService {
     const m = new Map<number, number>();
     for (const l of lines) if (l.transId != null) m.set(l.transId, (m.get(l.transId) ?? 0) + num(l.qty) * num(l.price));
     return m;
-  }
-
-  /**
-   * Resolve entity ids to display name + address. Entity has NO Name column —
-   * the name and street address live on Address, linked via AddressReference
-   * (TableName='Entity'), with Reference='Address' preferred.
-   */
-  private async resolveParties(ids: (number | null | undefined)[]): Promise<Map<number, Party>> {
-    const distinct = [...new Set(ids.filter((v): v is number => v != null))];
-    if (!distinct.length) return new Map();
-
-    const [entities, refs] = await Promise.all([
-      this.prisma.entity.findMany({ where: { id: { in: distinct } }, select: { id: true, entityCode: true } }),
-      this.prisma.addressReference.findMany({
-        where: { tableName: 'Entity', tableId: { in: distinct } },
-        select: { tableId: true, address: true, reference: true },
-      }),
-    ]);
-    // Prefer the canonical 'Address' reference, else any.
-    const addrIdByEntity = new Map<number, number>();
-    for (const r of refs) {
-      if (!addrIdByEntity.has(r.tableId) || r.reference === 'Address') addrIdByEntity.set(r.tableId, r.address);
-    }
-    const addrIds = [...new Set([...addrIdByEntity.values()])];
-    const addresses = addrIds.length
-      ? await this.prisma.address.findMany({
-          where: { id: { in: addrIds } },
-          select: { id: true, name: true, addrLine1: true, addrLine2: true, city: true, state: true, zipCode: true },
-        })
-      : [];
-    const addrById = new Map(addresses.map((a) => [a.id, a]));
-
-    const out = new Map<number, Party>();
-    for (const e of entities) {
-      const a = addrIdByEntity.has(e.id) ? addrById.get(addrIdByEntity.get(e.id)!) : undefined;
-      const cityStateZip = a ? [a.city, a.state].filter(Boolean).join(', ') + (a.zipCode ? ` ${a.zipCode}` : '') : null;
-      out.set(e.id, {
-        entityCode: e.entityCode,
-        name: a?.name ?? e.entityCode,
-        line1: a?.addrLine1 ?? null,
-        line2: a?.addrLine2 ?? null,
-        cityStateZip: cityStateZip || null,
-      });
-    }
-    return out;
   }
 }

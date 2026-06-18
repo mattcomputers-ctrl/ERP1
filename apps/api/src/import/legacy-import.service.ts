@@ -259,6 +259,27 @@ const TABLES: TableSpec[] = [
       itemId: r.Item, qty: r.Qty, price: r.Price, unit: r.Unit,
     }),
   },
+  {
+    name: 'ChangeSet', legacyTable: 'dbo.ChangeSet', delegate: 'changeSet', idColumn: 'ChangeSet',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.ChangeSet, context: r.Context, ordrId: r.Ordr, transId: r.Trans, ownerId: r.Owner,
+      changeDate: r.ChangeDate, poNumber: r.PoNumber, reverseChangeSetId: r.ReverseChangeSet,
+    }),
+  },
+  {
+    name: 'ChangeSetShipment', legacyTable: 'dbo.ChangeSetShipment', delegate: 'changeSetShipment',
+    where: (d) => ({ changeSetId: d.changeSetId }),
+    map: (r) => ({ changeSetId: r.ChangeSet, waybillId: r.Waybill }),
+  },
+  {
+    name: 'Waybill', legacyTable: 'dbo.Waybill', delegate: 'waybill', idColumn: 'Waybill',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.Waybill, ownerId: r.Owner, dateShipped: r.DateShipped, status: r.Status,
+      shipViaId: r.ShipVia, poNumber: r.PoNumber, trailerNumber: r.TrailerNumber,
+    }),
+  },
 ];
 
 @Injectable()
