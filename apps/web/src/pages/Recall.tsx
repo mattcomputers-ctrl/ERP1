@@ -65,8 +65,9 @@ export function Recall() {
           <Button type="submit" disabled={m.isPending}>{m.isPending ? 'Tracing…' : 'Trace lot'}</Button>
         </form>
         <p className="mt-2 text-sm text-slate-500">
-          Enter a batch or packout lot number to see what it is, what went into it (upstream),
-          where it went (downstream), and the current on-hand inventory of every affected lot.
+          Enter your batch lot number to see what it's made from, the package-out lots the system
+          generated for it (you label these as the batch lot), and the current on-hand inventory
+          across every form of the lot.
         </p>
         {m.isError && <p className="mt-2 text-sm text-red-600">{(m.error as Error).message}</p>}
       </Card>
@@ -88,20 +89,21 @@ export function Recall() {
           ))}
 
           <div className="grid gap-4 sm:grid-cols-4">
-            <Stat label="Upstream lots" value={m.data.summary.ancestorLots} />
-            <Stat label="Downstream lots" value={m.data.summary.descendantLots} />
+            <Stat label="Source lots" value={m.data.summary.ancestorLots} />
+            <Stat label="Packout lots" value={m.data.summary.descendantLots} />
             <Stat label="On-hand containers" value={m.data.summary.onHandContainers} />
             <Stat label="On-hand qty" value={m.data.summary.totalOnHandQty} />
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">
-            {/* Upstream — what's in it */}
+            {/* What the lot is made from */}
             <Card>
-              <h2 className="mb-3 font-medium">Upstream — what went in</h2>
-              {m.data.upstream.length === 0 ? (
-                <p className="text-sm text-slate-400">No upstream lots recorded (this lot has no reconstructable parent lot).</p>
-              ) : (
-                <LotTable rows={m.data.upstream} />
+              <h2 className="mb-3 font-medium">Made from</h2>
+              {m.data.upstream.length > 0 && (
+                <>
+                  <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-400">Source lot(s)</div>
+                  <LotTable rows={m.data.upstream} />
+                </>
               )}
               <div className="mt-3 text-xs font-medium uppercase tracking-wide text-slate-400">Declared ingredients (item-level)</div>
               {m.data.provenance.ingredients.length === 0 ? (
@@ -121,11 +123,12 @@ export function Recall() {
               )}
             </Card>
 
-            {/* Downstream — where it went */}
+            {/* Packed out as — the system's packout lots for this batch */}
             <Card>
-              <h2 className="mb-3 font-medium">Downstream — where it went</h2>
+              <h2 className="mb-1 font-medium">Packed out as</h2>
+              <p className="mb-3 text-xs text-slate-400">System packout lot numbers — labeled in-plant as this batch lot.</p>
               {m.data.lineage.length === 0 ? (
-                <p className="text-sm text-slate-400">No descendant lots — this lot was not consumed into any other lot.</p>
+                <p className="text-sm text-slate-400">Not yet packed out.</p>
               ) : (
                 <LotTable rows={m.data.lineage} />
               )}
@@ -134,7 +137,7 @@ export function Recall() {
 
           <Card className="overflow-x-auto p-0">
             <div className="border-b border-slate-100 px-4 py-2 text-sm font-medium text-slate-700">
-              On-hand inventory of affected lots
+              On-hand inventory (all forms of this lot — batch + packouts)
             </div>
             <table className="w-full text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-left text-slate-500">

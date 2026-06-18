@@ -11,11 +11,11 @@ interface InventoryRow {
 }
 
 // Honest, install-specific caveats about what the derived genealogy can and
-// cannot answer (see docs/SCHEMA_REPORT.md + the genealogy-source sweep).
+// cannot answer (see the genealogy-source sweep + the user's lot model).
 const CAVEATS = [
-  'Lineage is reconstructed from packaging commitments (OrdDetailCommit): consumed bulk lot → produced finished-good lot.',
-  'The batch step (ingredients → bulk lot) is recorded at the ITEM level only (no consumed-lot identity), so upstream provenance of a bulk lot is its declared ingredient items, not specific supplier lots.',
-  'No multi-ingredient bill-of-lots fan-in is recorded in this install; each step shows a single consumed lot.',
+  'One batch = one lot: the batch lot number is the lot of record. The system also mints a separate packout lot number (shown here as "packed out as"), but in the plant those containers are labeled with the batch lot.',
+  'The only recorded lineage is this packaging hop (batch lot to its packout lots); there is no batch-to-batch chaining in this install.',
+  'Bulk-lot ingredients are recorded at the ITEM level only (no consumed supplier/raw-material lot identity) — enabling input-side lot tracking would close this gap.',
 ];
 
 @Injectable()
