@@ -230,6 +230,15 @@ const TABLES: TableSpec[] = [
       specification: r.Specification, comment: r.Comment, line: r.Line, version: r.Version,
     }),
   },
+  {
+    name: 'Release', legacyTable: 'dbo.Release', delegate: 'release', idColumn: 'Release',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.Release, sampleSetId: r.SampleSet, sublotId: r.Sublot, status: r.Status,
+      grade: r.Grade, purity: r.Purity, expiryDate: r.ExpiryDate, suspend: b(r.Suspend),
+      releaseDate: r.ReleaseDate, releasedBy: r.ReleasedBy, context: r.Context,
+    }),
+  },
 ];
 
 @Injectable()

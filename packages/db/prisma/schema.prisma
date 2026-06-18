@@ -820,3 +820,23 @@ model LotGenealogy {
   @@index([parentLot])
   @@map("lot_genealogy")
 }
+
+// QA disposition of a sublot (mirrors legacy). The release gate: Status
+// (Approved/Hold/Rejected), Grade, Purity, ExpiryDate, ReleasedBy. Linked from
+// Sublot.releaseId; surfaced as the QA status on the Lot Trace.
+model Release {
+  id          Int       @id @default(autoincrement()) @map("Release")
+  sampleSetId Int?      @map("SampleSet")
+  sublotId    Int?      @map("Sublot")
+  status      String?   @map("Status") @db.VarChar(8)
+  grade       String?   @map("Grade") @db.VarChar(6)
+  purity      Float?    @map("Purity")
+  expiryDate  DateTime? @map("ExpiryDate")
+  suspend     Boolean?  @map("Suspend")
+  releaseDate DateTime? @map("ReleaseDate")
+  releasedBy  String?   @map("ReleasedBy") @db.VarChar(255)
+  context     String?   @map("Context") @db.VarChar(32)
+
+  @@index([sublotId])
+  @@map("Release")
+}

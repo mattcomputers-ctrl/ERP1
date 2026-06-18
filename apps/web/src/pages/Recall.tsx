@@ -12,12 +12,20 @@ interface OnHand {
   sublotCode: string | null;
   lot: string | null;
 }
+interface Disposition {
+  status: string | null;
+  grade: string | null;
+  purity: number | null;
+  expiryDate: string | null;
+  releasedBy: string | null;
+}
 interface LotLabel {
   lot: string;
   itemCode: string | null;
   itemDescription: string | null;
   producedByOrderId: number | null;
   producedByContext: string | null;
+  disposition: Disposition | null;
 }
 interface Ingredient {
   lot: string;
@@ -82,9 +90,18 @@ export function Recall() {
                   <span className="text-lg font-semibold text-slate-900">{f.lot}</span>
                   <span className="ml-2 text-slate-600">{f.itemCode}</span>
                   {f.itemDescription && <span className="ml-2 text-slate-400">{f.itemDescription}</span>}
+                  <QABadge d={f.disposition} className="ml-2" />
                 </div>
                 <span className="text-sm text-slate-500">Produced by {via(f) || '—'}</span>
               </div>
+              {f.disposition && (f.disposition.grade || f.disposition.expiryDate || f.disposition.releasedBy) && (
+                <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-sm text-slate-500">
+                  {f.disposition.grade && <span>Grade: <span className="text-slate-700">{f.disposition.grade}</span></span>}
+                  {f.disposition.purity != null && <span>Purity: <span className="text-slate-700">{f.disposition.purity}</span></span>}
+                  {f.disposition.expiryDate && <span>Expiry: <span className="text-slate-700">{new Date(f.disposition.expiryDate).toISOString().slice(0, 10)}</span></span>}
+                  {f.disposition.releasedBy && <span>Released by: <span className="text-slate-700">{f.disposition.releasedBy}</span></span>}
+                </div>
+              )}
             </Card>
           ))}
 
@@ -182,13 +199,14 @@ function LotTable({ rows }: { rows: LotLabel[] }) {
   return (
     <table className="w-full text-sm">
       <thead className="border-b border-slate-200 text-left text-slate-500">
-        <tr><th className="py-1 font-medium">Lot</th><th className="py-1 font-medium">Item</th><th className="py-1 font-medium">Via</th></tr>
+        <tr><th className="py-1 font-medium">Lot</th><th className="py-1 font-medium">Item</th><th className="py-1 font-medium">QA</th><th className="py-1 font-medium">Via</th></tr>
       </thead>
       <tbody>
         {rows.map((l) => (
           <tr key={l.lot} className="border-b border-slate-100 last:border-0">
             <td className="py-1 pr-2">{l.lot}</td>
             <td className="py-1 pr-2">{l.itemCode}<span className="text-slate-400"> {l.itemDescription}</span></td>
+            <td className="py-1 pr-2"><QABadge d={l.disposition} /></td>
             <td className="py-1 text-slate-500">{via(l)}</td>
           </tr>
         ))}
@@ -204,4 +222,16 @@ function Stat({ label, value }: { label: string; value: number }) {
       <div className="mt-1 text-lg font-medium">{value.toLocaleString()}</div>
     </Card>
   );
+}
+
+// QA disposition badge (legacy Release.Status: Approved / Hold / Rejected).
+function QABadge({ d, className = '' }: { d: Disposition | null; className?: string }) {
+  if (!d || !d.status) return <span className="text-slate-300">—</span>;
+  const s = d.status.toLowerCase();
+  const tone = s.startsWith('appr')
+    ? 'bg-green-50 text-green-700'
+    : s.startsWith('reject')
+      ? 'bg-red-50 text-red-700'
+      : 'bg-amber-50 text-amber-700';
+  return <span className={`rounded-full px-2 py-0.5 text-xs ${tone} ${className}`}>{d.status}</span>;
 }

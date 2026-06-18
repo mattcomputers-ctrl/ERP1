@@ -126,7 +126,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Tests & test groups; testing requirements by item | ⬜ | `Test`/`TestGroup`/`ItemTest` |
 | Sampling (sample sets, labels, sampling, IPT, retesting) | ⬜ | `SampleSet`/`LocationSample` |
 | Sample receiving; stability testing; custom sampling | ⬜ | |
-| Enter test results; disposition sublot; at-risk | ⬜ | `Release` |
+| Enter test results; disposition sublot; at-risk | 🟡 | `Release` (80,400 rows) mirrored + imported; **QA disposition** (Approved/Hold/Rejected + Grade/Purity/Expiry/ReleasedBy) now surfaced per lot on the Lot Trace (focus + lineage). Entering results / changing disposition pending |
 | Print Certificate of Analysis; auto expiry; reduced testing; QA notifications | ⬜ | `ReleaseCofA` |
 
 ## 12. Documents (UG ch.16)

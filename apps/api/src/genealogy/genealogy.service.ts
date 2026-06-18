@@ -169,18 +169,29 @@ export class GenealogyService {
 
   // --- decoration ----------------------------------------------------------
 
-  /** Attach item code/description + producing-order context to a set of lots. */
+  /** Attach item code/description + producing-order context + QA disposition. */
   private async labelLots(lots: string[]) {
     if (!lots.length) return [];
-    const lotRows = await this.prisma.lot.findMany({
-      where: { lot: { in: lots } },
-      select: { lot: true, itemId: true, ordDetailId: true, supplierId: true, supLot: true },
-    });
+    const [lotRows, sublots] = await Promise.all([
+      this.prisma.lot.findMany({
+        where: { lot: { in: lots } },
+        select: { lot: true, itemId: true, ordDetailId: true, supplierId: true, supLot: true },
+      }),
+      this.prisma.sublot.findMany({
+        where: { lot: { in: lots } },
+        select: { lot: true, releaseId: true },
+      }),
+    ]);
     const itemIds = [...new Set(lotRows.map((l) => l.itemId).filter((v): v is number => v != null))];
     const ordDetailIds = [...new Set(lotRows.map((l) => l.ordDetailId).filter((v): v is number => v != null))];
-    const [items, ordDetails] = await Promise.all([
+    const releaseIds = [...new Set(sublots.map((s) => s.releaseId).filter((v): v is number => v != null))];
+    const [items, ordDetails, releases] = await Promise.all([
       this.prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, itemCode: true, description: true } }),
       this.prisma.ordDetail.findMany({ where: { id: { in: ordDetailIds } }, select: { id: true, ordrId: true } }),
+      this.prisma.release.findMany({
+        where: { id: { in: releaseIds } },
+        select: { id: true, status: true, grade: true, purity: true, expiryDate: true, releasedBy: true },
+      }),
     ]);
     const ordrIds = [...new Set(ordDetails.map((o) => o.ordrId).filter((v): v is number => v != null))];
     const ordrs = await this.prisma.ordr.findMany({
@@ -190,16 +201,26 @@ export class GenealogyService {
     const itemById = new Map(items.map((i) => [i.id, i]));
     const odById = new Map(ordDetails.map((o) => [o.id, o]));
     const ordrById = new Map(ordrs.map((o) => [o.id, o]));
+    const releaseById = new Map(releases.map((r) => [r.id, r]));
+    // lot -> its sublot's release (Sublot:Lot is 1:1 in this install).
+    const releaseByLot = new Map<string, (typeof releases)[number]>();
+    for (const s of sublots) {
+      if (s.releaseId != null && releaseById.has(s.releaseId)) releaseByLot.set(s.lot!, releaseById.get(s.releaseId)!);
+    }
 
     return lotRows.map((l) => {
       const od = l.ordDetailId != null ? odById.get(l.ordDetailId) : undefined;
       const ordr = od?.ordrId != null ? ordrById.get(od.ordrId) : undefined;
+      const rel = releaseByLot.get(l.lot);
       return {
         lot: l.lot,
         itemCode: l.itemId != null ? (itemById.get(l.itemId)?.itemCode ?? null) : null,
         itemDescription: l.itemId != null ? (itemById.get(l.itemId)?.description ?? null) : null,
         producedByOrderId: ordr?.id ?? null,
         producedByContext: ordr?.context ?? null,
+        disposition: rel
+          ? { status: rel.status, grade: rel.grade, purity: rel.purity, expiryDate: rel.expiryDate, releasedBy: rel.releasedBy }
+          : null,
       };
     });
   }
