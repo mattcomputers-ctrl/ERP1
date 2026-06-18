@@ -26,6 +26,7 @@ const BASELINE_PROGRAMS = [
   { key: 'orders.release', name: 'Release Order', folder: 'Transactions/Orders' },
   { key: 'orders.complete', name: 'Complete Order', folder: 'Transactions/Orders' },
   { key: 'orders.close', name: 'Close Order', folder: 'Transactions/Orders' },
+  { key: 'sales.invoices', name: 'Invoices', folder: 'Transactions/Sales' },
   { key: 'inventory.browser', name: 'Inventory Browser', folder: 'Transactions/Inventory' },
   { key: 'inventory.trace', name: 'Trace Genealogy', folder: 'Transactions/Inventory' },
   { key: 'inventory.recall', name: 'Recall', folder: 'Transactions/Inventory' },

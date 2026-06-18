@@ -8,6 +8,8 @@ import { Dashboard } from './pages/Dashboard';
 import { Entities } from './pages/Entities';
 import { ImportPage } from './pages/ImportPage';
 import { Inventory } from './pages/Inventory';
+import { InvoiceDoc } from './pages/InvoiceDoc';
+import { Invoices } from './pages/Invoices';
 import { Items } from './pages/Items';
 import { Login } from './pages/Login';
 import { Orders } from './pages/Orders';
@@ -49,6 +51,8 @@ export function App() {
         <Route path="/recipes" element={<Recipes />} />
         <Route path="/orders" element={<Orders />} />
         <Route path="/orders/:id/sheet" element={<BatchSheet />} />
+        <Route path="/invoices" element={<Invoices />} />
+        <Route path="/invoices/:id/print" element={<InvoiceDoc />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
@@ -71,6 +75,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/units', label: 'Units' },
     { to: '/recipes', label: 'Recipes' },
     { to: '/orders', label: 'Orders' },
+    { to: '/invoices', label: 'Invoices' },
     { to: '/inventory', label: 'Inventory' },
     { to: '/recall', label: 'Lot Trace' },
     { to: '/users', label: 'Users' },

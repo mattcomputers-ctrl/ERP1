@@ -651,6 +651,8 @@ model Ordr {
   shipToId        Int?      @map("ShipTo")
   billToId        Int?      @map("BillTo")
   salesmanId      Int?      @map("Salesman")
+  shipViaId       Int?      @map("ShipVia")
+  incoterms       String?   @map("Incoterms") @db.VarChar(20)
   currency        String?   @map("Currency") @db.VarChar(10)
   recipeId        Int?      @map("Recipe")
   status          String?   @map("Status") @db.VarChar(6)
@@ -716,6 +718,7 @@ model OrdDetail {
   sublotId              Int?      @map("Sublot")
   lot                   String?   @map("Lot") @db.VarChar(50)
   manufacturerId        Int?      @map("Manufacturer")
+  itemNameId            Int?      @map("ItemName")
   pkgTypeId             Int?      @map("PkgType")
   entityUnit            String?   @map("EntityUnit") @db.VarChar(6)
   description           String?   @map("Description") @db.VarChar(256)
@@ -839,4 +842,51 @@ model Release {
 
   @@index([sublotId])
   @@map("Release")
+}
+
+// ===========================================================================
+// Sales / financial (mirrors legacy). Trans is the financial posting; customer
+// INVOICES are Trans with Context='CI' (TransDocument = invoice number). Lines
+// in TransDetail. Note: customer is Trans.BillTo (Trans.Entity is null on SH);
+// line amount = Qty * Price (no stored extended amount). See sales-docs-mapping.
+// ===========================================================================
+
+model Trans {
+  id              Int       @id @default(autoincrement()) @map("Trans")
+  context         String?   @map("Context") @db.VarChar(6)
+  transDocument   String?   @map("TransDocument") @db.VarChar(20)
+  documentDate    DateTime? @map("DocumentDate")
+  transDate       DateTime? @map("TransDate")
+  ordrId          Int?      @map("Ordr")
+  billToId        Int?      @map("BillTo")
+  ownerId         Int?      @map("Owner")
+  salesmanId      Int?      @map("Salesman")
+  currency        String?   @map("Currency") @db.VarChar(10)
+  currencyRate    Float?    @map("CurrencyRate")
+  poNumber        String?   @map("PoNumber") @db.VarChar(25)
+  freightCharge   Decimal?  @map("FreightCharge") @db.Money
+  tax1Amount      Decimal?  @map("Tax1Amount") @db.Money
+  tax2Amount      Decimal?  @map("Tax2Amount") @db.Money
+  tax3Amount      Decimal?  @map("Tax3Amount") @db.Money
+  reversedTransId Int?      @map("ReversedTrans")
+
+  @@index([ordrId])
+  @@index([transDocument])
+  @@index([context])
+  @@map("Trans")
+}
+
+model TransDetail {
+  id          Int      @id @default(autoincrement()) @map("TransDetail")
+  transId     Int?     @map("Trans")
+  context     String?  @map("Context") @db.VarChar(6)
+  ordDetailId Int?     @map("OrdDetail")
+  itemId      Int?     @map("Item")
+  qty         Float?   @map("Qty")
+  price       Decimal? @map("Price") @db.Money
+  unit        String?  @map("Unit") @db.VarChar(20)
+
+  @@index([transId])
+  @@index([ordDetailId])
+  @@map("TransDetail")
 }

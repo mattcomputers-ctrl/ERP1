@@ -178,6 +178,7 @@ const TABLES: TableSpec[] = [
     map: (r) => ({
       id: r.Ordr, version: r.Version, context: r.Context, ownerId: r.Owner, entityId: r.Entity,
       divisionId: r.Division, shipToId: r.ShipTo, billToId: r.BillTo, salesmanId: r.Salesman,
+      shipViaId: r.ShipVia, incoterms: r.Incoterms,
       currency: r.Currency, recipeId: r.Recipe, status: r.Status, userHold: r.UserHold,
       executionHold: r.ExecutionHold, creditHold: b(r.CreditHold), ordSubType: r.OrdSubType,
       poNumber: r.PoNumber, processingType: r.ProcessingType, isQuote: b(r.IsQuote),
@@ -200,7 +201,7 @@ const TABLES: TableSpec[] = [
       line: r.Line == null ? null : BigInt(r.Line), execOrder: r.ExecOrder,
       execSubOrder: r.ExecSubOrder, sortOrder: r.SortOrder, phase: r.Phase, qualifier: r.Qualifier,
       batchType: r.BatchType, execStatus: r.ExecStatus, sublotId: r.Sublot, lot: r.Lot,
-      manufacturerId: r.Manufacturer, pkgTypeId: r.PkgType, entityUnit: r.EntityUnit,
+      manufacturerId: r.Manufacturer, itemNameId: r.ItemName, pkgTypeId: r.PkgType, entityUnit: r.EntityUnit,
       description: r.Description, comment: r.Comment, mustPreweigh: r.MustPreweigh ?? 0,
       percentUnder: r.PercentUnder, percentOver: r.PercentOver,
       recipeDetailReference: r.RecipeDetailReference, price: r.Price, datePromised: r.DatePromised,
@@ -237,6 +238,25 @@ const TABLES: TableSpec[] = [
       id: r.Release, sampleSetId: r.SampleSet, sublotId: r.Sublot, status: r.Status,
       grade: r.Grade, purity: r.Purity, expiryDate: r.ExpiryDate, suspend: b(r.Suspend),
       releaseDate: r.ReleaseDate, releasedBy: r.ReleasedBy, context: r.Context,
+    }),
+  },
+  {
+    name: 'Trans', legacyTable: 'dbo.Trans', delegate: 'trans', idColumn: 'Trans',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.Trans, context: r.Context, transDocument: r.TransDocument, documentDate: r.DocumentDate,
+      transDate: r.TransDate, ordrId: r.Ordr, billToId: r.BillTo, ownerId: r.Owner,
+      salesmanId: r.Salesman, currency: r.Currency, currencyRate: r.CurrencyRate, poNumber: r.PoNumber,
+      freightCharge: r.FreightCharge, tax1Amount: r.Tax1Amount, tax2Amount: r.Tax2Amount,
+      tax3Amount: r.Tax3Amount, reversedTransId: r.ReversedTrans,
+    }),
+  },
+  {
+    name: 'TransDetail', legacyTable: 'dbo.TransDetail', delegate: 'transDetail', idColumn: 'TransDetail',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.TransDetail, transId: r.Trans, context: r.Context, ordDetailId: r.OrdDetail,
+      itemId: r.Item, qty: r.Qty, price: r.Price, unit: r.Unit,
     }),
   },
 ];

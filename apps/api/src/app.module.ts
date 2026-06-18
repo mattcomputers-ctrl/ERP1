@@ -9,6 +9,7 @@ import { ManufacturingModule } from './manufacturing/manufacturing.module';
 import { MasterDataModule } from './master-data/master-data.module';
 import { OrdersModule } from './orders/orders.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { SalesModule } from './sales/sales.module';
 import { SettingsModule } from './settings/settings.module';
 import { StatsModule } from './stats/stats.module';
 import { UsersModule } from './users/users.module';
@@ -28,6 +29,7 @@ import { UsersModule } from './users/users.module';
     GenealogyModule,
     SettingsModule,
     StatsModule,
+    SalesModule,
   ],
 })
 export class AppModule {}
