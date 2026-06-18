@@ -874,6 +874,47 @@ model Release {
   @@map("Release")
 }
 
+// Certificate-of-Analysis header snapshot (mirrors legacy), keyed 1:1 to the
+// Release (QA disposition). Holds the product/lot/dates exactly as printed on the
+// CofA that ships with a released lot. Test results come from LocationSampleTest
+// (joined via Release.SampleSet); specs from the product's ItemTest.
+model ReleaseCofA {
+  releaseId   Int       @id @map("Release")
+  productCode String?   @map("ProductCode") @db.VarChar(30)
+  description String?   @map("Description") @db.VarChar(256)
+  manfDate    DateTime? @map("ManfDate")
+  pkgLot      String?   @map("PkgLot") @db.VarChar(50)
+  manfLot     String?   @map("ManfLot") @db.VarChar(50)
+  expiryDate  DateTime? @map("ExpiryDate")
+
+  @@index([productCode])
+  @@index([manfLot])
+  @@map("ReleaseCofA")
+}
+
+// Recorded LIMS test result (mirrors legacy). The legacy Result is a sql_variant
+// (numeric or free text); stored here as text. Joined to a release's tests via
+// SampleSet (= Release.SampleSet). Passed = within spec at test time.
+model LocationSampleTest {
+  id              Int       @id @default(autoincrement()) @map("LocationSampleTest")
+  locationId      Int       @map("Location")
+  test            String    @map("Test") @db.VarChar(20)
+  qualifier       String?   @map("Qualifier") @db.VarChar(40)
+  version         Int?      @map("Version")
+  result          String?   @map("Result") @db.Text
+  passed          Boolean?  @map("Passed")
+  testedTime      DateTime? @map("TestedTime")
+  testedBy        String?   @map("TestedBy") @db.VarChar(255)
+  approve         Boolean?  @map("Approve")
+  comment         String?   @map("Comment") @db.Text
+  sampleSetId     Int?      @map("SampleSet")
+  testStartedTime DateTime? @map("TestStartedTime")
+  notebookRef     String?   @map("NotebookRef") @db.VarChar(256)
+
+  @@index([sampleSetId])
+  @@map("LocationSampleTest")
+}
+
 // ===========================================================================
 // Sales / financial (mirrors legacy). Trans is the financial posting; customer
 // INVOICES are Trans with Context='CI' (TransDocument = invoice number). Lines

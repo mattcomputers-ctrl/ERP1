@@ -127,7 +127,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Sampling (sample sets, labels, sampling, IPT, retesting) | ⬜ | `SampleSet`/`LocationSample` |
 | Sample receiving; stability testing; custom sampling | ⬜ | |
 | Enter test results; disposition sublot; at-risk | 🟡 | `Release` (80,400 rows) mirrored + imported; **QA disposition** (Approved/Hold/Rejected + Grade/Purity/Expiry/ReleasedBy) now surfaced per lot on the Lot Trace (focus + lineage). Entering results / changing disposition pending |
-| Print Certificate of Analysis; auto expiry; reduced testing; QA notifications | ⬜ | `ReleaseCofA` |
+| Print Certificate of Analysis; auto expiry; reduced testing; QA notifications | 🟡 | **CofA now live**: `ReleaseCofA` (54K) header + `LocationSampleTest` (69K results, sql_variant Result stored as text) mirrored + imported. Certificates browser + **print-faithful CofA document** (`GET /cofa` / `/cofa/:releaseId`, program `qa.cofa`) — reconstructs Test \| Specification \| Result \| Pass by joining recorded results (via `Release.SampleSet`) to the product's `ItemTest` specs (matched by test name), with the QA disposition (grade/status/released-by/date) from `Release`. Auto-expiry / reduced-testing / QA notifications pending |
 
 ## 12. Documents (UG ch.16)
 | Feature | Status | Notes |

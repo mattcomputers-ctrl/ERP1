@@ -252,6 +252,24 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    name: 'ReleaseCofA', legacyTable: 'dbo.ReleaseCofA', delegate: 'releaseCofA',
+    where: (d) => ({ releaseId: d.releaseId }),
+    map: (r) => ({
+      releaseId: r.Release, productCode: r.ProductCode, description: r.Description,
+      manfDate: r.ManfDate, pkgLot: r.PkgLot, manfLot: r.ManfLot, expiryDate: r.ExpiryDate,
+    }),
+  },
+  {
+    name: 'LocationSampleTest', legacyTable: 'dbo.LocationSampleTest', delegate: 'locationSampleTest', idColumn: 'LocationSampleTest',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.LocationSampleTest, locationId: r.Location, test: r.Test, qualifier: r.Qualifier,
+      version: r.Version, result: r.Result == null ? null : String(r.Result), passed: b(r.Passed),
+      testedTime: r.TestedTime, testedBy: r.TestedBy, approve: b(r.Approve), comment: r.Comment,
+      sampleSetId: r.SampleSet, testStartedTime: r.TestStartedTime, notebookRef: r.NotebookRef,
+    }),
+  },
+  {
     name: 'Trans', legacyTable: 'dbo.Trans', delegate: 'trans', idColumn: 'Trans',
     where: (d) => ({ id: d.id }),
     map: (r) => ({
