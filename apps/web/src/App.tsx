@@ -9,6 +9,7 @@ import { Inventory } from './pages/Inventory';
 import { Items } from './pages/Items';
 import { Login } from './pages/Login';
 import { Recall } from './pages/Recall';
+import { Recipes } from './pages/Recipes';
 import { Units } from './pages/Units';
 import { Users } from './pages/Users';
 
@@ -42,6 +43,7 @@ export function App() {
         <Route path="/entities" element={<Entities />} />
         <Route path="/items" element={<Items />} />
         <Route path="/units" element={<Units />} />
+        <Route path="/recipes" element={<Recipes />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
@@ -61,6 +63,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/entities', label: 'Entities' },
     { to: '/items', label: 'Items' },
     { to: '/units', label: 'Units' },
+    { to: '/recipes', label: 'Recipes' },
     { to: '/inventory', label: 'Inventory' },
     { to: '/recall', label: 'Recall' },
     { to: '/users', label: 'Users' },

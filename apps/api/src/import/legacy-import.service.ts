@@ -143,6 +143,34 @@ const TABLES: TableSpec[] = [
       itemId: r.Item, status: r.Status, qty: r.Qty,
     }),
   },
+  {
+    name: 'Recipe', legacyTable: 'dbo.Recipe', delegate: 'recipe', idColumn: 'Recipe',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.Recipe, ownerId: r.Owner, recipeNumber: r.RecipeNumber, version: r.Version,
+      comment: r.Comment ?? '', dateCreated: r.DateCreated, imported: b(r.Imported),
+      mergedNumber: r.MergedNumber, xml: r.XML == null ? null : String(r.XML), context: r.Context,
+      ordSubType: r.OrdSubType, isPublished: b(r.IsPublished), placedBy: r.PlacedBy,
+      securityGroup: r.SecurityGroup, formulaOnly: b(r.FormulaOnly), weightUnit: r.WeightUnit,
+      inactive: b(r.Inactive), volumeUnit: r.VolumeUnit, billToId: r.BillTo, shared: b(r.Shared),
+      rework: b(r.Rework), dateUpdated: r.DateUpdated, datePublished: r.DatePublished,
+      developmentStatus: r.DevelopmentStatus, leadTime: r.LeadTime, reference: r.Reference,
+    }),
+  },
+  {
+    name: 'RecipeDetail', legacyTable: 'dbo.RecipeDetail', delegate: 'recipeDetail', idColumn: 'RecipeDetail',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.RecipeDetail, recipeId: r.Recipe, ownerId: r.Owner, context: r.Context, parentId: r.Parent,
+      qualifier: r.Qualifier, description: r.Description, itemId: r.Item, qtyReqd: r.QtyReqd,
+      line: r.Line == null ? null : BigInt(r.Line), comment: r.Comment, execOrder: r.ExecOrder,
+      mustPreweigh: r.MustPreweigh ?? 0, phase: r.Phase, batchType: r.BatchType, manufacturerId: r.Manufacturer,
+      qtyYield: r.QtyYield, baseQty: r.BaseQty, yieldPercent: r.YieldPercent, pkgTypeId: r.PkgType,
+      entityUnit: r.EntityUnit, itemNameId: r.ItemName, totalWeight: r.TotalWeight,
+      totalWeightPercent: r.TotalWeightPercent, inactive: b(r.Inactive), percentUnder: r.PercentUnder,
+      percentOver: r.PercentOver, tag: r.Tag,
+    }),
+  },
 ];
 
 @Injectable()

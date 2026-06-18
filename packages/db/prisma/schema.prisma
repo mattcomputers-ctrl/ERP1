@@ -541,3 +541,77 @@ model Inventory {
   @@index([itemId])
   @@map("Inventory")
 }
+
+// ===========================================================================
+// Manufacturing recipes (mirrors legacy). Recipe header (Context/OrdSubType
+// distinguish batching vs packaging; XML holds the serialized procedure) +
+// RecipeDetail lines (ingredients/components/steps).
+// ===========================================================================
+
+model Recipe {
+  id                Int       @id @default(autoincrement()) @map("Recipe")
+  ownerId           Int?      @map("Owner")
+  recipeNumber      String?   @map("RecipeNumber") @db.VarChar(20)
+  version           Int?      @map("Version")
+  comment           String    @default("") @map("Comment") @db.Text
+  dateCreated       DateTime? @map("DateCreated")
+  imported          Boolean?  @map("Imported")
+  mergedNumber      String?   @map("MergedNumber") @db.VarChar(20)
+  xml               String?   @map("XML") @db.Text
+  context           String?   @map("Context") @db.VarChar(32)
+  ordSubType        String?   @map("OrdSubType") @db.VarChar(6)
+  isPublished       Boolean?  @map("IsPublished")
+  placedBy          String?   @map("PlacedBy") @db.VarChar(255)
+  securityGroup     String?   @map("SecurityGroup") @db.VarChar(20)
+  formulaOnly       Boolean?  @map("FormulaOnly")
+  weightUnit        String?   @map("WeightUnit") @db.VarChar(6)
+  inactive          Boolean?  @map("Inactive")
+  volumeUnit        String?   @map("VolumeUnit") @db.VarChar(6)
+  billToId          Int?      @map("BillTo")
+  shared            Boolean?  @map("Shared")
+  rework            Boolean?  @map("Rework")
+  dateUpdated       DateTime? @map("DateUpdated")
+  datePublished     DateTime? @map("DatePublished")
+  developmentStatus String?   @map("DevelopmentStatus") @db.VarChar(50)
+  leadTime          Int?      @map("LeadTime")
+  reference         String?   @map("Reference") @db.VarChar(20)
+
+  @@index([context])
+  @@index([recipeNumber])
+  @@map("Recipe")
+}
+
+model RecipeDetail {
+  id                 Int      @id @default(autoincrement()) @map("RecipeDetail")
+  recipeId           Int?     @map("Recipe")
+  ownerId            Int?     @map("Owner")
+  context            String?  @map("Context") @db.VarChar(32)
+  parentId           Int?     @map("Parent")
+  qualifier          String?  @map("Qualifier") @db.VarChar(40)
+  description        String?  @map("Description") @db.VarChar(256)
+  itemId             Int?     @map("Item")
+  qtyReqd            Float?   @map("QtyReqd")
+  line               BigInt?  @map("Line")
+  comment            String?  @map("Comment") @db.Text
+  execOrder          Int?     @map("ExecOrder")
+  mustPreweigh       Int      @default(0) @map("MustPreweigh")
+  phase              String?  @map("Phase") @db.VarChar(50)
+  batchType          String?  @map("BatchType") @db.VarChar(1)
+  manufacturerId     Int?     @map("Manufacturer")
+  qtyYield           Float?   @map("QtyYield")
+  baseQty            Float?   @map("BaseQty")
+  yieldPercent       Float?   @map("YieldPercent")
+  pkgTypeId          Int?     @map("PkgType")
+  entityUnit         String?  @map("EntityUnit") @db.VarChar(6)
+  itemNameId         Int?     @map("ItemName")
+  totalWeight        Float?   @map("TotalWeight")
+  totalWeightPercent Float?   @map("TotalWeightPercent")
+  inactive           Boolean? @map("Inactive")
+  percentUnder       Float?   @map("PercentUnder")
+  percentOver        Float?   @map("PercentOver")
+  tag                String?  @map("Tag") @db.VarChar(20)
+
+  @@index([recipeId])
+  @@index([itemId])
+  @@map("RecipeDetail")
+}
