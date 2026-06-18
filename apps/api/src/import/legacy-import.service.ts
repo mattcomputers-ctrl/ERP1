@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import * as sql from 'mssql';
+import { GenealogyService } from '../genealogy/genealogy.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 /**
@@ -207,13 +208,29 @@ const TABLES: TableSpec[] = [
       discarded: b(r.Discarded), inactive: b(r.Inactive), version: r.Version,
     }),
   },
+  {
+    name: 'OrdDetailCommit', legacyTable: 'dbo.OrdDetailCommit', delegate: 'ordDetailCommit', idColumn: 'OrdDetailCommit',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.OrdDetailCommit, ordDetailId: r.OrdDetail, srcOrdDetailId: r.SrcOrdDetail,
+      qty: r.Qty, manufacturerId: r.Manufacturer, packagingReady: b(r.PackagingReady),
+    }),
+  },
+  {
+    name: 'LotIngredient', legacyTable: 'dbo.LotIngredient', delegate: 'lotIngredient', idColumn: 'LotIngredient',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({ id: r.LotIngredient, lot: r.Lot, itemId: r.Item, percent: r.Percent }),
+  },
 ];
 
 @Injectable()
 export class LegacyImportService {
   private readonly logger = new Logger(LegacyImportService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly genealogy: GenealogyService,
+  ) {}
 
   private config(): sql.config {
     const server = process.env.LEGACY_MSSQL_HOST;
@@ -276,7 +293,16 @@ export class LegacyImportService {
         this.logger.log(`[import] ${spec.name}: source=${rows.length} target=${target} rejected=${rejected}`);
       }
 
-      const report = { tables, totalRejected: tables.reduce((s, t) => s + (t.rejected as number), 0) };
+      // Rebuild the derived lot-to-lot genealogy from the freshly imported
+      // OrdDetailCommit/Lot/OrdDetail data so trace/recall reflect this import.
+      const { edges } = await this.genealogy.derive();
+      this.logger.log(`[import] genealogy: derived ${edges} lot edges`);
+
+      const report = {
+        tables,
+        totalRejected: tables.reduce((s, t) => s + (t.rejected as number), 0),
+        genealogyEdges: edges,
+      };
       await this.prisma.importRun.update({
         where: { id: runRecord.id },
         data: { status: 'success', finishedAt: new Date(), report },

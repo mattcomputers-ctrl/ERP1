@@ -68,7 +68,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/recipes', label: 'Recipes' },
     { to: '/orders', label: 'Orders' },
     { to: '/inventory', label: 'Inventory' },
-    { to: '/recall', label: 'Recall' },
+    { to: '/recall', label: 'Lot Trace' },
     { to: '/users', label: 'Users' },
     { to: '/import', label: 'Import' },
   ];

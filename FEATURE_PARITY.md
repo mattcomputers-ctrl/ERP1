@@ -58,7 +58,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Container & lot disposal + reversal | ⬜ | reversing `ChangeSet` |
 | Move & staging | ⬜ | `LcnMovement` |
 | Inventory count, cycle count, verify location, mark/write-off missing | ⬜ | `InventoryCount*` |
-| Trace children / trace parents (genealogy) | 🟡 | Trace + recall built (recursive CTE over `SublotParent`); ⚠️ `SublotParent` is EMPTY in this install — real lineage lives in the transaction/order history (`InvMovement`/`ChangeSet`/`OrdDetail`/`InventoryUsed`), so derived genealogy lands with the Manufacturing increment |
+| Trace children / trace parents (genealogy) | ✅ | Lot-level lineage **now live**. `SublotParent` and every sublot/cost linkage column are empty in this install (verified by a multi-angle sweep), so lineage is **derived** into `lot_genealogy` from `OrdDetailCommit` (consumed-lot→produced-lot via `Lot.OrdDetail`; 27.5K edges, cross-validated 100% against the packaging-movement path). Recall/trace traverse it with recursive CTEs + upstream provenance (producing order + `LotIngredient` item composition). Honest limits surfaced in UI: one packaging hop, no multi-ingredient fan-in, sublot==lot here, no supplier-lot trace |
 | Label printing / reprinting | ⬜ | |
 | Update container/lot/sublot info | ⬜ | |
 | Costing (standard, replacement, actual) | ⬜ | `InventoryCost*` |

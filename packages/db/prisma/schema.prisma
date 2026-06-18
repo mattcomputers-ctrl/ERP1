@@ -728,3 +728,60 @@ model OrdDetail {
   @@index([lot])
   @@map("OrdDetail")
 }
+
+// Commitment link (mirrors legacy): ties a consumption line (OrdDetail, the
+// "use ingredient" UI line) to the source production line it drew from
+// (SrcOrdDetail, a "PK" packaged-product line). Resolved through Lot.OrdDetail
+// this yields consumed-lot -> produced-lot lineage — the backbone of the
+// derived genealogy in this install (SublotParent is empty; the sublot/cost
+// linkage columns are unpopulated).
+model OrdDetailCommit {
+  id             Int      @id @default(autoincrement()) @map("OrdDetailCommit")
+  ordDetailId    Int?     @map("OrdDetail")
+  srcOrdDetailId Int?     @map("SrcOrdDetail")
+  qty            Float?   @map("Qty")
+  manufacturerId Int?     @map("Manufacturer")
+  packagingReady Boolean? @map("PackagingReady")
+
+  @@index([ordDetailId])
+  @@index([srcOrdDetailId])
+  @@map("OrdDetailCommit")
+}
+
+// Declared item-level composition of a lot (mirrors legacy). Item (not lot)
+// granularity — the only provenance available for bulk/WIP lots, whose
+// ingredient consumption is recorded item-level, never lot-level, in this
+// install. Used as a leaf annotation in trace/recall.
+model LotIngredient {
+  id      Int    @id @default(autoincrement()) @map("LotIngredient")
+  lot     String @map("Lot") @db.VarChar(50)
+  itemId  Int    @map("Item")
+  percent Float? @map("Percent")
+
+  @@index([lot])
+  @@index([itemId])
+  @@map("LotIngredient")
+}
+
+// ===========================================================================
+// Derived genealogy (ERP1, not a legacy mirror — clean snake_case). Directed
+// lot-to-lot lineage edge: parentLot was consumed to produce childLot, via a
+// packaging order. Recomputed (idempotent) from OrdDetailCommit after each
+// import. Recall/trace traverse this graph with recursive CTEs. Real
+// SublotParent edges are empty in this install, so this is the live lineage.
+// ===========================================================================
+
+model LotGenealogy {
+  id        BigInt   @id @default(autoincrement())
+  childLot  String   @map("child_lot") @db.VarChar(50)
+  parentLot String   @map("parent_lot") @db.VarChar(50)
+  viaOrdrId Int?     @map("via_ordr")
+  qty       Float?   @map("qty")
+  source    String   @default("OrdDetailCommit") @map("source")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([childLot, parentLot, viaOrdrId])
+  @@index([childLot])
+  @@index([parentLot])
+  @@map("lot_genealogy")
+}
