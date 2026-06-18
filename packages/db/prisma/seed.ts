@@ -23,6 +23,7 @@ const BASELINE_PROGRAMS = [
   { key: 'master.units', name: 'Units', folder: 'Master Tables' },
   { key: 'recipe.manager', name: 'Recipe Manager', folder: 'Master Tables/Recipe Manager' },
   { key: 'orders.browser', name: 'Order Browser', folder: 'Transactions/Orders' },
+  { key: 'orders.create', name: 'Create Order', folder: 'Transactions/Orders' },
   { key: 'orders.release', name: 'Release Order', folder: 'Transactions/Orders' },
   { key: 'orders.complete', name: 'Complete Order', folder: 'Transactions/Orders' },
   { key: 'orders.close', name: 'Close Order', folder: 'Transactions/Orders' },

@@ -85,6 +85,17 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    name: 'ItemTest', legacyTable: 'dbo.ItemTest', delegate: 'itemTest', idColumn: 'ItemTest',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.ItemTest, itemId: r.Item, test: r.Test, version: r.Version, testGroup: r.TestGroup,
+      qualifier: r.Qualifier, min: r.Min, max: r.Max, target: r.Target, comment: r.Comment,
+      onReceipt: b(r.OnReceipt), onProduction: b(r.OnProduction), onRetest: b(r.OnRetest),
+      grade: r.Grade, labelClaim: r.LabelClaim, labelClaimUnit: r.LabelClaimUnit,
+      line: r.Line, specification: r.Specification,
+    }),
+  },
+  {
     name: 'Address', legacyTable: 'dbo.Address', delegate: 'address', idColumn: 'Address',
     where: (d) => ({ id: d.id }),
     map: (r) => ({

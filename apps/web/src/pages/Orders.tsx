@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type ReactNode, useState } from 'react';
 import { DataGrid, type GridColumn } from '../components/DataGrid';
-import { Card } from '../components/ui';
+import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
 
 const lifeState = (status: string | null) => (status && status.trim() ? status : 'NST');
@@ -101,6 +101,7 @@ export function Orders() {
   const [openOnly, setOpenOnly] = useState(false);
   const [sort, setSort] = useState('id:desc');
   const [selected, setSelected] = useState<number | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
 
   const params = new URLSearchParams({ page: String(page), pageSize: '25', sort });
   if (q) params.set('q', q);
@@ -160,7 +161,21 @@ export function Orders() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-semibold text-slate-900">Orders</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold text-slate-900">Orders</h1>
+        <Button onClick={() => setShowCreate((v) => !v)}>{showCreate ? 'Close' : 'New batch order'}</Button>
+      </div>
+
+      {showCreate && (
+        <CreateOrder
+          onDone={(newId) => {
+            setShowCreate(false);
+            qc.invalidateQueries({ queryKey: ['orders'] });
+            setSelected(newId);
+          }}
+        />
+      )}
+
       <DataGrid
         columns={columns}
         rows={list.data?.rows ?? []}
@@ -291,6 +306,94 @@ export function Orders() {
         </Card>
       )}
     </div>
+  );
+}
+
+// Create a batch order from a recipe: a lightweight recipe-number typeahead
+// (5,600+ published RMBA recipes — too many for a plain <select>) over the
+// existing recipes list endpoint, plus the target batch size.
+function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
+  const [search, setSearch] = useState('');
+  const [picked, setPicked] = useState<{ id: number; recipeNumber: string | null } | null>(null);
+  const [batchSize, setBatchSize] = useState('');
+  const [dateRequired, setDateRequired] = useState('');
+  const [reference, setReference] = useState('');
+
+  const recipes = useQuery({
+    queryKey: ['recipe-options', search],
+    queryFn: () =>
+      api.get<{ rows: { id: number; recipeNumber: string | null }[] }>(
+        `/orders/recipe-options?q=${encodeURIComponent(search)}`,
+      ),
+    enabled: !picked && search.trim().length >= 1,
+  });
+
+  const m = useMutation({
+    mutationFn: () =>
+      api.post<{ id: number }>('/orders', {
+        recipeId: picked!.id,
+        batchSize: Number(batchSize),
+        dateRequired: dateRequired || undefined,
+        reference: reference || undefined,
+      }),
+    onSuccess: (r) => onDone(r.id),
+  });
+
+  const canSubmit = !!picked && !!batchSize && Number(batchSize) > 0;
+
+  return (
+    <Card>
+      <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (canSubmit) m.mutate(); }}>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Recipe (batching / RMBA)">
+            {picked ? (
+              <div className="flex items-center gap-2">
+                <span className="rounded-md bg-indigo-50 px-2 py-1 text-sm font-medium text-indigo-700">
+                  {picked.recipeNumber ?? `#${picked.id}`}
+                </span>
+                <button type="button" onClick={() => { setPicked(null); setSearch(''); }} className="text-sm text-slate-500 hover:underline">change</button>
+              </div>
+            ) : (
+              <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Type a recipe number…" />
+            )}
+          </Field>
+          <Field label="Batch size">
+            <Input type="number" min="0" step="any" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} placeholder="e.g. 10" />
+          </Field>
+          <Field label="Required date (optional)">
+            <Input type="date" value={dateRequired} onChange={(e) => setDateRequired(e.target.value)} />
+          </Field>
+          <Field label="Reference (optional)">
+            <Input value={reference} onChange={(e) => setReference(e.target.value)} maxLength={20} />
+          </Field>
+        </div>
+
+        {!picked && search.trim().length >= 1 && (
+          <div className="max-h-48 overflow-y-auto rounded-md border border-slate-200">
+            {recipes.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
+            {!recipes.isLoading && recipes.data?.rows.length === 0 && (
+              <div className="px-3 py-2 text-sm text-slate-400">No published batching recipes match.</div>
+            )}
+            {recipes.data?.rows.map((r) => (
+              <button
+                type="button"
+                key={r.id}
+                onClick={() => setPicked({ id: r.id, recipeNumber: r.recipeNumber })}
+                className="block w-full px-3 py-1.5 text-left text-sm hover:bg-slate-50"
+              >
+                {r.recipeNumber ?? `#${r.id}`}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-3">
+          <Button type="submit" disabled={!canSubmit || m.isPending}>{m.isPending ? 'Creating…' : 'Create batch order'}</Button>
+          {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+          <span className="text-xs text-slate-400">Ingredient &amp; product quantities scale by batch size; QC specs come from the product&apos;s tests.</span>
+        </div>
+      </form>
+    </Card>
   );
 }
 

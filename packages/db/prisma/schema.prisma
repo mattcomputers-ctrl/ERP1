@@ -767,6 +767,36 @@ model OrdDetailTest {
   @@map("OrdDetailTest")
 }
 
+// Item-level testing requirements (mirrors legacy). The QA spec library keyed by
+// item: which tests apply on receipt / production / retest, with Min/Max/Target/
+// Specification. When a batch order is created from a recipe, the produced
+// item's OnProduction tests are copied into OrdDetailTest so the batch ticket's
+// Quality Control section is populated (legacy seeds OrdDetailTest from here at
+// order creation). Also the future source for §11 LIMS / CofA.
+model ItemTest {
+  id             Int      @id @default(autoincrement()) @map("ItemTest")
+  itemId         Int?     @map("Item")
+  test           String?  @map("Test") @db.VarChar(20)
+  version        Int?     @map("Version")
+  testGroup      String?  @map("TestGroup") @db.VarChar(20)
+  qualifier      String?  @map("Qualifier") @db.VarChar(40)
+  min            Float?   @map("Min")
+  max            Float?   @map("Max")
+  target         Float?   @map("Target")
+  comment        String?  @map("Comment") @db.Text
+  onReceipt      Boolean? @map("OnReceipt")
+  onProduction   Boolean? @map("OnProduction")
+  onRetest       Boolean? @map("OnRetest")
+  grade          String?  @map("Grade") @db.VarChar(6)
+  labelClaim     String?  @map("LabelClaim") @db.VarChar(20)
+  labelClaimUnit String?  @map("LabelClaimUnit") @db.VarChar(6)
+  line           Int?     @map("Line")
+  specification  String?  @map("Specification") @db.Text
+
+  @@index([itemId])
+  @@map("ItemTest")
+}
+
 // Commitment link (mirrors legacy): ties a consumption line (OrdDetail, the
 // "use ingredient" UI line) to the source production line it drew from
 // (SrcOrdDetail, a "PK" packaged-product line). Resolved through Lot.OrdDetail

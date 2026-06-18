@@ -75,7 +75,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 ## 5. Batch order processing (UG ch.6–7)
 | Feature | Status | Notes |
 |---|---|---|
-| Create orders from recipes; import orders | 🟡 | `Ordr`/`OrdDetail` mirrored + imported (75K/505K rows); unified **Orders browser** (type filter PO/MFBA/MFPP/SH, search, hold/open filters) with full line detail + party/item/recipe decoration. Order *creation* + execution pending |
+| Create orders from recipes; import orders | 🟡 | `Ordr`/`OrdDetail` mirrored + imported (75K/505K rows); unified **Orders browser** (type filter PO/MFBA/MFPP/SH, search, hold/open filters) with full line detail + party/item/recipe decoration. **Native batch-order creation now live**: pick an RMBA recipe + batch size on the Orders page → `POST /orders` (program `orders.create`) scales every `RecipeDetail` line into `OrdDetail` (UI ingredients + PK product × batch size; structural/instruction lines copied), seeds the product's `ItemTest` OnProduction specs onto an IPT line as `OrdDetailTest` (so the batch ticket's QC section is populated), born Not-started and flowing straight into batch-sheet → release → complete → close. Atomic hash-chained audit; native ids in a high range (≥1e9) so a later legacy import can't clobber them. Multi-batch / order edits / live execution pending |
 | Release, specify packouts, print batch sheets | 🟡 | **Batch ticket** reconstructed to match the plant's real paper format (validated field-for-field vs their PDF on order 189170): header (Formula#/recipe, Batch & Required dates, product + total weight, Batch Order, This Lot, Last Lot=prior lot of same item, Customer), Procedure (raw-material lines w/ Grams\|Pounds\|Done + inline instructions), blank Batch Additions, Quality Control (Test\|Specification from `OrdDetailTest` Min/Max\|Result), blank Packaging, and QC'd/Weighed/Mixed/Packed/Closed-by sign-offs. Server-side `GET /orders/:id/batch-sheet`. Order release/complete lifecycle pending |
 | Complete/close with workflow approvals | 🟡 | **Order lifecycle** live: Release (NST→RLS) / Complete (RLS→CMP, records actual batch size + reason) / Close (CMP→CLS), each a mutating endpoint with its own program (`orders.release`/`.complete`/`.close`), invalid-transition guards, and **atomic hash-chained audit** (validated end-to-end on order 189299). Workflow-approval chains + e-signature on completion pending |
 | Material variance analysis; multi-batch | ⬜ | |
@@ -123,7 +123,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 ## 11. LIMS / QA (UG ch.15)
 | Feature | Status | Notes |
 |---|---|---|
-| Tests & test groups; testing requirements by item | ⬜ | `Test`/`TestGroup`/`ItemTest` |
+| Tests & test groups; testing requirements by item | 🟡 | `ItemTest` (item testing requirements, 13.4K rows) now modeled + imported and consumed by native order creation (product OnProduction tests → order QC specs). `Test`/`TestGroup` + an ItemTest admin UI pending |
 | Sampling (sample sets, labels, sampling, IPT, retesting) | ⬜ | `SampleSet`/`LocationSample` |
 | Sample receiving; stability testing; custom sampling | ⬜ | |
 | Enter test results; disposition sublot; at-risk | 🟡 | `Release` (80,400 rows) mirrored + imported; **QA disposition** (Approved/Hold/Rejected + Grade/Purity/Expiry/ReleasedBy) now surfaced per lot on the Lot Trace (focus + lineage). Entering results / changing disposition pending |

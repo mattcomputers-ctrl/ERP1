@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@erp1/db';
 import { AuditService } from '../audit/audit.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
@@ -7,8 +8,22 @@ import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
 import type { CompleteOrderDto } from './dto/complete-order.dto';
 import type { CloseOrderDto } from './dto/close-order.dto';
+import type { CreateOrderDto } from './dto/create-order.dto';
 
 const LB_TO_GRAMS = 453.59237;
+
+// Native (ERP1-created) orders and their lines live above any legacy id so a
+// later legacy import — which upserts by legacy PK and resets sequences to
+// MAX(id) — can never collide with or clobber a natively-created row. Legacy
+// maxima today: Ordr ~189K, OrdDetail ~528K, OrdDetailTest ~81K. One billion is
+// far above any plausible legacy growth and well under the 32-bit int ceiling.
+const NATIVE_ID_BASE = 1_000_000_000;
+// Postgres transaction advisory lock that serializes native-id allocation so two
+// concurrent creates can't read the same MAX and mint duplicate ids.
+const NATIVE_ORDER_LOCK_KEY = 906090906n;
+// Recipe-line contexts whose quantity scales with batch size (ingredients +
+// produced product); structural/instruction lines (INSTR/BA/UB/IPT) copy as-is.
+const SCALABLE_CONTEXTS = new Set(['UI', 'PK']);
 
 // Order lifecycle: Not started -> Released -> Completed -> Closed (legacy
 // Ordr.Status NST/RLS/CMP/CLS). A null/empty status is treated as Not started.
@@ -234,6 +249,230 @@ export class OrdersService {
       procedure,
       tests: tests.map((t) => ({ test: t.test, specification: formatSpec(t.min, t.max, t.specification) })),
     };
+  }
+
+  // --- create (mutating; RBAC + atomic audit) ------------------------------
+
+  /**
+   * Create a manufacturing batch order (MFBA) natively from a recipe — the front
+   * of the order lifecycle that, until now, only legacy import could produce.
+   *
+   * Mirrors legacy order creation: the order header is born Not-started; every
+   * active RecipeDetail line is copied into OrdDetail with ingredient/product
+   * quantities scaled by the batch size (RecipeDetail formulas are normalised per
+   * unit batch, so OrdDetail.QtyReqd = RecipeDetail.QtyReqd × batchSize, proven
+   * against the live data); and the produced item's OnProduction tests (ItemTest)
+   * are seeded onto one in-process-test (IPT) line as OrdDetailTest, so the batch
+   * ticket's Quality Control section is populated exactly as legacy did. The whole
+   * thing is one transaction with an atomic, hash-chained audit record.
+   */
+  async create(dto: CreateOrderDto, actor: Actor) {
+    const recipe = await this.prisma.recipe.findUnique({
+      where: { id: dto.recipeId },
+      select: { id: true, recipeNumber: true, context: true, ownerId: true },
+    });
+    if (!recipe) throw new NotFoundException('Recipe not found');
+    // Recipe contexts are RM* (RMBA batching, RMPP packaging); only batching
+    // recipes produce MFBA batch orders. Packaging orders are a separate module.
+    if (recipe.context !== 'RMBA') {
+      throw new BadRequestException(
+        `Recipe ${recipe.recipeNumber ?? recipe.id} is not a batching recipe ` +
+          `(context ${recipe.context ?? 'none'}); only RMBA recipes create batch orders.`,
+      );
+    }
+
+    const rdLines = await this.prisma.recipeDetail.findMany({
+      where: { recipeId: recipe.id, NOT: { inactive: true } },
+      orderBy: [{ execOrder: 'asc' }, { line: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true, context: true, itemId: true, qtyReqd: true, entityUnit: true, phase: true,
+        execOrder: true, batchType: true, qualifier: true, description: true, comment: true,
+        mustPreweigh: true, percentUnder: true, percentOver: true, itemNameId: true,
+        pkgTypeId: true, manufacturerId: true, yieldPercent: true, baseQty: true,
+      },
+    });
+    if (!rdLines.length) throw new BadRequestException('Recipe has no active detail lines');
+
+    // A batch order must have a product (the PK line item). Every published RMBA
+    // recipe in the live data has one; reject the malformed case with a clear
+    // error rather than silently producing a product-less order.
+    const productItemIds = [
+      ...new Set(rdLines.filter((l) => l.context === 'PK' && l.itemId != null).map((l) => l.itemId as number)),
+    ];
+    if (!productItemIds.length) {
+      throw new BadRequestException(
+        `Recipe ${recipe.recipeNumber ?? recipe.id} has no product line (a PK line with an item); ` +
+          'cannot create a batch order.',
+      );
+    }
+
+    // Production QC specs come from the produced item's ItemTest (onProduction),
+    // not the recipe — verified against the live data (recipe tests are vestigial;
+    // real orders' OrdDetailTest mirror the product's ItemTest set). Group by item
+    // so each product's specs stay together on their own IPT line (no interleaving
+    // if a recipe — none do today — ever makes more than one distinct product).
+    const itemTests = await this.prisma.itemTest.findMany({
+      where: { itemId: { in: productItemIds }, onProduction: true },
+      orderBy: [{ itemId: 'asc' }, { line: 'asc' }, { id: 'asc' }],
+      select: {
+        itemId: true, test: true, qualifier: true, min: true, max: true, target: true,
+        testGroup: true, grade: true, specification: true, comment: true, line: true,
+      },
+    });
+    const testsByItem = new Map<number, (typeof itemTests)[number][]>();
+    for (const t of itemTests) {
+      if (t.itemId == null) continue;
+      const arr = testsByItem.get(t.itemId) ?? [];
+      arr.push(t);
+      testsByItem.set(t.itemId, arr);
+    }
+
+    // Validate the optional required date here too (belt-and-suspenders beyond the
+    // DTO's @IsISO8601): new Date() yields Invalid Date for bad calendar values.
+    let dateRequired: Date | null = null;
+    if (dto.dateRequired) {
+      dateRequired = new Date(dto.dateRequired);
+      if (Number.isNaN(dateRequired.getTime())) {
+        throw new BadRequestException('dateRequired is not a valid date');
+      }
+    }
+
+    const at = new Date();
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ORDER_LOCK_KEY})`;
+      // Allocate ids in the native range (≥ NATIVE_ID_BASE) per table; the
+      // advisory lock above serializes this so MAX+1 can't be read twice.
+      const nativeWhere = { id: { gte: NATIVE_ID_BASE } };
+      const orderId =
+        ((await tx.ordr.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE) + 1;
+      let odId = (await tx.ordDetail.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
+      let otId =
+        (await tx.ordDetailTest.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
+
+      await tx.ordr.create({
+        data: {
+          id: orderId,
+          context: 'MFBA',
+          status: 'NST',
+          recipeId: recipe.id,
+          ownerId: recipe.ownerId,
+          actualBatchSize: dto.batchSize,
+          dateOrdered: at,
+          dateRequired,
+          reference: dto.reference ?? null,
+          placedBy: actor.label ?? null,
+          isQuote: false,
+        },
+      });
+
+      const lineData: Prisma.OrdDetailCreateManyInput[] = rdLines.map((rd) => ({
+        id: (odId += 1),
+        ordrId: orderId,
+        context: rd.context,
+        itemId: rd.itemId,
+        qtyReqd:
+          rd.qtyReqd != null && SCALABLE_CONTEXTS.has(rd.context ?? '')
+            ? rd.qtyReqd * dto.batchSize
+            : rd.qtyReqd,
+        entityUnit: rd.entityUnit,
+        phase: rd.phase,
+        execOrder: rd.execOrder,
+        batchType: rd.batchType,
+        qualifier: rd.qualifier,
+        description: rd.description,
+        comment: rd.comment,
+        mustPreweigh: rd.mustPreweigh ?? 0,
+        percentUnder: rd.percentUnder,
+        percentOver: rd.percentOver,
+        itemNameId: rd.itemNameId,
+        pkgTypeId: rd.pkgTypeId,
+        manufacturerId: rd.manufacturerId,
+        yieldPercent: rd.yieldPercent,
+        baseQty: rd.baseQty,
+        recipeDetailReference: rd.id,
+        isOpen: true,
+      }));
+
+      // One IPT line per produced item carries that product's production tests
+      // (mirrors how legacy hangs an order's OrdDetailTest off an IPT line). For
+      // the normal single-product recipe this is exactly one IPT line.
+      const testData: Prisma.OrdDetailTestCreateManyInput[] = [];
+      for (const itemId of productItemIds) {
+        const tests = testsByItem.get(itemId);
+        if (!tests?.length) continue;
+        const iptId = (odId += 1);
+        lineData.push({
+          id: iptId,
+          ordrId: orderId,
+          context: 'IPT',
+          itemId,
+          description: 'In-process testing',
+          mustPreweigh: 0,
+          isOpen: true,
+        });
+        for (const t of tests) {
+          testData.push({
+            id: (otId += 1),
+            ordDetailId: iptId,
+            test: t.test,
+            qualifier: t.qualifier,
+            min: t.min,
+            max: t.max,
+            target: t.target,
+            testGroup: t.testGroup,
+            grade: t.grade,
+            specification: t.specification,
+            comment: t.comment,
+            line: t.line,
+          });
+        }
+      }
+
+      await tx.ordDetail.createMany({ data: lineData });
+      if (testData.length) await tx.ordDetailTest.createMany({ data: testData });
+
+      await this.audit.record(
+        {
+          action: 'order.create',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.create',
+          summary:
+            `Batch order #${orderId} created from recipe ${recipe.recipeNumber ?? recipe.id} ` +
+            `(batch size ${dto.batchSize}, ${lineData.length} lines, ${testData.length} QC specs)`,
+          changes: [
+            { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Context', oldValue: null, newValue: 'MFBA' },
+            { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Status', oldValue: null, newValue: 'NST' },
+            { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Recipe', oldValue: null, newValue: String(recipe.id) },
+            { tableName: 'Ordr', recordId: String(orderId), fieldName: 'ActualBatchSize', oldValue: null, newValue: String(dto.batchSize) },
+          ],
+        },
+        tx,
+      );
+
+      return { id: orderId, status: 'NST', lines: lineData.length, tests: testData.length };
+    });
+  }
+
+  /**
+   * Recipe picker for the create-order form: published RMBA recipes matching a
+   * search. Lives here (gated by orders.create) so creating an order doesn't also
+   * require the recipe.manager program that the full Recipes browser demands.
+   */
+  async recipeOptions(q?: string) {
+    const term = q?.trim();
+    const rows = await this.prisma.recipe.findMany({
+      where: {
+        context: 'RMBA',
+        isPublished: true,
+        ...(term ? { recipeNumber: { contains: term, mode: 'insensitive' as const } } : {}),
+      },
+      orderBy: { recipeNumber: 'asc' },
+      take: 15,
+      select: { id: true, recipeNumber: true },
+    });
+    return { rows };
   }
 
   // --- lifecycle (mutating; RBAC + atomic audit) ---------------------------

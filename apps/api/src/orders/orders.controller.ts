@@ -4,6 +4,7 @@ import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
 import { CloseOrderDto } from './dto/close-order.dto';
 import { CompleteOrderDto } from './dto/complete-order.dto';
+import { CreateOrderDto } from './dto/create-order.dto';
 import { OrdersService, type OrdersListQuery } from './orders.service';
 
 @UseGuards(SessionAuthGuard, ProgramGuard)
@@ -15,6 +16,21 @@ export class OrdersController {
   @Get()
   list(@Query() query: OrdersListQuery) {
     return this.orders.list(query);
+  }
+
+  // Create a batch order natively from a recipe (front of the §4.3 lifecycle).
+  @Post()
+  @RequireProgram('orders.create')
+  create(@Body() dto: CreateOrderDto, @CurrentUser() actor: Actor) {
+    return this.orders.create(dto, actor);
+  }
+
+  // Recipe picker for the create form — gated by orders.create (not
+  // recipe.manager). Declared before :id so it isn't swallowed by the param route.
+  @Get('recipe-options')
+  @RequireProgram('orders.create')
+  recipeOptions(@Query('q') q?: string) {
+    return this.orders.recipeOptions(q);
   }
 
   @Get(':id')
