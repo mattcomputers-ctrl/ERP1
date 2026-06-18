@@ -60,6 +60,16 @@ curl -fsSL https://raw.githubusercontent.com/mattcomputers-ctrl/ERP1/main/instal
 | `ERP1_ADMIN_EMAIL` | `mcartwright@precisioninkcorp.com` | Bootstrap admin email (first install only) |
 | `ERP1_ADMIN_PASSWORD` | _(prompt/generate)_ | Set the admin password non-interactively (min 12 chars) |
 | `ERP1_NONINTERACTIVE` | _(unset)_ | Set to skip the password prompt and auto-generate |
+| `ERP1_LEGACY_MSSQL_HOST` | _(empty)_ | Legacy CMS SQL Server host/IP — enables the read-only import |
+| `ERP1_LEGACY_MSSQL_PASSWORD` | _(empty)_ | Password for the read-only legacy login |
+| `ERP1_LEGACY_MSSQL_USER` / `_DB` / `_PORT` | `sds_readonly` / `CMS` / `1433` | Legacy connection (defaults shown) |
+
+The legacy credentials are written only to the server's git-ignored `/opt/erp1/.env` — never committed. Example — configure the import at install time:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mattcomputers-ctrl/ERP1/main/install.sh \
+  | sudo ERP1_LEGACY_MSSQL_HOST=10.10.10.11 ERP1_LEGACY_MSSQL_PASSWORD='your-readonly-password' bash
+```
 
 Example — set the admin password without a prompt:
 
