@@ -373,9 +373,13 @@ model Currency {
 }
 
 model Terms {
-  code        String  @id @map("Terms") @db.VarChar(20)
-  description String? @map("Description") @db.VarChar(256)
-  version     Int?    @map("Version")
+  code            String  @id @map("Terms") @db.VarChar(20)
+  description     String? @map("Description") @db.VarChar(256)
+  typeCode        String? @map("TypeCode") @db.VarChar(2)
+  basisDateCode   String? @map("BasisDateCode") @db.VarChar(2)
+  percent         Float?  @map("Percent")
+  discountDaysDue Int?    @map("DiscountDaysDue")
+  netDays         Int?    @map("NetDays")
 
   @@map("Terms")
 }
@@ -428,4 +432,19 @@ model Item {
   @@index([status])
   @@index([controlledSubstance])
   @@map("Item")
+}
+
+// Record of a legacy import/sync run + its reconciliation report (per-table
+// source/target counts, inserted/updated/rejected).
+model ImportRun {
+  id          BigInt    @id @default(autoincrement())
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+  status      String    @default("running") // running | success | failed
+  mode        String    @default("full") // full | incremental
+  triggeredBy String?
+  report      Json?
+  error       String?
+
+  @@map("import_run")
 }

@@ -20,6 +20,7 @@ const BASELINE_PROGRAMS = [
   { key: 'admin.sessions', name: 'Active Sessions', folder: 'Administration' },
   { key: 'master.entities', name: 'Entities', folder: 'Master Tables' },
   { key: 'master.items', name: 'Items', folder: 'Master Tables' },
+  { key: 'admin.import', name: 'Legacy Import', folder: 'Administration' },
 ];
 
 async function main() {

@@ -4,6 +4,7 @@ import { type Me, useLogout, useMe } from './lib/auth';
 import { ChangePassword } from './pages/ChangePassword';
 import { Dashboard } from './pages/Dashboard';
 import { Entities } from './pages/Entities';
+import { ImportPage } from './pages/ImportPage';
 import { Items } from './pages/Items';
 import { Login } from './pages/Login';
 import { Users } from './pages/Users';
@@ -38,6 +39,7 @@ export function App() {
         <Route path="/entities" element={<Entities />} />
         <Route path="/items" element={<Items />} />
         <Route path="/users" element={<Users />} />
+        <Route path="/import" element={<ImportPage />} />
         <Route path="/change-password" element={<ChangePassword />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
@@ -53,6 +55,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/entities', label: 'Entities' },
     { to: '/items', label: 'Items' },
     { to: '/users', label: 'Users' },
+    { to: '/import', label: 'Import' },
   ];
 
   return (

@@ -60,6 +60,11 @@ services:
       SESSION_TTL_HOURS: ${SESSION_TTL_HOURS}
       PUBLIC_URL: ${PUBLIC_URL}
       APP_VERSION: ${APP_VERSION:-0.1.0}
+      LEGACY_MSSQL_HOST: ${LEGACY_MSSQL_HOST:-}
+      LEGACY_MSSQL_PORT: ${LEGACY_MSSQL_PORT:-1433}
+      LEGACY_MSSQL_DB: ${LEGACY_MSSQL_DB:-CMS}
+      LEGACY_MSSQL_USER: ${LEGACY_MSSQL_USER:-sds_readonly}
+      LEGACY_MSSQL_PASSWORD: ${LEGACY_MSSQL_PASSWORD:-}
     depends_on:
       db:
         condition: service_healthy
