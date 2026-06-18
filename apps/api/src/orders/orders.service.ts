@@ -1,9 +1,21 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { AuditService } from '../audit/audit.service';
+import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import type { CompleteOrderDto } from './dto/complete-order.dto';
+import type { CloseOrderDto } from './dto/close-order.dto';
 
 const LB_TO_GRAMS = 453.59237;
+
+// Order lifecycle: Not started -> Released -> Completed -> Closed (legacy
+// Ordr.Status NST/RLS/CMP/CLS). A null/empty status is treated as Not started.
+const STATUS_LABEL: Record<string, string> = {
+  NST: 'Not started', RLS: 'Released', CMP: 'Completed', CLS: 'Closed',
+};
+const curStatus = (s: string | null) => (s && s.trim() ? s : 'NST');
+const label = (s: string | null) => STATUS_LABEL[curStatus(s)] ?? curStatus(s);
 
 const SORTABLE = ['id', 'context', 'status', 'dateOrdered', 'dateRequired', 'dateCompleted'];
 
@@ -21,6 +33,7 @@ export class OrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
+    private readonly audit: AuditService,
   ) {}
 
   async list(query: OrdersListQuery) {
@@ -218,6 +231,108 @@ export class OrdersService {
       procedure,
       tests: tests.map((t) => ({ test: t.test, specification: formatSpec(t.min, t.max, t.specification) })),
     };
+  }
+
+  // --- lifecycle (mutating; RBAC + atomic audit) ---------------------------
+
+  /** Release an order for production (Not started -> Released). */
+  async release(id: number, actor: Actor) {
+    const order = await this.requireTransition(id, 'NST', 'release');
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const u = await tx.ordr.update({
+        where: { id },
+        data: { status: 'RLS', dateReleased: at },
+      });
+      await this.audit.record(
+        {
+          action: 'order.release',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.release',
+          summary: `Order #${id} released`,
+          changes: [
+            { tableName: 'Ordr', recordId: String(id), fieldName: 'Status', oldValue: order.status, newValue: 'RLS' },
+            { tableName: 'Ordr', recordId: String(id), fieldName: 'DateReleased', oldValue: null, newValue: at.toISOString() },
+          ],
+        },
+        tx,
+      );
+      return { id, status: u.status };
+    });
+  }
+
+  /** Complete an order, recording actual batch size/yield (Released -> Completed). */
+  async complete(id: number, dto: CompleteOrderDto, actor: Actor) {
+    const order = await this.requireTransition(id, 'RLS', 'complete');
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const u = await tx.ordr.update({
+        where: { id },
+        data: {
+          status: 'CMP',
+          dateCompleted: at,
+          ...(dto.actualBatchSize != null ? { actualBatchSize: dto.actualBatchSize } : {}),
+        },
+      });
+      const changes = [
+        { tableName: 'Ordr', recordId: String(id), fieldName: 'Status', oldValue: order.status, newValue: 'CMP' },
+        { tableName: 'Ordr', recordId: String(id), fieldName: 'DateCompleted', oldValue: null, newValue: at.toISOString() },
+      ];
+      if (dto.actualBatchSize != null) {
+        changes.push({
+          tableName: 'Ordr', recordId: String(id), fieldName: 'ActualBatchSize',
+          oldValue: order.actualBatchSize != null ? String(order.actualBatchSize) : null,
+          newValue: String(dto.actualBatchSize),
+        });
+      }
+      await this.audit.record(
+        {
+          action: 'order.complete',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.complete',
+          summary: `Order #${id} completed${dto.reason ? ` — ${dto.reason}` : ''}`,
+          changes,
+        },
+        tx,
+      );
+      return { id, status: u.status };
+    });
+  }
+
+  /** Close a completed order (Completed -> Closed). */
+  async close(id: number, dto: CloseOrderDto, actor: Actor) {
+    const order = await this.requireTransition(id, 'CMP', 'close');
+    return this.prisma.$transaction(async (tx) => {
+      const u = await tx.ordr.update({ where: { id }, data: { status: 'CLS' } });
+      await this.audit.record(
+        {
+          action: 'order.close',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.close',
+          summary: `Order #${id} closed${dto.reason ? ` — ${dto.reason}` : ''}`,
+          changes: [
+            { tableName: 'Ordr', recordId: String(id), fieldName: 'Status', oldValue: order.status, newValue: 'CLS' },
+          ],
+        },
+        tx,
+      );
+      return { id, status: u.status };
+    });
+  }
+
+  /** Load an order and assert it is in the expected state for a transition. */
+  private async requireTransition(id: number, from: string, action: string) {
+    const order = await this.prisma.ordr.findUnique({ where: { id } });
+    if (!order) throw new NotFoundException('Order not found');
+    if (curStatus(order.status) !== from) {
+      throw new BadRequestException(
+        `Cannot ${action} order #${id}: it is ${label(order.status)} (must be ${STATUS_LABEL[from]}).`,
+      );
+    }
+    return order;
   }
 
   // --- decoration ----------------------------------------------------------

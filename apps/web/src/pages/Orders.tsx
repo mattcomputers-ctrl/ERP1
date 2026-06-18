@@ -1,8 +1,13 @@
-import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { type ReactNode, useState } from 'react';
 import { DataGrid, type GridColumn } from '../components/DataGrid';
 import { Card } from '../components/ui';
 import { api } from '../lib/api';
+
+const lifeState = (status: string | null) => (status && status.trim() ? status : 'NST');
+const STATUS_LABEL: Record<string, string> = {
+  NST: 'Not started', RLS: 'Released', CMP: 'Completed', CLS: 'Closed',
+};
 
 // Ordr.Context discriminators -> friendly labels.
 const TYPE_LABEL: Record<string, string> = {
@@ -111,6 +116,21 @@ export function Orders() {
     enabled: selected != null,
   });
 
+  const qc = useQueryClient();
+  const [batchSize, setBatchSize] = useState('');
+  const [reason, setReason] = useState('');
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['order', selected] });
+    qc.invalidateQueries({ queryKey: ['orders'] });
+    setBatchSize('');
+    setReason('');
+  };
+  const action = useMutation({
+    mutationFn: (v: { id: number; verb: string; body?: unknown }) =>
+      api.post(`/orders/${v.id}/${v.verb}`, v.body),
+    onSuccess: refresh,
+  });
+
   const columns: GridColumn<OrderRow>[] = [
     { key: 'id', header: 'Order #', sortable: true },
     { key: 'context', header: 'Type', sortable: true, render: (r) => typeLabel(r.context) },
@@ -192,6 +212,32 @@ export function Orders() {
             </div>
           </div>
 
+          {/* Lifecycle actions */}
+          <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md bg-slate-50 px-3 py-2 text-sm">
+            <span className="text-slate-500">Lifecycle:</span>
+            <span className="rounded-full bg-white px-2 py-0.5 font-medium text-slate-700 ring-1 ring-slate-200">
+              {STATUS_LABEL[lifeState(detail.data.status)] ?? detail.data.status}
+            </span>
+            {lifeState(detail.data.status) === 'NST' && (
+              <ActionButton pending={action.isPending} onClick={() => action.mutate({ id: detail.data!.id, verb: 'release' })}>Release</ActionButton>
+            )}
+            {lifeState(detail.data.status) === 'RLS' && (
+              <>
+                <input value={batchSize} onChange={(e) => setBatchSize(e.target.value)} placeholder="Actual batch size" inputMode="decimal" className="w-32 rounded border border-slate-300 px-2 py-1" />
+                <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" className="w-48 rounded border border-slate-300 px-2 py-1" />
+                <ActionButton pending={action.isPending} onClick={() => action.mutate({ id: detail.data!.id, verb: 'complete', body: { actualBatchSize: batchSize ? Number(batchSize) : undefined, reason: reason || undefined } })}>Complete</ActionButton>
+              </>
+            )}
+            {lifeState(detail.data.status) === 'CMP' && (
+              <>
+                <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" className="w-48 rounded border border-slate-300 px-2 py-1" />
+                <ActionButton pending={action.isPending} onClick={() => action.mutate({ id: detail.data!.id, verb: 'close', body: { reason: reason || undefined } })}>Close order</ActionButton>
+              </>
+            )}
+            {lifeState(detail.data.status) === 'CLS' && <span className="text-slate-400">No further actions — order is closed.</span>}
+            {action.isError && <span className="text-red-600">{(action.error as Error).message}</span>}
+          </div>
+
           <dl className="mb-4 grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
             <Detail label="Status" value={detail.data.status} />
             <Detail label="Party" value={detail.data.entityCode} />
@@ -253,5 +299,17 @@ function Detail({ label, value }: { label: string; value: string | null | undefi
       <dt className="text-xs uppercase tracking-wide text-slate-400">{label}</dt>
       <dd className="text-slate-800">{value || <span className="text-slate-300">—</span>}</dd>
     </div>
+  );
+}
+
+function ActionButton({ children, onClick, pending }: { children: ReactNode; onClick: () => void; pending?: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={pending}
+      className="rounded-md bg-indigo-600 px-3 py-1 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+    >
+      {children}
+    </button>
   );
 }

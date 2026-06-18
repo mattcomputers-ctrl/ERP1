@@ -77,7 +77,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 |---|---|---|
 | Create orders from recipes; import orders | 🟡 | `Ordr`/`OrdDetail` mirrored + imported (75K/505K rows); unified **Orders browser** (type filter PO/MFBA/MFPP/SH, search, hold/open filters) with full line detail + party/item/recipe decoration. Order *creation* + execution pending |
 | Release, specify packouts, print batch sheets | 🟡 | **Batch ticket** reconstructed to match the plant's real paper format (validated field-for-field vs their PDF on order 189170): header (Formula#/recipe, Batch & Required dates, product + total weight, Batch Order, This Lot, Last Lot=prior lot of same item, Customer), Procedure (raw-material lines w/ Grams\|Pounds\|Done + inline instructions), blank Batch Additions, Quality Control (Test\|Specification from `OrdDetailTest` Min/Max\|Result), blank Packaging, and QC'd/Weighed/Mixed/Packed/Closed-by sign-offs. Server-side `GET /orders/:id/batch-sheet`. Order release/complete lifecycle pending |
-| Complete/close with workflow approvals | ⬜ | |
+| Complete/close with workflow approvals | 🟡 | **Order lifecycle** live: Release (NST→RLS) / Complete (RLS→CMP, records actual batch size + reason) / Close (CMP→CLS), each a mutating endpoint with its own program (`orders.release`/`.complete`/`.close`), invalid-transition guards, and **atomic hash-chained audit** (validated end-to-end on order 189299). Workflow-approval chains + e-signature on completion pending |
 | Material variance analysis; multi-batch | ⬜ | |
 | Full Batch Execution (preweigh, resources, procedure, release, express blend, packaging, reversing, yields, review, scale, auto next/scale) | ⬜ | |
 | Express Execution; batch testing | ⬜ | |
