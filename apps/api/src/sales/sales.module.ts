@@ -11,5 +11,6 @@ import { PartyService } from './party.service';
   imports: [AuthModule, SettingsModule],
   controllers: [InvoicesController, PackingSlipController],
   providers: [InvoicesService, PackingSlipService, PartyService],
+  exports: [PartyService],
 })
 export class SalesModule {}

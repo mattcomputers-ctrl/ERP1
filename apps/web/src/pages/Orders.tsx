@@ -30,6 +30,7 @@ interface OrderRow {
   ordSubType: string | null;
   status: string | null;
   entityCode: string | null;
+  party: string | null;
   recipeId: number | null;
   poNumber: string | null;
   reference: string | null;
@@ -134,7 +135,7 @@ export function Orders() {
   const columns: GridColumn<OrderRow>[] = [
     { key: 'id', header: 'Order #', sortable: true },
     { key: 'context', header: 'Type', sortable: true, render: (r) => typeLabel(r.context) },
-    { key: 'entityCode', header: 'Party' },
+    { key: 'party', header: 'Customer / party', render: (r) => r.party || r.entityCode || '' },
     { key: 'reference', header: 'Reference', render: (r) => r.reference || r.poNumber || '' },
     { key: 'status', header: 'Status', sortable: true },
     {

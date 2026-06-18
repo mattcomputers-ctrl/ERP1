@@ -3,6 +3,7 @@ import { AuditService } from '../audit/audit.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
 import { PrismaService } from '../prisma/prisma.service';
+import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
 import type { CompleteOrderDto } from './dto/complete-order.dto';
 import type { CloseOrderDto } from './dto/close-order.dto';
@@ -34,6 +35,7 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
     private readonly audit: AuditService,
+    private readonly party: PartyService,
   ) {}
 
   async list(query: OrdersListQuery) {
@@ -65,6 +67,7 @@ export class OrdersService {
         orderBy,
         select: {
           id: true, context: true, ordSubType: true, status: true, entityId: true,
+          billToId: true, shipToId: true,
           recipeId: true, poNumber: true, reference: true, actualBatchSize: true,
           isQuote: true, userHold: true, executionHold: true, creditHold: true,
           dateOrdered: true, dateRequired: true, dateCompleted: true,
@@ -338,12 +341,19 @@ export class OrdersService {
   // --- decoration ----------------------------------------------------------
 
   private async decorate(
-    rows: { id: number; entityId: number | null }[] & Record<string, unknown>[],
+    rows: { id: number; entityId: number | null; billToId?: number | null; shipToId?: number | null }[] &
+      Record<string, unknown>[],
   ) {
-    const entities = await this.entityCodes(rows.map((r) => r.entityId as number | null));
+    // Resolve the display party name. On SH orders entityId is null, so fall
+    // back to BillTo then ShipTo (names come from Address via PartyService).
+    const parties = await this.party.resolve(
+      rows.flatMap((r) => [r.entityId, r.billToId ?? null, r.shipToId ?? null]),
+    );
+    const nameOf = (id: number | null | undefined) => (id != null ? (parties.get(id)?.name ?? null) : null);
     return rows.map((r) => ({
       ...r,
-      entityCode: r.entityId != null ? (entities.get(r.entityId as number) ?? null) : null,
+      party: nameOf(r.entityId) ?? nameOf(r.billToId) ?? nameOf(r.shipToId),
+      entityCode: r.entityId != null ? (parties.get(r.entityId)?.entityCode ?? null) : null,
     }));
   }
 
