@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { type Me, useLogout, useMe } from './lib/auth';
+import { BatchSheet } from './pages/BatchSheet';
 import { ChangePassword } from './pages/ChangePassword';
 import { Dashboard } from './pages/Dashboard';
 import { Entities } from './pages/Entities';
@@ -46,6 +47,7 @@ export function App() {
         <Route path="/units" element={<Units />} />
         <Route path="/recipes" element={<Recipes />} />
         <Route path="/orders" element={<Orders />} />
+        <Route path="/orders/:id/sheet" element={<BatchSheet />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
@@ -75,7 +77,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-slate-200 bg-white">
+      <header className="border-b border-slate-200 bg-white print:hidden">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
           <div className="flex items-center gap-6">
             <span className="text-lg font-semibold text-indigo-700">ERP1</span>

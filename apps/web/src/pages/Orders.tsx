@@ -177,7 +177,19 @@ export function Orders() {
               </h2>
               <p className="text-sm text-slate-500">{detail.data.lines.length} lines</p>
             </div>
-            <button onClick={() => setSelected(null)} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+            <div className="flex items-center gap-4">
+              {(detail.data.context === 'MFBA' || detail.data.context === 'MFPP') && (
+                <a
+                  href={`/orders/${detail.data.id}/sheet`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-sm font-medium text-indigo-600 hover:underline"
+                >
+                  Print batch sheet
+                </a>
+              )}
+              <button onClick={() => setSelected(null)} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+            </div>
           </div>
 
           <dl className="mb-4 grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">

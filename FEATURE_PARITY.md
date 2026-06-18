@@ -76,7 +76,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Feature | Status | Notes |
 |---|---|---|
 | Create orders from recipes; import orders | 🟡 | `Ordr`/`OrdDetail` mirrored + imported (75K/505K rows); unified **Orders browser** (type filter PO/MFBA/MFPP/SH, search, hold/open filters) with full line detail + party/item/recipe decoration. Order *creation* + execution pending |
-| Release, specify packouts, print batch sheets | ⬜ | |
+| Release, specify packouts, print batch sheets | 🟡 | **Printable batch/packaging sheet** done — print-optimized record (header + phased material/step lines with blank Actual/Lot-used/By/Verified columns for paper execution + sign-off block), per the user's paper-batch-sheet workflow. Order release/complete lifecycle pending |
 | Complete/close with workflow approvals | ⬜ | |
 | Material variance analysis; multi-batch | ⬜ | |
 | Full Batch Execution (preweigh, resources, procedure, release, express blend, packaging, reversing, yields, review, scale, auto next/scale) | ⬜ | |
