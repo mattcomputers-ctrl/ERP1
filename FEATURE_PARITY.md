@@ -86,7 +86,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 ## 6. Packaging order processing (UG ch.8–9)
 | Feature | Status | Notes |
 |---|---|---|
-| Create/release/print/complete | ⬜ | `Ordr` Context=`MFPP` |
+| Create/release/print/complete | 🟡 | **Native packaging-order creation now live** — the same `POST /orders` create engine handles an RMPP recipe → `Ordr` Context=`MFPP` (order type derived from the recipe context). Scales UI+PK lines by batch size (StdQty preserves the per-unit base; no IPT/QC lines — packaging carries no in-process tests), born Not-started, flowing into the shared batch-sheet → release → complete (e-signature) → close path. Package Execution / express / order edits pending |
 | Package Express Execution & Package Execution (setup, packaging, resources, instructions, tests, end-lot, reserved-material release) | ⬜ | |
 | Packaging order edits | ⬜ | |
 

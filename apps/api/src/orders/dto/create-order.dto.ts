@@ -1,7 +1,7 @@
 import { IsInt, IsISO8601, IsNumber, IsOptional, IsPositive, IsString, Max, MaxLength } from 'class-validator';
 
 export class CreateOrderDto {
-  /** RMBA (batching) recipe to scale into the order's lines. */
+  /** Production recipe (RMBA batching or RMPP packaging) to scale into the order's lines. */
   @IsInt()
   recipeId!: number;
 

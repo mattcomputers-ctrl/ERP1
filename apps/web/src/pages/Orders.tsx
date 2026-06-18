@@ -162,7 +162,7 @@ export function Orders() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-slate-900">Orders</h1>
-        <Button onClick={() => setShowCreate((v) => !v)}>{showCreate ? 'Close' : 'New batch order'}</Button>
+        <Button onClick={() => setShowCreate((v) => !v)}>{showCreate ? 'Close' : 'New order'}</Button>
       </div>
 
       {showCreate && (
@@ -304,12 +304,16 @@ export function Orders() {
   );
 }
 
-// Create a batch order from a recipe: a lightweight recipe-number typeahead
-// (5,600+ published RMBA recipes — too many for a plain <select>) over the
-// existing recipes list endpoint, plus the target batch size.
+// Create an order from a recipe: a lightweight recipe-number typeahead over the
+// production recipes (thousands — too many for a plain <select>), plus the target
+// batch size. The order type (batch vs packaging) follows the recipe's context.
+type RecipeOption = { id: number; recipeNumber: string | null; context: string | null };
+const recipeKind = (ctx: string | null) =>
+  ctx === 'RMBA' ? 'Batch' : ctx === 'RMPP' ? 'Packaging' : (ctx ?? '');
+
 function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
   const [search, setSearch] = useState('');
-  const [picked, setPicked] = useState<{ id: number; recipeNumber: string | null } | null>(null);
+  const [picked, setPicked] = useState<RecipeOption | null>(null);
   const [batchSize, setBatchSize] = useState('');
   const [dateRequired, setDateRequired] = useState('');
   const [reference, setReference] = useState('');
@@ -317,9 +321,7 @@ function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
   const recipes = useQuery({
     queryKey: ['recipe-options', search],
     queryFn: () =>
-      api.get<{ rows: { id: number; recipeNumber: string | null }[] }>(
-        `/orders/recipe-options?q=${encodeURIComponent(search)}`,
-      ),
+      api.get<{ rows: RecipeOption[] }>(`/orders/recipe-options?q=${encodeURIComponent(search)}`),
     enabled: !picked && search.trim().length >= 1,
   });
 
@@ -340,19 +342,22 @@ function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
     <Card>
       <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (canSubmit) m.mutate(); }}>
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Recipe (batching / RMBA)">
+          <Field label="Recipe">
             {picked ? (
               <div className="flex items-center gap-2">
                 <span className="rounded-md bg-indigo-50 px-2 py-1 text-sm font-medium text-indigo-700">
                   {picked.recipeNumber ?? `#${picked.id}`}
                 </span>
+                {recipeKind(picked.context) && (
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{recipeKind(picked.context)}</span>
+                )}
                 <button type="button" onClick={() => { setPicked(null); setSearch(''); }} className="text-sm text-slate-500 hover:underline">change</button>
               </div>
             ) : (
               <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Type a recipe number…" />
             )}
           </Field>
-          <Field label="Batch size">
+          <Field label={picked?.context === 'RMPP' ? 'Packaging quantity' : 'Batch size'}>
             <Input type="number" min="0" step="any" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} placeholder="e.g. 10" />
           </Field>
           <Field label="Required date (optional)">
@@ -367,25 +372,26 @@ function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
           <div className="max-h-48 overflow-y-auto rounded-md border border-slate-200">
             {recipes.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
             {!recipes.isLoading && recipes.data?.rows.length === 0 && (
-              <div className="px-3 py-2 text-sm text-slate-400">No published batching recipes match.</div>
+              <div className="px-3 py-2 text-sm text-slate-400">No published production recipes match.</div>
             )}
             {recipes.data?.rows.map((r) => (
               <button
                 type="button"
                 key={r.id}
-                onClick={() => setPicked({ id: r.id, recipeNumber: r.recipeNumber })}
-                className="block w-full px-3 py-1.5 text-left text-sm hover:bg-slate-50"
+                onClick={() => setPicked(r)}
+                className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50"
               >
-                {r.recipeNumber ?? `#${r.id}`}
+                <span>{r.recipeNumber ?? `#${r.id}`}</span>
+                <span className="text-xs text-slate-400">{recipeKind(r.context)}</span>
               </button>
             ))}
           </div>
         )}
 
         <div className="flex flex-wrap items-center gap-3">
-          <Button type="submit" disabled={!canSubmit || m.isPending}>{m.isPending ? 'Creating…' : 'Create batch order'}</Button>
+          <Button type="submit" disabled={!canSubmit || m.isPending}>{m.isPending ? 'Creating…' : 'Create order'}</Button>
           {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
-          <span className="text-xs text-slate-400">Ingredient &amp; product quantities scale by batch size; QC specs come from the product&apos;s tests.</span>
+          <span className="text-xs text-slate-400">Quantities scale by batch size; batch orders also pull QC specs from the product&apos;s tests.</span>
         </div>
       </form>
     </Card>
