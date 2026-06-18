@@ -28,14 +28,21 @@ migrations. Your data and your `.env` (secrets) are preserved across upgrades.
    web server (Caddy). Applies DB migrations and seeds the admin user.
 5. Prints the URL and, on first install, the admin credentials.
 
-### First-login credentials
-On a fresh install the admin credentials are printed at the end and saved to:
+### Admin account & password
+On a fresh install the admin email defaults to `mcartwright@precisioninkcorp.com`
+(override with `ERP1_ADMIN_EMAIL`). The password is chosen as, first match wins:
+
+1. **`ERP1_ADMIN_PASSWORD`** env var (min 12 chars) — for scripted/unattended installs;
+2. otherwise an **interactive prompt** during install (hidden input, with confirmation;
+   press Enter to auto-generate);
+3. otherwise **auto-generated** (when no terminal is available).
+
+A password you set is used as-is. An auto-generated password is printed at the end
+and **must be changed at first login**. Either way the credentials are saved to:
 
 ```
 /opt/erp1/secrets/admin-credentials.txt   (root-only)
 ```
-
-You must change the password on first login.
 
 ## Configuration overrides
 Pass environment variables before the pipe:
@@ -50,7 +57,15 @@ curl -fsSL https://raw.githubusercontent.com/mattcomputers-ctrl/ERP1/main/instal
 | `ERP1_DIR` | `/opt/erp1` | Install directory |
 | `ERP1_BRANCH` | `main` | Git branch to deploy |
 | `ERP1_HTTP_PORT` | `80` | Host port for the web UI |
-| `ERP1_ADMIN_EMAIL` | `admin@erp1.local` | Bootstrap admin email (first install only) |
+| `ERP1_ADMIN_EMAIL` | `mcartwright@precisioninkcorp.com` | Bootstrap admin email (first install only) |
+| `ERP1_ADMIN_PASSWORD` | _(prompt/generate)_ | Set the admin password non-interactively (min 12 chars) |
+| `ERP1_NONINTERACTIVE` | _(unset)_ | Set to skip the password prompt and auto-generate |
+
+Example — set the admin password without a prompt:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mattcomputers-ctrl/ERP1/main/install.sh | sudo ERP1_ADMIN_PASSWORD='choose-a-strong-one' bash
+```
 
 After first install, edit `/opt/erp1/.env` and re-run the installer (or
 `docker compose up -d`) to apply changes.

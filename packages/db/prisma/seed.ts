@@ -23,6 +23,8 @@ const BASELINE_PROGRAMS = [
 async function main() {
   const adminEmail = process.env.ADMIN_EMAIL ?? 'mcartwright@precisioninkcorp.com';
   const adminPassword = process.env.ADMIN_INITIAL_PASSWORD;
+  // Auto-generated passwords force a change at first login; operator-chosen ones don't.
+  const mustChange = (process.env.ADMIN_MUST_CHANGE_PASSWORD ?? 'true').toLowerCase() !== 'false';
 
   // Administrator role (system role — cannot be deleted via UI).
   const adminRole = await prisma.role.upsert({
@@ -78,7 +80,7 @@ async function main() {
       displayName: 'Administrator',
       status: 'ACTIVE',
       passwordHash,
-      mustChangePassword: true,
+      mustChangePassword: mustChange,
       roles: { create: { roleId: adminRole.id } },
     },
   });

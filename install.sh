@@ -5,16 +5,20 @@
 #   Fresh install or upgrade (auto-detected):
 #     curl -fsSL https://raw.githubusercontent.com/mattcomputers-ctrl/ERP1/main/install.sh | sudo bash
 #
-#   Optional overrides (env vars before the pipe, or exported):
-#     ERP1_DIR=/opt/erp1  ERP1_BRANCH=main  ERP1_HTTP_PORT=80
+#   Optional overrides (env vars after sudo so they survive into the script):
+#     curl -fsSL <url> | sudo ERP1_HTTP_PORT=8080 bash
+#     curl -fsSL <url> | sudo ERP1_ADMIN_PASSWORD='your-strong-pw' bash   # non-interactive
+#     curl -fsSL <url> | sudo ERP1_ADMIN_EMAIL=you@company.com bash
 #
-# What it does, with no interactive prompts:
-#   1. Installs prerequisites (Docker Engine + Compose plugin, git, openssl).
-#   2. Clones the repo on first run; on later runs pulls + switches to UPGRADE mode.
-#   3. Generates strong secrets + a bootstrap admin password on first run;
-#      preserves the existing .env on upgrades.
-#   4. Builds and starts the stack, applies DB migrations, seeds the admin.
-#   5. Prints the URL and (first install only) the admin credentials.
+# On a fresh install the admin password is chosen as follows (first match wins):
+#   1. ERP1_ADMIN_PASSWORD env var (>=12 chars), or
+#   2. an interactive hidden prompt (Enter = auto-generate), or
+#   3. auto-generated (fully unattended, no terminal).
+# A password you set is used as-is; an auto-generated one must be changed at
+# first login.
+#
+# Prerequisites (Docker Engine + Compose plugin, git, openssl) are installed
+# automatically with no prompts.
 #
 set -euo pipefail
 
@@ -52,7 +56,6 @@ install_docker() {
     log "Installing Docker Engine + Compose plugin (via get.docker.com)..."
     curl -fsSL https://get.docker.com | sh
   fi
-  # Ensure the daemon is running and enabled at boot.
   if command -v systemctl >/dev/null 2>&1; then
     systemctl enable --now docker >/dev/null 2>&1 || warn "Could not enable docker via systemd; continuing."
   fi
@@ -86,6 +89,7 @@ ENV_FILE="${ERP1_DIR}/.env"
 SECRETS_DIR="${ERP1_DIR}/secrets"
 ADMIN_CREDS_FILE="${SECRETS_DIR}/admin-credentials.txt"
 FRESH_ENV=0
+ADMIN_GENERATED=0
 
 rand_hex() { openssl rand -hex "${1:-24}"; }
 
@@ -96,8 +100,35 @@ if [ ! -f "${ENV_FILE}" ]; then
 
   POSTGRES_PASSWORD="$(rand_hex 24)"
   SESSION_SECRET="$(rand_hex 32)"
-  ADMIN_INITIAL_PASSWORD="$(rand_hex 16)"
   ADMIN_EMAIL="${ERP1_ADMIN_EMAIL:-mcartwright@precisioninkcorp.com}"
+
+  # --- Admin password: env var > interactive prompt > auto-generated ---------
+  ADMIN_MUST_CHANGE=false
+  if [ -n "${ERP1_ADMIN_PASSWORD:-}" ]; then
+    ADMIN_INITIAL_PASSWORD="${ERP1_ADMIN_PASSWORD}"
+    [ ${#ADMIN_INITIAL_PASSWORD} -ge 12 ] || die "ERP1_ADMIN_PASSWORD must be at least 12 characters."
+    log "Using admin password from ERP1_ADMIN_PASSWORD."
+  elif [ -e /dev/tty ] && [ -z "${ERP1_NONINTERACTIVE:-}" ]; then
+    while :; do
+      printf 'Set a password for the admin account (%s)\n  minimum 12 characters, or press Enter to auto-generate: ' "${ADMIN_EMAIL}" > /dev/tty
+      IFS= read -rs ERP1_PW1 < /dev/tty; printf '\n' > /dev/tty
+      if [ -z "${ERP1_PW1}" ]; then
+        ADMIN_INITIAL_PASSWORD="$(rand_hex 16)"; ADMIN_GENERATED=1; ADMIN_MUST_CHANGE=true; break
+      fi
+      if [ ${#ERP1_PW1} -lt 12 ]; then
+        printf '  Too short (minimum 12 characters). Try again.\n' > /dev/tty; continue
+      fi
+      printf '  Confirm password: ' > /dev/tty
+      IFS= read -rs ERP1_PW2 < /dev/tty; printf '\n' > /dev/tty
+      if [ "${ERP1_PW1}" != "${ERP1_PW2}" ]; then
+        printf '  Passwords do not match. Try again.\n' > /dev/tty; continue
+      fi
+      ADMIN_INITIAL_PASSWORD="${ERP1_PW1}"; break
+    done
+    unset ERP1_PW1 ERP1_PW2 2>/dev/null || true
+  else
+    ADMIN_INITIAL_PASSWORD="$(rand_hex 16)"; ADMIN_GENERATED=1; ADMIN_MUST_CHANGE=true
+  fi
 
   SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
   [ -n "${SERVER_IP}" ] || SERVER_IP="localhost"
@@ -126,22 +157,31 @@ SESSION_TTL_HOURS=12
 
 ADMIN_EMAIL=${ADMIN_EMAIL}
 ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD}
+ADMIN_MUST_CHANGE_PASSWORD=${ADMIN_MUST_CHANGE}
 APP_VERSION=$(git -C "${ERP1_DIR}" rev-parse --short HEAD 2>/dev/null || echo 0.1.0)
 EOF
   chmod 600 "${ENV_FILE}"
 
-  cat > "${ADMIN_CREDS_FILE}" <<EOF
+  if [ "${ADMIN_GENERATED}" -eq 1 ]; then
+    cat > "${ADMIN_CREDS_FILE}" <<EOF
 ERP1 bootstrap administrator (generated $(date -u +%Y-%m-%dT%H:%M:%SZ))
 URL:      ${PUBLIC_URL}
 Email:    ${ADMIN_EMAIL}
 Password: ${ADMIN_INITIAL_PASSWORD}
 
-You will be required to change this password on first login.
+This password was auto-generated. You must change it on first login.
 EOF
+  else
+    cat > "${ADMIN_CREDS_FILE}" <<EOF
+ERP1 bootstrap administrator (generated $(date -u +%Y-%m-%dT%H:%M:%SZ))
+URL:      ${PUBLIC_URL}
+Email:    ${ADMIN_EMAIL}
+Password: (the one you set during installation)
+EOF
+  fi
   chmod 600 "${ADMIN_CREDS_FILE}"
 else
   log "Preserving existing .env (upgrade)."
-  # Keep APP_VERSION in step with the deployed commit for the dashboard/health.
   NEW_VER="$(git -C "${ERP1_DIR}" rev-parse --short HEAD 2>/dev/null || echo 0.1.0)"
   if grep -q '^APP_VERSION=' "${ENV_FILE}"; then
     sed -i "s/^APP_VERSION=.*/APP_VERSION=${NEW_VER}/" "${ENV_FILE}"
@@ -177,20 +217,24 @@ if [ "${ok}" -eq 1 ]; then
   log "ERP1 is up. (${MODE} complete)"
 else
   warn "Health check did not pass yet. The stack may still be starting."
-  warn "Check status with:  docker compose -f ${ERP1_DIR}/docker-compose.yml ps"
-  warn "View logs with:     docker compose -f ${ERP1_DIR}/docker-compose.yml logs -f"
+  warn "Check status:  docker compose -f ${ERP1_DIR}/docker-compose.yml ps"
+  warn "View logs:     docker compose -f ${ERP1_DIR}/docker-compose.yml logs -f"
 fi
 
 echo
-echo "  URL:        ${PUBLIC_URL:-http://<server-ip>:${HTTP_PORT:-80}}"
+echo "  URL:         ${PUBLIC_URL:-http://<server-ip>:${HTTP_PORT:-80}}"
 echo "  Install dir: ${ERP1_DIR}"
 if [ "${FRESH_ENV}" -eq 1 ]; then
   echo
-  echo "  ── Bootstrap administrator (first install) ─────────────────────────"
+  echo "  -- Bootstrap administrator (first install) -------------------------"
   echo "     Email:    ${ADMIN_EMAIL}"
-  echo "     Password: ${ADMIN_INITIAL_PASSWORD}"
-  echo "     (also saved to ${ADMIN_CREDS_FILE} — root-only; change on first login)"
-  echo "  ────────────────────────────────────────────────────────────────────"
+  if [ "${ADMIN_GENERATED}" -eq 1 ]; then
+    echo "     Password: ${ADMIN_INITIAL_PASSWORD}   (auto-generated)"
+    echo "     Saved to ${ADMIN_CREDS_FILE} (root-only). Change it on first login."
+  else
+    echo "     Password: (the one you set during installation)"
+  fi
+  echo "  --------------------------------------------------------------------"
 fi
 echo
 log "Done."

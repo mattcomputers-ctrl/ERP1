@@ -39,6 +39,7 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD}
+      ADMIN_MUST_CHANGE_PASSWORD: ${ADMIN_MUST_CHANGE_PASSWORD:-true}
     depends_on:
       db:
         condition: service_healthy
