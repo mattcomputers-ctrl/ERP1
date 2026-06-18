@@ -68,7 +68,7 @@ The legacy credentials are written only to the server's git-ignored `/opt/erp1/.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mattcomputers-ctrl/ERP1/main/install.sh \
-  | sudo ERP1_LEGACY_MSSQL_HOST=10.10.10.11 ERP1_LEGACY_MSSQL_PASSWORD='your-readonly-password' bash
+  | sudo ERP1_LEGACY_MSSQL_HOST=<your-sql-server-ip> ERP1_LEGACY_MSSQL_PASSWORD='your-readonly-password' bash
 ```
 
 Example — set the admin password without a prompt:
