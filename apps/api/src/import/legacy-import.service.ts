@@ -103,6 +103,46 @@ const TABLES: TableSpec[] = [
     }),
     map: (r) => ({ address: r.Address, tableId: r.TableID, tableName: r.TableName, reference: r.Reference }),
   },
+  {
+    name: 'Lot', legacyTable: 'dbo.Lot', delegate: 'lot',
+    where: (d) => ({ lot: d.lot }),
+    map: (r) => ({
+      lot: r.Lot, version: r.Version, itemId: r.Item, ordDetailId: r.OrdDetail, supplierId: r.Supplier,
+      supLot: r.SupLot, manufacturerId: r.Manufacturer, manfLot: r.ManfLot, manfDate: r.ManfDate,
+      destructDate: r.DestructDate, receivedDate: r.ReceivedDate, cofaDate: r.CofADate,
+      reconciliationStatus: r.ReconciliationStatus, comment: r.Comment, context: r.Context,
+      reduceTesting: b(r.ReduceTesting),
+    }),
+  },
+  {
+    name: 'Sublot', legacyTable: 'dbo.Sublot', delegate: 'sublot', idColumn: 'Sublot',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({ id: r.Sublot, version: r.Version, releaseId: r.Release, lot: r.Lot, sublotCode: r.SublotCode, context: r.Context }),
+  },
+  {
+    name: 'SublotParent', legacyTable: 'dbo.SublotParent', delegate: 'sublotParent',
+    where: (d) => ({ sublotId_parentId: { sublotId: d.sublotId, parentId: d.parentId } }),
+    map: (r) => ({ sublotId: r.Sublot, parentId: r.Parent }),
+  },
+  {
+    name: 'Location', legacyTable: 'dbo.Location', delegate: 'location', idColumn: 'Location',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.Location, locationCode: r.LocationCode, version: r.Version, ownerId: r.Owner,
+      inLocationId: r.InLocation, context: r.Context, pkgTypeId: r.PkgType, ordDetailId: r.OrdDetail,
+      unopened: b(r.Unopened), misplacedDate: r.MisplacedDate, tare: r.Tare, verifiedDate: r.VerifiedDate,
+      status: r.Status, locationGroup: r.LocationGroup, description: r.Description,
+      transferCan: b(r.TransferCan), divisionId: r.Division, reference: r.Reference,
+    }),
+  },
+  {
+    name: 'Inventory', legacyTable: 'dbo.Inventory', delegate: 'inventory', idColumn: 'Inventory',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.Inventory, sublotId: r.Sublot, locationId: r.Location, ordDetailId: r.OrdDetail,
+      itemId: r.Item, status: r.Status, qty: r.Qty,
+    }),
+  },
 ];
 
 @Injectable()
@@ -147,14 +187,22 @@ export class LegacyImportService {
         let rejected = 0;
         const delegate = (this.prisma as unknown as Record<string, any>)[spec.delegate];
 
-        for (const row of rows) {
-          try {
-            const data = spec.map(row);
-            await delegate.upsert({ where: spec.where(data), create: data, update: data });
-            processed++;
-          } catch (e) {
-            rejected++;
-            if (rejected <= 5) this.logger.warn(`${spec.name} row rejected: ${(e as Error).message}`);
+        const CONCURRENCY = 16;
+        for (let i = 0; i < rows.length; i += CONCURRENCY) {
+          const chunk = rows.slice(i, i + CONCURRENCY);
+          const results = await Promise.allSettled(
+            chunk.map((row) => {
+              const data = spec.map(row);
+              return delegate.upsert({ where: spec.where(data), create: data, update: data });
+            }),
+          );
+          for (const res of results) {
+            if (res.status === 'fulfilled') {
+              processed++;
+            } else {
+              rejected++;
+              if (rejected <= 5) this.logger.warn(`${spec.name} row rejected: ${(res.reason as Error)?.message}`);
+            }
           }
         }
 

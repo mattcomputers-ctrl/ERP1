@@ -448,3 +448,96 @@ model ImportRun {
 
   @@map("import_run")
 }
+
+// ===========================================================================
+// Inventory & genealogy (mirrors legacy). Lot -> Sublot -> SublotParent edges
+// (many-to-many = blending/splitting) form the trace/recall graph; Inventory is
+// the live Sublot x Location x Item x Qty junction; Location is a nestable
+// container (InLocation self-ref).
+// ===========================================================================
+
+model Lot {
+  lot                  String    @id @map("Lot") @db.VarChar(50)
+  version              Int?      @map("Version")
+  itemId               Int?      @map("Item")
+  ordDetailId          Int?      @map("OrdDetail")
+  supplierId           Int?      @map("Supplier")
+  supLot               String?   @map("SupLot") @db.VarChar(50)
+  manufacturerId       Int?      @map("Manufacturer")
+  manfLot              String?   @map("ManfLot") @db.VarChar(50)
+  manfDate             DateTime? @map("ManfDate")
+  destructDate         DateTime? @map("DestructDate")
+  receivedDate         DateTime? @map("ReceivedDate")
+  cofaDate             DateTime? @map("CofADate")
+  reconciliationStatus String?   @map("ReconciliationStatus") @db.VarChar(20)
+  comment              String?   @map("Comment") @db.Text
+  context              String?   @map("Context") @db.VarChar(32)
+  reduceTesting        Boolean?  @map("ReduceTesting")
+
+  @@index([itemId])
+  @@index([supplierId])
+  @@map("Lot")
+}
+
+model Sublot {
+  id         Int     @id @default(autoincrement()) @map("Sublot")
+  version    Int?    @map("Version")
+  releaseId  Int?    @map("Release")
+  lot        String? @map("Lot") @db.VarChar(50)
+  sublotCode String? @map("SublotCode") @db.VarChar(51)
+  context    String? @map("Context") @db.VarChar(32)
+
+  @@index([lot])
+  @@map("Sublot")
+}
+
+// Genealogy edge: a sublot's parent sublot(s). Many-to-many (blend/split).
+model SublotParent {
+  sublotId Int @map("Sublot")
+  parentId Int @map("Parent")
+
+  @@id([sublotId, parentId])
+  @@index([parentId])
+  @@map("SublotParent")
+}
+
+model Location {
+  id            Int       @id @default(autoincrement()) @map("Location")
+  locationCode  String?   @map("LocationCode") @db.VarChar(20)
+  version       Int?      @map("Version")
+  ownerId       Int?      @map("Owner")
+  inLocationId  Int?      @map("InLocation")
+  context       String?   @map("Context") @db.VarChar(32)
+  pkgTypeId     Int?      @map("PkgType")
+  ordDetailId   Int?      @map("OrdDetail")
+  unopened      Boolean?  @map("Unopened")
+  misplacedDate DateTime? @map("MisplacedDate")
+  tare          Float?    @map("Tare")
+  verifiedDate  DateTime? @map("VerifiedDate")
+  status        String?   @map("Status") @db.VarChar(6)
+  locationGroup String?   @map("LocationGroup") @db.VarChar(20)
+  description   String?   @map("Description") @db.VarChar(256)
+  transferCan   Boolean?  @map("TransferCan")
+  divisionId    Int?      @map("Division")
+  reference     String?   @map("Reference") @db.VarChar(20)
+
+  @@index([inLocationId])
+  @@index([status])
+  @@index([locationCode])
+  @@map("Location")
+}
+
+model Inventory {
+  id          Int     @id @default(autoincrement()) @map("Inventory")
+  sublotId    Int?    @map("Sublot")
+  locationId  Int     @map("Location")
+  ordDetailId Int?    @map("OrdDetail")
+  itemId      Int     @map("Item")
+  status      String? @map("Status") @db.VarChar(6)
+  qty         Float?  @map("Qty")
+
+  @@index([sublotId])
+  @@index([locationId])
+  @@index([itemId])
+  @@map("Inventory")
+}

@@ -5,8 +5,10 @@ import { ChangePassword } from './pages/ChangePassword';
 import { Dashboard } from './pages/Dashboard';
 import { Entities } from './pages/Entities';
 import { ImportPage } from './pages/ImportPage';
+import { Inventory } from './pages/Inventory';
 import { Items } from './pages/Items';
 import { Login } from './pages/Login';
+import { Recall } from './pages/Recall';
 import { Units } from './pages/Units';
 import { Users } from './pages/Users';
 
@@ -40,6 +42,8 @@ export function App() {
         <Route path="/entities" element={<Entities />} />
         <Route path="/items" element={<Items />} />
         <Route path="/units" element={<Units />} />
+        <Route path="/inventory" element={<Inventory />} />
+        <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/change-password" element={<ChangePassword />} />
@@ -57,6 +61,8 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/entities', label: 'Entities' },
     { to: '/items', label: 'Items' },
     { to: '/units', label: 'Units' },
+    { to: '/inventory', label: 'Inventory' },
+    { to: '/recall', label: 'Recall' },
     { to: '/users', label: 'Users' },
     { to: '/import', label: 'Import' },
   ];
