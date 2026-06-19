@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
 import { chainHash } from '../common/hash-chain';
+import { ESIGN_CHAIN_LOCK } from '../common/locks';
 import { PrismaService } from '../prisma/prisma.service';
 
 export interface SignatureEntry {
@@ -21,10 +22,6 @@ export interface SignatureEntry {
   auditLogId?: bigint | null;
 }
 
-// Transaction advisory-lock key serializing e-signature chain appends — distinct
-// from the audit chain's and the native-order allocator's keys.
-const ESIGN_CHAIN_LOCK_KEY = 514229n;
-
 /**
  * Append-only, tamper-evident electronic-signature ledger (legacy
  * LogSecuredItem). Mirrors AuditService: each row stores
@@ -43,7 +40,7 @@ export class ESignatureService {
   }
 
   private async appendLocked(tx: Prisma.TransactionClient, entry: SignatureEntry) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ESIGN_CHAIN_LOCK_KEY})`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ESIGN_CHAIN_LOCK})`;
 
     const prev = await tx.eSignature.findFirst({ orderBy: { id: 'desc' }, select: { hash: true } });
     const prevHash = prev?.hash ?? null;

@@ -6,6 +6,7 @@ import { AuthService } from '../auth/auth.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { PermissionService } from '../auth/permission.service';
 import { buildList, type ListQuery } from '../common/list';
+import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
@@ -16,15 +17,6 @@ import type { EditOrderDto } from './dto/edit-order.dto';
 
 const LB_TO_GRAMS = 453.59237;
 
-// Native (ERP1-created) orders and their lines live above any legacy id so a
-// later legacy import — which upserts by legacy PK and resets sequences to
-// MAX(id) — can never collide with or clobber a natively-created row. Legacy
-// maxima today: Ordr ~189K, OrdDetail ~528K, OrdDetailTest ~81K. One billion is
-// far above any plausible legacy growth and well under the 32-bit int ceiling.
-const NATIVE_ID_BASE = 1_000_000_000;
-// Postgres transaction advisory lock that serializes native-id allocation so two
-// concurrent creates can't read the same MAX and mint duplicate ids.
-const NATIVE_ORDER_LOCK_KEY = 906090906n;
 // Recipe-line contexts whose quantity scales with batch size (ingredients +
 // produced product); structural/instruction lines (INSTR/BA/UB/IPT) copy as-is.
 const SCALABLE_CONTEXTS = new Set(['UI', 'PK']);
@@ -364,7 +356,7 @@ export class OrdersService {
     const at = new Date();
 
     return this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ORDER_LOCK_KEY})`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       // Allocate ids in the native range (≥ NATIVE_ID_BASE) per table; the
       // advisory lock above serializes this so MAX+1 can't be read twice.
       const nativeWhere = { id: { gte: NATIVE_ID_BASE } };

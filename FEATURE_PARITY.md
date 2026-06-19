@@ -40,8 +40,8 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 ## 2. Purchasing & receiving (UG ch.3)
 | Feature | Status | Notes |
 |---|---|---|
-| Purchase Orders | ⬜ | `Ordr` Context=`PO` |
-| Purchase Receipts | ⬜ | `ChangeSetReceipt` |
+| Purchase Orders | 🟡 | `Ordr` Context=`PO` (4,090 imported; also browse via the unified Orders type filter). **Native PO creation now live**: `POST /purchase-orders` (program `purchasing.create`) creates an `Ordr` Context=`PO` for a supplier (Entity = supplier) with one or more `OrdDetail` Context=`PO` lines (item, qty, optional unit price/unit), born Not-started, native ids ≥1e9 under the shared id-allocation advisory lock, atomic hash-chained audit. A dedicated **Purchasing** page (supplier + item typeaheads, line editor) + a **print-faithful Purchase Order document** (`GET /purchase-orders/:id`, program `purchasing.po`) reusing the shared `PartyService`. Complements the supplier AP bills (the downstream side). Line-level edits / approval routing pending |
+| Purchase Receipts | ⬜ | `ChangeSetReceipt` (9,427 rows) — receiving against a PO creates a Sublot/Lot + on-hand inventory; next increment |
 | Return to Supplier | ⬜ | `ChangeSetReturn` |
 | Miscellaneous / Create Inventory receipts | ⬜ | |
 | Create Sublot | ⬜ | |

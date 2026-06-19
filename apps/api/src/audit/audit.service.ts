@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
 import { chainHash } from '../common/hash-chain';
+import { AUDIT_CHAIN_LOCK } from '../common/locks';
 import { PrismaService } from '../prisma/prisma.service';
 
 export interface FieldChange {
@@ -21,11 +22,6 @@ export interface AuditEntry {
   summary?: string;
   changes?: FieldChange[];
 }
-
-// Fixed key for the Postgres transaction-scoped advisory lock that serializes
-// audit-chain appends (so concurrent writers cannot read the same prevHash and
-// fork the chain). Auto-released on commit/rollback.
-const AUDIT_CHAIN_LOCK_KEY = 4815162342n;
 
 // One canonical shape for a field change, used identically on write and verify
 // so the hashed bytes always match regardless of which optional fields are set.
@@ -59,7 +55,7 @@ export class AuditService {
   private async appendLocked(tx: Prisma.TransactionClient, entry: AuditEntry) {
     // $executeRaw (not $queryRaw): pg_advisory_xact_lock returns void, which
     // $queryRaw cannot deserialize. executeRaw returns a row count instead.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${AUDIT_CHAIN_LOCK_KEY})`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${AUDIT_CHAIN_LOCK})`;
 
     const prev = await tx.auditLog.findFirst({
       orderBy: { id: 'desc' },

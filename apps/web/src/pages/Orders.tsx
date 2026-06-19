@@ -223,6 +223,16 @@ export function Orders() {
                   Print batch sheet
                 </a>
               )}
+              {detail.data.context === 'PO' && (
+                <a
+                  href={`/purchase-orders/${detail.data.id}/print`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-sm font-medium text-indigo-600 hover:underline"
+                >
+                  Print purchase order
+                </a>
+              )}
               <button onClick={() => setSelected(null)} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
             </div>
           </div>

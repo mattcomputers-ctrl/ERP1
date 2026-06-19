@@ -19,6 +19,8 @@ import { Login } from './pages/Login';
 import { Orders } from './pages/Orders';
 import { PackingSlipDoc } from './pages/PackingSlipDoc';
 import { PackingSlips } from './pages/PackingSlips';
+import { PurchaseOrderDoc } from './pages/PurchaseOrderDoc';
+import { Purchasing } from './pages/Purchasing';
 import { Recall } from './pages/Recall';
 import { Recipes } from './pages/Recipes';
 import { Units } from './pages/Units';
@@ -57,6 +59,8 @@ export function App() {
         <Route path="/recipes" element={<Recipes />} />
         <Route path="/orders" element={<Orders />} />
         <Route path="/orders/:id/sheet" element={<BatchSheet />} />
+        <Route path="/purchasing" element={<Purchasing />} />
+        <Route path="/purchase-orders/:id/print" element={<PurchaseOrderDoc />} />
         <Route path="/invoices" element={<Invoices />} />
         <Route path="/invoices/:id/print" element={<InvoiceDoc />} />
         <Route path="/packing-slips" element={<PackingSlips />} />
@@ -87,6 +91,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/units', label: 'Units' },
     { to: '/recipes', label: 'Recipes' },
     { to: '/orders', label: 'Orders' },
+    { to: '/purchasing', label: 'Purchasing' },
     { to: '/invoices', label: 'Invoices' },
     { to: '/packing-slips', label: 'Packing Slips' },
     { to: '/bills', label: 'Supplier Bills' },
