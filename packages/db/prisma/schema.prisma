@@ -447,6 +447,11 @@ model Item {
   serviceGroup          String?  @map("ServiceGroup") @db.VarChar(20)
   service               String?  @map("Service") @db.VarChar(10)
   comment               String?  @map("Comment") @db.Text
+  // ERP1 lot-tracking flag (not legacy). When true the item is lot-traced
+  // (on-hand kept by lot/sublot, recall-capable); when false it is consumed
+  // FIFO by quantity. Set by the lot-tracking enabling process; the legacy
+  // import never touches it (not in the import mapper).
+  lotTracked            Boolean  @default(false) @map("erp1_lot_tracked")
   createdAt             DateTime @default(now()) @map("erp1_created_at")
   updatedAt             DateTime @updatedAt @map("erp1_updated_at")
 

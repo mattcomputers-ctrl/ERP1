@@ -5,6 +5,7 @@ import { GenealogyModule } from './genealogy/genealogy.module';
 import { HealthModule } from './health/health.module';
 import { ImportModule } from './import/import.module';
 import { InventoryModule } from './inventory/inventory.module';
+import { LotTrackingModule } from './lot-tracking/lot-tracking.module';
 import { ManufacturingModule } from './manufacturing/manufacturing.module';
 import { MasterDataModule } from './master-data/master-data.module';
 import { OrdersModule } from './orders/orders.module';
@@ -26,6 +27,7 @@ import { UsersModule } from './users/users.module';
     MasterDataModule,
     ImportModule,
     InventoryModule,
+    LotTrackingModule,
     ManufacturingModule,
     OrdersModule,
     PurchasingModule,

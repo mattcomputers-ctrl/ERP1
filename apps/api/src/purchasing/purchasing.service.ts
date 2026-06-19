@@ -4,6 +4,7 @@ import { AuditService } from '../audit/audit.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
+import { maxRawLotNumber } from '../common/lot-numbers';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
@@ -479,13 +480,8 @@ export class PurchasingService {
       let subId =
         (await tx.sublot.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ??
         NATIVE_ID_BASE;
-      // Raw-material system lot numbers are a simple sequence from 100. Raw
-      // (received) lots are exactly the supplier-tagged numeric lots, so the next
-      // number continues from the current max of those (FG lots are 9-digit
-      // YYMMDD### and carry no supplier, so they never enter this sequence).
-      const lotMax = await tx.$queryRaw<{ m: bigint | null }[]>`
-        SELECT MAX(CAST("Lot" AS bigint)) AS m FROM "Lot" WHERE "Supplier" IS NOT NULL AND "Lot" ~ '^[0-9]+$'`;
-      let lotSeq = Math.max(99, lotMax[0]?.m != null ? Number(lotMax[0].m) : 99);
+      // Raw-material system lot numbers are a simple shared sequence from 100.
+      let lotSeq = await maxRawLotNumber(tx);
 
       const created: { lot: string; manufacturerLot: string; ordDetailId: number; qty: number }[] = [];
       const incByLine = new Map<number, number>();
@@ -580,18 +576,22 @@ export class PurchasingService {
     const term = q?.trim();
     if (!term) return { rows: [] };
 
-    // Raw (received) lots are the supplier-tagged ones; match on the manufacturer
-    // / supplier lot number.
+    // Match the manufacturer/supplier lot number, scoped to ERP1-tracked raw lots
+    // (SupLot is set only by receiving + lot-tracking enablement — every legacy
+    // lot has SupLot null, and a legacy finished-good lot's ManfLot is just its
+    // own YYMMDD### number). This scope is essential: without it a numeric search
+    // term substring-matches thousands of legacy FG self-references and buries the
+    // real raw lot. Newest received first.
     const lots = await this.prisma.lot.findMany({
       where: {
-        supplierId: { not: null },
+        supLot: { not: null },
         OR: [
           { manfLot: { contains: term, mode: 'insensitive' } },
           { supLot: { contains: term, mode: 'insensitive' } },
         ],
       },
       select: { lot: true, itemId: true, supplierId: true, manfLot: true, supLot: true, receivedDate: true },
-      orderBy: { lot: 'desc' },
+      orderBy: { receivedDate: 'desc' },
       take: 200,
     });
     if (!lots.length) return { rows: [] };

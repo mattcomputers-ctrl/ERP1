@@ -16,6 +16,7 @@ import { InvoiceDoc } from './pages/InvoiceDoc';
 import { Invoices } from './pages/Invoices';
 import { Items } from './pages/Items';
 import { Login } from './pages/Login';
+import { LotTracking } from './pages/LotTracking';
 import { Orders } from './pages/Orders';
 import { PackingSlipDoc } from './pages/PackingSlipDoc';
 import { PackingSlips } from './pages/PackingSlips';
@@ -71,6 +72,7 @@ export function App() {
         <Route path="/bills" element={<Bills />} />
         <Route path="/bills/:id/print" element={<BillDoc />} />
         <Route path="/inventory" element={<Inventory />} />
+        <Route path="/lot-tracking" element={<LotTracking />} />
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
         <Route path="/audit" element={<Audit />} />
@@ -98,6 +100,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/bills', label: 'Supplier Bills' },
     { to: '/certificates', label: 'Certificates' },
     { to: '/inventory', label: 'Inventory' },
+    { to: '/lot-tracking', label: 'Lot Tracking' },
     { to: '/recall', label: 'Lot Trace' },
     { to: '/users', label: 'Users' },
     { to: '/audit', label: 'Audit' },

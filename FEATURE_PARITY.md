@@ -51,6 +51,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Feature | Status | Notes |
 |---|---|---|
 | Inventory status & sublot expiry | 🟡 | Inventory browser + import live (37,934 rows); expiry pending |
+| Lot-tracking enablement (per item) | 🟡 | **New `inventory.lotTracking` module**: `Item.lotTracked` flag (items default FIFO-by-qty, not traced). `POST /lot-tracking/items/:id/enable` captures opening on-hand **by lot, grouped per location** — raw materials enter a vendor/mfr lot and ERP1 **mints a lot number** (sequential from 100, tagged supplier+vendor lot, for relabeling); finished goods enter the existing lot number — creating Lot+Sublot+Inventory and **wiping the item's prior legacy on-hand**. `/disable` reverts to FIFO. Web **Lot Tracking** page (item list + enable form showing the assigned lot numbers). Foundation for recall (recall is inert until an item is enabled). FIFO consumption + forward lineage capture (batch consume, shipment-at-close) are the next increments |
 | Storage rules | ⬜ | `StorageRule` |
 | Adjust / consume / reweigh / remeasure | ⬜ | |
 | Empty / merge / dispense from containers | ⬜ | `Location`/`InvMovement` |
