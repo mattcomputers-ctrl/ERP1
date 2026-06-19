@@ -45,6 +45,12 @@ export class PurchasingController {
     return this.purchasing.termsOptions();
   }
 
+  // Recall lookup by manufacturer lot number (received raw-material lots).
+  @Get('recall')
+  recall(@Query('q') q?: string) {
+    return this.purchasing.recallByManufacturerLot(q);
+  }
+
   @Get(':id')
   get(@Param('id', ParseIntPipe) id: number) {
     return this.purchasing.get(id);

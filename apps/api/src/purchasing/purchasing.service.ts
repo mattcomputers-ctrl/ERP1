@@ -123,9 +123,21 @@ export class PurchasingService {
     const receiptRows = csIds.length
       ? await this.prisma.changeSetReceipt.findMany({
           where: { changeSetId: { in: csIds } },
-          select: { changeSetId: true, ordDetailId: true, itemId: true, psQty: true, psUnit: true, numberOfContainers: true },
+          select: { changeSetId: true, ordDetailId: true, itemId: true, sublotId: true, psQty: true, psUnit: true, numberOfContainers: true },
         })
       : [];
+
+    // Resolve each receipt's system lot + manufacturer lot via Sublot -> Lot.
+    const subIds = [...new Set(receiptRows.map((r) => r.sublotId).filter((v): v is number => v != null))];
+    const sublots = subIds.length
+      ? await this.prisma.sublot.findMany({ where: { id: { in: subIds } }, select: { id: true, lot: true } })
+      : [];
+    const lotBySub = new Map(sublots.map((s) => [s.id, s.lot]));
+    const lotCodes = [...new Set(sublots.map((s) => s.lot).filter((v): v is string => v != null))];
+    const lots = lotCodes.length
+      ? await this.prisma.lot.findMany({ where: { lot: { in: lotCodes } }, select: { lot: true, manfLot: true } })
+      : [];
+    const manfByLot = new Map(lots.map((l) => [l.lot, l.manfLot]));
 
     // One items lookup covering both order lines and receipt lines.
     const itemIds = [
@@ -175,15 +187,20 @@ export class PurchasingService {
 
     const csDate = new Map(changeSets.map((c) => [c.id, c.changeDate]));
     const receipts = receiptRows
-      .map((r) => ({
-        changeSetId: r.changeSetId,
-        date: csDate.get(r.changeSetId) ?? null,
-        ordDetailId: r.ordDetailId,
-        itemCode: r.itemId != null ? (itemById.get(r.itemId)?.itemCode ?? null) : null,
-        qty: r.psQty,
-        unit: r.psUnit,
-        numberOfContainers: r.numberOfContainers,
-      }))
+      .map((r) => {
+        const lotCode = r.sublotId != null ? (lotBySub.get(r.sublotId) ?? null) : null;
+        return {
+          changeSetId: r.changeSetId,
+          date: csDate.get(r.changeSetId) ?? null,
+          ordDetailId: r.ordDetailId,
+          itemCode: r.itemId != null ? (itemById.get(r.itemId)?.itemCode ?? null) : null,
+          qty: r.psQty,
+          unit: r.psUnit,
+          numberOfContainers: r.numberOfContainers,
+          lot: lotCode,
+          manufacturerLot: lotCode != null ? (manfByLot.get(lotCode) ?? null) : null,
+        };
+      })
       .sort((a, b) => a.changeSetId - b.changeSetId);
 
     return {
@@ -333,19 +350,28 @@ export class PurchasingService {
   // --- receiving (mutating; RBAC + atomic audit) ---------------------------
 
   /**
-   * Record a receipt against a purchase order: for each received line, create a
-   * Context='PO' ChangeSet (1:1 with its receipt line, native id ≥ NATIVE_ID_BASE
-   * under the shared id-allocation lock) + a ChangeSetReceipt (PSQty = qty
-   * received), and bump the line's OrdDetail.QtyUsed (legacy's running received
-   * total — the AP bill reads it). Over-receipt is allowed. One transaction,
-   * atomic hash-chained audit. On-hand Sublot/Lot/Inventory minting is
-   * intentionally not done here (ChangeSetReceipt.Sublot is unpopulated in this
-   * install); receiving records the event + quantity.
+   * Record a receipt against a purchase order. Each received line carries one or
+   * more LOTS (split a delivery across the manufacturer lots actually received);
+   * for every lot we:
+   *   - assign a sequential raw-material system lot number (from 100), tag it with
+   *     the supplier + the REQUIRED manufacturer lot number (the recall key), and
+   *     create the Lot (the lot of record) + its Sublot;
+   *   - create a Context='PO' ChangeSet (1:1 with its ChangeSetReceipt — the legacy
+   *     one-changeset-per-received-line model) linking the PO line + the new sublot,
+   *     recording PSQty;
+   *   - bump the line's OrdDetail.QtyUsed (legacy's running received total — the AP
+   *     bill reads it).
+   * Native ids (ChangeSet, Sublot) are ≥ NATIVE_ID_BASE and the system lot sequence
+   * is read live, all under the shared id-allocation lock so concurrent receives
+   * can't collide. Over-receipt is allowed. One transaction, atomic hash-chained
+   * audit. On-hand Inventory (qty in a location) is intentionally NOT created here —
+   * that needs a receiving-location decision; the Lot/Sublot + manufacturer lot are
+   * what recall needs.
    */
   async receive(id: number, dto: ReceivePurchaseOrderDto, actor: Actor) {
     const po = await this.prisma.ordr.findUnique({
       where: { id },
-      select: { id: true, context: true, status: true, ownerId: true, poNumber: true },
+      select: { id: true, context: true, status: true, ownerId: true, poNumber: true, entityId: true },
     });
     if (!po || po.context !== PO_CONTEXT) throw new NotFoundException('Purchase order not found');
     if ((po.status?.trim() || 'NST') === 'CLS') {
@@ -371,36 +397,65 @@ export class PurchasingService {
       let csId =
         (await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ??
         NATIVE_ID_BASE;
+      let subId =
+        (await tx.sublot.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ??
+        NATIVE_ID_BASE;
+      // Raw-material system lot numbers are a simple sequence from 100. Raw
+      // (received) lots are exactly the supplier-tagged numeric lots, so the next
+      // number continues from the current max of those (FG lots are 9-digit
+      // YYMMDD### and carry no supplier, so they never enter this sequence).
+      const lotMax = await tx.$queryRaw<{ m: bigint | null }[]>`
+        SELECT MAX(CAST("Lot" AS bigint)) AS m FROM "Lot" WHERE "Supplier" IS NOT NULL AND "Lot" ~ '^[0-9]+$'`;
+      let lotSeq = Math.max(99, lotMax[0]?.m != null ? Number(lotMax[0].m) : 99);
 
-      const created: { changeSetId: number; ordDetailId: number; qty: number }[] = [];
-      // Same line can be received more than once in a single call; accumulate.
+      const created: { lot: string; manufacturerLot: string; ordDetailId: number; qty: number }[] = [];
       const incByLine = new Map<number, number>();
       for (const dl of dto.lines) {
         const line = lineById.get(dl.ordDetailId)!;
-        const newCsId = (csId += 1);
-        await tx.changeSet.create({
-          data: {
-            id: newCsId,
-            context: PO_CONTEXT,
-            ordrId: id,
-            ownerId: po.ownerId,
-            changeDate: at,
-            poNumber: po.poNumber ?? null,
-          },
-        });
-        await tx.changeSetReceipt.create({
-          data: {
-            changeSetId: newCsId,
-            ordDetailId: dl.ordDetailId,
-            itemId: line.itemId,
-            psQty: dl.qty,
-            psUnit: dl.unit ?? line.entityUnit ?? null,
-            qtyPerPsQty: 1,
-            numberOfContainers: dl.numberOfContainers ?? 1,
-          },
-        });
-        incByLine.set(dl.ordDetailId, (incByLine.get(dl.ordDetailId) ?? 0) + dl.qty);
-        created.push({ changeSetId: newCsId, ordDetailId: dl.ordDetailId, qty: dl.qty });
+        for (const lot of dl.lots) {
+          const lotNumber = String((lotSeq += 1));
+          const newSubId = (subId += 1);
+          const newCsId = (csId += 1);
+          // The lot of record: tagged with the supplier + manufacturer lot for recall.
+          await tx.lot.create({
+            data: {
+              lot: lotNumber,
+              context: 'LOT',
+              itemId: line.itemId,
+              supplierId: po.entityId,
+              supLot: lot.manufacturerLot,
+              manfLot: lot.manufacturerLot,
+              receivedDate: at,
+            },
+          });
+          await tx.sublot.create({
+            data: { id: newSubId, lot: lotNumber, sublotCode: lotNumber, context: 'LOT' },
+          });
+          await tx.changeSet.create({
+            data: {
+              id: newCsId,
+              context: PO_CONTEXT,
+              ordrId: id,
+              ownerId: po.ownerId,
+              changeDate: at,
+              poNumber: po.poNumber ?? null,
+            },
+          });
+          await tx.changeSetReceipt.create({
+            data: {
+              changeSetId: newCsId,
+              ordDetailId: dl.ordDetailId,
+              itemId: line.itemId,
+              sublotId: newSubId,
+              psQty: lot.qty,
+              psUnit: lot.unit ?? line.entityUnit ?? null,
+              qtyPerPsQty: 1,
+              numberOfContainers: lot.numberOfContainers ?? 1,
+            },
+          });
+          incByLine.set(dl.ordDetailId, (incByLine.get(dl.ordDetailId) ?? 0) + lot.qty);
+          created.push({ lot: lotNumber, manufacturerLot: lot.manufacturerLot, ordDetailId: dl.ordDetailId, qty: lot.qty });
+        }
       }
 
       // Atomic relative increment (COALESCE because native PO lines start with a
@@ -418,21 +473,106 @@ export class PurchasingService {
           actorLabel: actor.label,
           program: 'purchasing.receive',
           summary:
-            `Received ${created.length} line${created.length === 1 ? '' : 's'} against purchase order #${id}` +
+            `Received ${created.length} lot${created.length === 1 ? '' : 's'} against purchase order #${id}` +
             (dto.reference ? ` (ref ${dto.reference})` : ''),
           changes: created.map((c) => ({
-            tableName: 'ChangeSetReceipt',
-            recordId: String(c.changeSetId),
-            fieldName: 'PSQty',
+            tableName: 'Lot',
+            recordId: c.lot,
+            fieldName: 'received',
             oldValue: null,
-            newValue: `OrdDetail ${c.ordDetailId}: ${c.qty}`,
+            newValue: `OrdDetail ${c.ordDetailId}: ${c.qty} (mfr lot ${c.manufacturerLot})`,
           })),
         },
         tx,
       );
 
-      return { id, received: created.length, changeSets: created.map((c) => c.changeSetId) };
+      return { id, received: created.length, lots: created };
     });
+  }
+
+  /**
+   * Recall lookup by manufacturer lot number: find the received raw-material lot(s)
+   * whose manufacturer/supplier lot matches, with the item, supplier, our system
+   * lot number, received quantity, and the PO it arrived on. (Forward lineage into
+   * the batches that consumed a raw lot isn't recorded in this install — see
+   * genealogy-data-reality — so recall surfaces the received lots themselves.)
+   */
+  async recallByManufacturerLot(q?: string) {
+    const term = q?.trim();
+    if (!term) return { rows: [] };
+
+    // Raw (received) lots are the supplier-tagged ones; match on the manufacturer
+    // / supplier lot number.
+    const lots = await this.prisma.lot.findMany({
+      where: {
+        supplierId: { not: null },
+        OR: [
+          { manfLot: { contains: term, mode: 'insensitive' } },
+          { supLot: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      select: { lot: true, itemId: true, supplierId: true, manfLot: true, supLot: true, receivedDate: true },
+      orderBy: { lot: 'desc' },
+      take: 200,
+    });
+    if (!lots.length) return { rows: [] };
+
+    // received qty + originating PO per lot: lot -> sublot(s) -> receipt -> ChangeSet.
+    const lotCodes = lots.map((l) => l.lot);
+    const sublots = await this.prisma.sublot.findMany({ where: { lot: { in: lotCodes } }, select: { id: true, lot: true } });
+    const lotBySub = new Map(sublots.map((s) => [s.id, s.lot]));
+    const subIds = sublots.map((s) => s.id);
+    const receipts = subIds.length
+      ? await this.prisma.changeSetReceipt.findMany({
+          where: { sublotId: { in: subIds } },
+          select: { changeSetId: true, sublotId: true, psQty: true, psUnit: true },
+        })
+      : [];
+    const csIds = [...new Set(receipts.map((r) => r.changeSetId))];
+    const changeSets = csIds.length
+      ? await this.prisma.changeSet.findMany({ where: { id: { in: csIds } }, select: { id: true, ordrId: true, changeDate: true } })
+      : [];
+    const csById = new Map(changeSets.map((c) => [c.id, c]));
+    const recByLot = new Map<string, { qty: number; unit: string | null; poId: number | null; date: Date | null }>();
+    for (const r of receipts) {
+      const lotCode = r.sublotId != null ? lotBySub.get(r.sublotId) : undefined;
+      if (!lotCode) continue;
+      const cs = csById.get(r.changeSetId);
+      const cur = recByLot.get(lotCode) ?? { qty: 0, unit: null, poId: null, date: null };
+      cur.qty += num(r.psQty);
+      cur.unit = cur.unit ?? r.psUnit ?? null;
+      cur.poId = cur.poId ?? cs?.ordrId ?? null;
+      cur.date = cur.date ?? cs?.changeDate ?? null;
+      recByLot.set(lotCode, cur);
+    }
+
+    const itemIds = [...new Set(lots.map((l) => l.itemId).filter((v): v is number => v != null))];
+    const [items, parties] = await Promise.all([
+      this.prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, itemCode: true, description: true } }),
+      this.party.resolve(lots.map((l) => l.supplierId)),
+    ]);
+    const itemById = new Map(items.map((i) => [i.id, i]));
+
+    return {
+      rows: lots.map((l) => {
+        const rec = recByLot.get(l.lot);
+        const item = l.itemId != null ? itemById.get(l.itemId) : undefined;
+        return {
+          lot: l.lot,
+          manufacturerLot: l.manfLot ?? l.supLot ?? null,
+          itemCode: item?.itemCode ?? null,
+          itemDescription: item?.description ?? null,
+          supplier:
+            l.supplierId != null
+              ? (parties.get(l.supplierId)?.name ?? parties.get(l.supplierId)?.entityCode ?? null)
+              : null,
+          receivedDate: l.receivedDate ?? rec?.date ?? null,
+          qty: rec?.qty ?? null,
+          unit: rec?.unit ?? null,
+          poId: rec?.poId ?? null,
+        };
+      }),
+    };
   }
 
   // --- pickers for the create form (gated by purchasing.create) ------------

@@ -33,6 +33,7 @@ export function Purchasing() {
   const [q, setQ] = useState('');
   const [sort, setSort] = useState('id:desc');
   const [showCreate, setShowCreate] = useState(false);
+  const [showRecall, setShowRecall] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
   const qc = useQueryClient();
 
@@ -69,8 +70,18 @@ export function Purchasing() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-slate-900">Purchase Orders</h1>
-        <Button onClick={() => setShowCreate((v) => !v)}>{showCreate ? 'Close' : 'New purchase order'}</Button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowRecall((v) => !v)}
+            className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            {showRecall ? 'Hide recall' : 'Recall lookup'}
+          </button>
+          <Button onClick={() => setShowCreate((v) => !v)}>{showCreate ? 'Close' : 'New purchase order'}</Button>
+        </div>
       </div>
+
+      {showRecall && <RecallLookup />}
 
       {showCreate && (
         <CreatePurchaseOrder
@@ -120,6 +131,7 @@ interface DetailLine {
 interface Receipt {
   changeSetId: number; date: string | null; ordDetailId: number | null;
   itemCode: string | null; qty: number | null; unit: string | null; numberOfContainers: number | null;
+  lot: string | null; manufacturerLot: string | null;
 }
 interface PurchaseOrderDetail {
   header: { poId: number; poNumber: string | null; status: string | null };
@@ -130,42 +142,55 @@ interface PurchaseOrderDetail {
 
 const num3 = (n: number | null) => (n == null ? '' : Number(n.toFixed(3)).toString());
 
+type LotEntry = { qty: string; manfLot: string; containers: string };
+
 function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?: PurchaseOrderDetail; loading: boolean; onClose: () => void }) {
   const qc = useQueryClient();
-  // Per-line overrides for the receive-now qty (defaults to the backordered qty)
-  // and container count; keyed by lineId. Empty string = use the default.
-  const [qtyById, setQtyById] = useState<Record<number, string>>({});
-  const [contById, setContById] = useState<Record<number, string>>({});
+  // Lot entries per line (a line can be split across several received lots),
+  // keyed by lineId. Undefined = the default single entry (qty = backordered).
+  const [lotsByLine, setLotsByLine] = useState<Record<number, LotEntry[]>>({});
   const [reference, setReference] = useState('');
 
   const closed = (data?.header.status?.trim() || 'NST') === 'CLS';
-  const qtyFor = (l: DetailLine) => (qtyById[l.lineId] ?? (l.backordered > 0 ? num3(l.backordered) : ''));
+  const defaultEntry = (l: DetailLine): LotEntry => ({ qty: l.backordered > 0 ? num3(l.backordered) : '', manfLot: '', containers: '' });
+  const entriesFor = (l: DetailLine): LotEntry[] => lotsByLine[l.lineId] ?? [defaultEntry(l)];
+  const setEntries = (lineId: number, entries: LotEntry[]) => setLotsByLine((p) => ({ ...p, [lineId]: entries }));
+  const updateEntry = (l: DetailLine, idx: number, patch: Partial<LotEntry>) =>
+    setEntries(l.lineId, entriesFor(l).map((e, i) => (i === idx ? { ...e, ...patch } : e)));
+  const addEntry = (l: DetailLine) => setEntries(l.lineId, [...entriesFor(l), { qty: '', manfLot: '', containers: '' }]);
+  const removeEntry = (l: DetailLine, idx: number) => setEntries(l.lineId, entriesFor(l).filter((_, i) => i !== idx));
+
+  const activeEntries = (data?.lines ?? []).flatMap((l) => entriesFor(l).filter((e) => Number(e.qty) > 0));
+  const anyToReceive = activeEntries.length > 0;
+  const missingManfLot = activeEntries.some((e) => !e.manfLot.trim());
+  const canSubmit = anyToReceive && !missingManfLot;
 
   const m = useMutation({
     mutationFn: () => {
       const lines = (data?.lines ?? [])
-        .map((l) => ({ ordDetailId: l.lineId, qty: Number(qtyFor(l)), containers: contById[l.lineId] }))
-        .filter((x) => x.qty > 0)
-        .map((x) => {
-          const c = Math.floor(Number(x.containers));
-          return {
-            ordDetailId: x.ordDetailId,
-            qty: x.qty,
-            numberOfContainers: Number.isFinite(c) && c >= 1 ? c : undefined,
-          };
-        });
+        .map((l) => ({
+          ordDetailId: l.lineId,
+          lots: entriesFor(l)
+            .filter((e) => Number(e.qty) > 0)
+            .map((e) => {
+              const c = Math.floor(Number(e.containers));
+              return {
+                qty: Number(e.qty),
+                manufacturerLot: e.manfLot.trim(),
+                numberOfContainers: Number.isFinite(c) && c >= 1 ? c : undefined,
+              };
+            }),
+        }))
+        .filter((x) => x.lots.length > 0);
       return api.post(`/purchase-orders/${poId}/receive`, { lines, reference: reference || undefined });
     },
     onSuccess: () => {
-      setQtyById({});
-      setContById({});
+      setLotsByLine({});
       setReference('');
       qc.invalidateQueries({ queryKey: ['purchase-order', poId] });
       qc.invalidateQueries({ queryKey: ['purchase-orders'] });
     },
   });
-
-  const anyToReceive = (data?.lines ?? []).some((l) => Number(qtyFor(l)) > 0);
 
   return (
     <Card>
@@ -186,8 +211,6 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
                 <th className="py-1 pr-2 text-right font-medium">Received</th>
                 <th className="py-1 pr-2 text-right font-medium">Backordered</th>
                 <th className="py-1 pr-2 font-medium">Unit</th>
-                {!closed && <th className="py-1 pr-2 text-right font-medium">Receive now</th>}
-                {!closed && <th className="py-1 pr-2 text-right font-medium">Containers</th>}
               </tr>
             </thead>
             <tbody>
@@ -203,34 +226,73 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
                       : <span className="text-emerald-600">0</span>}
                   </td>
                   <td className="py-1 pr-2">{l.unit}</td>
-                  {!closed && (
-                    <td className="py-1 pr-2 text-right">
-                      <input type="number" min="0" step="any" value={qtyFor(l)}
-                        onChange={(e) => setQtyById((p) => ({ ...p, [l.lineId]: e.target.value }))}
-                        className="w-24 rounded border border-slate-300 px-1.5 py-1 text-right" />
-                    </td>
-                  )}
-                  {!closed && (
-                    <td className="py-1 pr-2 text-right">
-                      <input type="number" min="1" step="1" placeholder="1" value={contById[l.lineId] ?? ''}
-                        onChange={(e) => setContById((p) => ({ ...p, [l.lineId]: e.target.value }))}
-                        className="w-16 rounded border border-slate-300 px-1.5 py-1 text-right" />
-                    </td>
-                  )}
                 </tr>
               ))}
             </tbody>
           </table>
 
           {!closed && (
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              <input value={reference} onChange={(e) => setReference(e.target.value)} maxLength={50}
-                placeholder="Packing-slip / receipt ref (optional)" className="w-72 rounded border border-slate-300 px-2 py-1 text-sm" />
-              <Button onClick={() => m.mutate()} disabled={!anyToReceive || m.isPending}>
-                {m.isPending ? 'Recording…' : 'Record receipt'}
-              </Button>
-              {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
-              <span className="text-xs text-slate-400">Defaults to the backordered quantity; edit before recording.</span>
+            <div className="mt-4 rounded-md border border-slate-200 p-3">
+              <div className="mb-2 text-sm font-medium text-slate-700">Receive a shipment</div>
+              <p className="mb-3 text-xs text-slate-400">
+                Each lot gets a new system lot number on save. Split a line into multiple lots if the shipment
+                arrived as multiple manufacturer lots. The manufacturer&apos;s lot number is required (recall key).
+              </p>
+              <div className="space-y-3">
+                {data.lines.map((l) => (
+                  <div key={l.lineId}>
+                    <div className="text-sm font-medium">{l.itemCode} <span className="font-normal text-slate-500">{l.description}</span></div>
+                    <table className="mt-1 w-full text-sm">
+                      <thead className="text-left text-xs text-slate-400">
+                        <tr>
+                          <th className="py-0.5 pr-2 font-medium">Qty {l.unit ? `(${l.unit})` : ''}</th>
+                          <th className="py-0.5 pr-2 font-medium">Manufacturer lot *</th>
+                          <th className="py-0.5 pr-2 font-medium">Containers</th>
+                          <th />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {entriesFor(l).map((e, idx) => (
+                          <tr key={idx}>
+                            <td className="py-0.5 pr-2">
+                              <input type="number" min="0" step="any" value={e.qty}
+                                onChange={(ev) => updateEntry(l, idx, { qty: ev.target.value })}
+                                className="w-28 rounded border border-slate-300 px-1.5 py-1 text-right" />
+                            </td>
+                            <td className="py-0.5 pr-2">
+                              <input value={e.manfLot} maxLength={50}
+                                onChange={(ev) => updateEntry(l, idx, { manfLot: ev.target.value })}
+                                placeholder="required"
+                                className={`w-48 rounded border px-1.5 py-1 ${Number(e.qty) > 0 && !e.manfLot.trim() ? 'border-red-400' : 'border-slate-300'}`} />
+                            </td>
+                            <td className="py-0.5 pr-2">
+                              <input type="number" min="1" step="1" placeholder="1" value={e.containers}
+                                onChange={(ev) => updateEntry(l, idx, { containers: ev.target.value })}
+                                className="w-16 rounded border border-slate-300 px-1.5 py-1 text-right" />
+                            </td>
+                            <td className="py-0.5">
+                              {entriesFor(l).length > 1 && (
+                                <button type="button" onClick={() => removeEntry(l, idx)} className="text-slate-400 hover:text-red-600">remove</button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <button type="button" onClick={() => addEntry(l)} className="mt-1 text-xs text-indigo-600 hover:underline">+ split into another lot</button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <input value={reference} onChange={(e) => setReference(e.target.value)} maxLength={50}
+                  placeholder="Packing-slip / receipt ref (optional)" className="w-72 rounded border border-slate-300 px-2 py-1 text-sm" />
+                <Button onClick={() => m.mutate()} disabled={!canSubmit || m.isPending}>
+                  {m.isPending ? 'Recording…' : 'Record receipt'}
+                </Button>
+                {missingManfLot && <span className="text-sm text-red-600">Enter a manufacturer lot number for each received lot.</span>}
+                {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+              </div>
             </div>
           )}
 
@@ -244,6 +306,8 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
                   <th className="py-1 pr-2 font-medium">Receipt #</th>
                   <th className="py-1 pr-2 font-medium">Date</th>
                   <th className="py-1 pr-2 font-medium">Item</th>
+                  <th className="py-1 pr-2 font-medium">Our lot</th>
+                  <th className="py-1 pr-2 font-medium">Mfr lot</th>
                   <th className="py-1 pr-2 text-right font-medium">Qty</th>
                   <th className="py-1 pr-2 font-medium">Unit</th>
                   <th className="py-1 pr-2 text-right font-medium">Containers</th>
@@ -255,6 +319,8 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
                     <td className="py-1 pr-2 font-medium">{r.changeSetId}</td>
                     <td className="py-1 pr-2">{fmtDate(r.date)}</td>
                     <td className="py-1 pr-2">{r.itemCode}</td>
+                    <td className="py-1 pr-2">{r.lot ?? <span className="text-slate-300">—</span>}</td>
+                    <td className="py-1 pr-2">{r.manufacturerLot ?? <span className="text-slate-300">—</span>}</td>
                     <td className="py-1 pr-2 text-right tabular-nums">{num3(r.qty)}</td>
                     <td className="py-1 pr-2">{r.unit}</td>
                     <td className="py-1 pr-2 text-right tabular-nums">{r.numberOfContainers ?? ''}</td>
@@ -264,6 +330,72 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
             </table>
           )}
         </>
+      )}
+    </Card>
+  );
+}
+
+// --- recall lookup (by manufacturer lot) ---------------------------------
+
+interface RecallRow {
+  lot: string; manufacturerLot: string | null; itemCode: string | null; itemDescription: string | null;
+  supplier: string | null; receivedDate: string | null; qty: number | null; unit: string | null; poId: number | null;
+}
+
+function RecallLookup() {
+  const [q, setQ] = useState('');
+  const [submitted, setSubmitted] = useState('');
+  const res = useQuery({
+    queryKey: ['po-recall', submitted],
+    queryFn: () => api.get<{ rows: RecallRow[] }>(`/purchase-orders/recall?q=${encodeURIComponent(submitted)}`),
+    enabled: submitted.trim().length > 0,
+  });
+  const rows = res.data?.rows ?? [];
+
+  return (
+    <Card>
+      <div className="mb-2 text-sm font-medium text-slate-700">Recall lookup — by manufacturer lot number</div>
+      <form className="flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); setSubmitted(q); }}>
+        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Manufacturer lot number…" className="max-w-xs" />
+        <Button type="submit">Search</Button>
+      </form>
+      {submitted.trim().length > 0 && (
+        res.isLoading ? (
+          <p className="mt-3 text-sm text-slate-400">Searching…</p>
+        ) : rows.length === 0 ? (
+          <p className="mt-3 text-sm text-slate-400">No received lots match that manufacturer lot.</p>
+        ) : (
+          <table className="mt-3 w-full text-sm">
+            <thead className="border-b border-slate-200 text-left text-slate-500">
+              <tr>
+                <th className="py-1 pr-2 font-medium">Our lot</th>
+                <th className="py-1 pr-2 font-medium">Mfr lot</th>
+                <th className="py-1 pr-2 font-medium">Item</th>
+                <th className="py-1 pr-2 font-medium">Supplier</th>
+                <th className="py-1 pr-2 text-right font-medium">Qty</th>
+                <th className="py-1 pr-2 font-medium">Received</th>
+                <th className="py-1 pr-2 font-medium">PO</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.lot} className="border-b border-slate-100">
+                  <td className="py-1 pr-2 font-medium">{r.lot}</td>
+                  <td className="py-1 pr-2">{r.manufacturerLot}</td>
+                  <td className="py-1 pr-2">{r.itemCode} <span className="text-slate-500">{r.itemDescription}</span></td>
+                  <td className="py-1 pr-2">{r.supplier}</td>
+                  <td className="py-1 pr-2 text-right tabular-nums">{num3(r.qty)} {r.unit ?? ''}</td>
+                  <td className="py-1 pr-2">{fmtDate(r.receivedDate)}</td>
+                  <td className="py-1 pr-2">
+                    {r.poId != null
+                      ? <a href={`/purchase-orders/${r.poId}/print`} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">#{r.poId}</a>
+                      : ''}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )
       )}
     </Card>
   );
