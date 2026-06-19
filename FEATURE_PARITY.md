@@ -108,7 +108,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 |---|---|---|
 | Shipping Orders (quotes, POS) | ⬜ | `Ordr` Context=`SH` |
 | Reserve/unreserve containers, shipping assemblies | ⬜ | |
-| Waybills, invoices | 🟡 | **Customer invoices + packing slips** done. Invoices = `Trans`(CI)/`TransDetail` (21,954); packing slip = the SH `ChangeSet` PK → `ChangeSetShipment`→`Waybill` (17,784). Both have a browser + print-faithful document, reconstructed field-for-field vs the real PDFs (Invoice N00126742 = $166.80; Packing Slip 84768). Shared party/address resolver (`AddressReference`→`Address`). Supplier `Bill` + 3rd-party shipping integration pending |
+| Waybills, invoices | 🟡 | **Customer invoices + packing slips** done. Invoices = `Trans`(CI)/`TransDetail` (21,954); packing slip = the SH `ChangeSet` PK → `ChangeSetShipment`→`Waybill` (17,784). Both have a browser + print-faithful document, reconstructed field-for-field vs the real PDFs (Invoice N00126742 = $166.80; Packing Slip 84768). Shared party/address resolver (`AddressReference`→`Address`). **Supplier bills (AP) now also done** — `Bill`/`BillDetail` (4,495/9,001) mirrored + imported; browser + print-faithful Supplier Invoice (`GET /bills`, `/bills/:id`, program `sales.bills`) with supplier address, lines resolved via `BillDetail.OrdDetail`→item (+ landed cost), totals = Σ InventoryValue. 3rd-party shipping integration pending |
 | Warehouse/lab transfers, bill-and-hold, returns/credits | ⬜ | |
 | Till reconciliation | ⬜ | |
 | 3rd-party shipping software integration | ⬜ | |

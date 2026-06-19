@@ -289,6 +289,26 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    name: 'Bill', legacyTable: 'dbo.Bill', delegate: 'bill', idColumn: 'Bill',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.Bill, context: r.Context, supplierId: r.Supplier, landingFactor: r.LandingFactor,
+      invoice: r.Invoice, invoiceDate: r.InvoiceDate, memo: r.Memo, terms: r.Terms,
+      tax1Group: r.Tax1Group, tax2Group: r.Tax2Group, tax3Group: r.Tax3Group,
+      tax1Amount: r.Tax1Amount, tax2Amount: r.Tax2Amount, tax3Amount: r.Tax3Amount,
+      amount: r.Amount, currency: r.Currency, currencyRate: r.CurrencyRate,
+    }),
+  },
+  {
+    name: 'BillDetail', legacyTable: 'dbo.BillDetail', delegate: 'billDetail', idColumn: 'BillDetail',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.BillDetail, billId: r.Bill, landingFactor: r.LandingFactor, receiptId: r.Receipt,
+      ordDetailId: r.OrdDetail, amount: r.Amount, addCost: r.AddCost,
+      inventoryValue: r.InventoryValue, pending: b(r.Pending),
+    }),
+  },
+  {
     name: 'ChangeSet', legacyTable: 'dbo.ChangeSet', delegate: 'changeSet', idColumn: 'ChangeSet',
     where: (d) => ({ id: d.id }),
     map: (r) => ({

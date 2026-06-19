@@ -962,6 +962,49 @@ model TransDetail {
   @@map("TransDetail")
 }
 
+// Supplier AP invoice (mirrors legacy) — the bill a vendor sends for received
+// goods. Distinct from CUSTOMER invoices (Trans Context='CI'). Header + BillDetail
+// lines that tie back to the PO line (OrdDetail) and the receipt (ChangeSetReceipt).
+model Bill {
+  id            Int       @id @default(autoincrement()) @map("Bill")
+  context       String?   @map("Context") @db.VarChar(12)
+  supplierId    Int?      @map("Supplier")
+  landingFactor String?   @map("LandingFactor") @db.VarChar(20)
+  invoice       String?   @map("Invoice") @db.VarChar(20)
+  invoiceDate   DateTime? @map("InvoiceDate") @db.Date
+  memo          String?   @map("Memo") @db.Text
+  terms         String?   @map("Terms") @db.VarChar(20)
+  tax1Group     String?   @map("Tax1Group") @db.VarChar(20)
+  tax2Group     String?   @map("Tax2Group") @db.VarChar(20)
+  tax3Group     String?   @map("Tax3Group") @db.VarChar(20)
+  tax1Amount    Decimal?  @map("Tax1Amount") @db.Money
+  tax2Amount    Decimal?  @map("Tax2Amount") @db.Money
+  tax3Amount    Decimal?  @map("Tax3Amount") @db.Money
+  amount        Decimal?  @map("Amount") @db.Money
+  currency      String?   @map("Currency") @db.VarChar(10)
+  currencyRate  Float?    @map("CurrencyRate")
+
+  @@index([supplierId])
+  @@index([invoice])
+  @@map("Bill")
+}
+
+model BillDetail {
+  id             Int      @id @default(autoincrement()) @map("BillDetail")
+  billId         Int?     @map("Bill")
+  landingFactor  String?  @map("LandingFactor") @db.VarChar(20)
+  receiptId      Int?     @map("Receipt")
+  ordDetailId    Int?     @map("OrdDetail")
+  amount         Decimal? @map("Amount") @db.Money
+  addCost        Decimal? @map("AddCost") @db.Money
+  inventoryValue Decimal? @map("InventoryValue") @db.Money
+  pending        Boolean? @map("Pending")
+
+  @@index([billId])
+  @@index([ordDetailId])
+  @@map("BillDetail")
+}
+
 // Transaction envelope (mirrors legacy). For shipping, the SH ChangeSet PK is
 // the printed PACKING SLIP number; it links the order, the invoice (Trans), and
 // (1:1 via ChangeSetShipment) the physical Waybill. See sales-docs-mapping.

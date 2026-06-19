@@ -3,6 +3,8 @@ import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { type Me, useLogout, useMe } from './lib/auth';
 import { Audit } from './pages/Audit';
 import { BatchSheet } from './pages/BatchSheet';
+import { BillDoc } from './pages/BillDoc';
+import { Bills } from './pages/Bills';
 import { Certificates } from './pages/Certificates';
 import { ChangePassword } from './pages/ChangePassword';
 import { CofADoc } from './pages/CofADoc';
@@ -61,6 +63,8 @@ export function App() {
         <Route path="/packing-slips/:id/print" element={<PackingSlipDoc />} />
         <Route path="/certificates" element={<Certificates />} />
         <Route path="/cofa/:id/print" element={<CofADoc />} />
+        <Route path="/bills" element={<Bills />} />
+        <Route path="/bills/:id/print" element={<BillDoc />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
@@ -85,6 +89,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/orders', label: 'Orders' },
     { to: '/invoices', label: 'Invoices' },
     { to: '/packing-slips', label: 'Packing Slips' },
+    { to: '/bills', label: 'Supplier Bills' },
     { to: '/certificates', label: 'Certificates' },
     { to: '/inventory', label: 'Inventory' },
     { to: '/recall', label: 'Lot Trace' },

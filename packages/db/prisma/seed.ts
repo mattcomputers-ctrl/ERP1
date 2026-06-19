@@ -29,6 +29,7 @@ const BASELINE_PROGRAMS = [
   { key: 'orders.close', name: 'Close Order', folder: 'Transactions/Orders' },
   { key: 'sales.invoices', name: 'Invoices', folder: 'Transactions/Sales' },
   { key: 'sales.shipments', name: 'Packing Slips', folder: 'Transactions/Sales' },
+  { key: 'sales.bills', name: 'Supplier Bills', folder: 'Transactions/Purchasing' },
   { key: 'qa.cofa', name: 'Certificates of Analysis', folder: 'Quality' },
   { key: 'qa.disposition', name: 'QA Disposition', folder: 'Quality' },
   { key: 'qa.results', name: 'Enter Test Results', folder: 'Quality' },
