@@ -51,6 +51,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Feature | Status | Notes |
 |---|---|---|
 | Inventory status & sublot expiry | 🟡 | Inventory browser + import live (37,934 rows); expiry pending |
+| Costing (standard, replacement, actual) | 🟡 | **Per-lot unit cost** captured (`Lot.unitCost`): lot-traced items are costed by the consumed lot's cost-per-unit (specific identification); not-traced items are FIFO. Set from the PO line price at receiving and entered per lot at lot-tracking enablement; surfaced (cost + extended value) on the recall lookup. Consumption/FIFO valuation engine + standard/replacement cost pending |
 | Lot-tracking enablement (per item) | 🟡 | **New `inventory.lotTracking` module**: `Item.lotTracked` flag (items default FIFO-by-qty, not traced). `POST /lot-tracking/items/:id/enable` captures opening on-hand **by lot, grouped per location** — raw materials enter a vendor/mfr lot and ERP1 **mints a lot number** (sequential from 100, tagged supplier+vendor lot, for relabeling); finished goods enter the existing lot number — creating Lot+Sublot+Inventory and **wiping the item's prior legacy on-hand**. `/disable` reverts to FIFO. Web **Lot Tracking** page (item list + enable form showing the assigned lot numbers). Foundation for recall (recall is inert until an item is enabled). FIFO consumption + forward lineage capture (batch consume, shipment-at-close) are the next increments |
 | Storage rules | ⬜ | `StorageRule` |
 | Adjust / consume / reweigh / remeasure | ⬜ | |

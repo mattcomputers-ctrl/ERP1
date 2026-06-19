@@ -500,6 +500,11 @@ model Lot {
   comment              String?   @map("Comment") @db.Text
   context              String?   @map("Context") @db.VarChar(32)
   reduceTesting        Boolean?  @map("ReduceTesting")
+  // ERP1 cost-per-unit for this lot (not legacy). Lot-traced items are costed by
+  // the consumed lot's unit cost (specific identification); set from the PO line
+  // price at receiving and entered per lot at lot-tracking enablement. The legacy
+  // import never touches it (not in the import mapper).
+  unitCost             Decimal?  @map("erp1_unit_cost") @db.Decimal(18, 6)
 
   @@index([itemId])
   @@index([supplierId])

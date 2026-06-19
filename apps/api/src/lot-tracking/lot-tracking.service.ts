@@ -136,11 +136,12 @@ export class LotTrackingService {
       // Raw-material lot sequence (from 100), shared with purchase receiving.
       let lotSeq = await maxRawLotNumber(tx);
 
-      const created: { lot: string; vendorLot: string | null; qty: number; locationId: number; raw: boolean }[] = [];
+      const created: { lot: string; vendorLot: string | null; qty: number; unitCost: number | null; locationId: number; raw: boolean }[] = [];
       for (const g of dto.groups) {
         for (const e of g.entries) {
           const raw = !!e.vendorLot?.trim();
           let lotNumber: string;
+          const unitCost = e.unitCost ?? null;
           if (raw) {
             lotNumber = String((lotSeq += 1));
             await tx.lot.create({
@@ -152,17 +153,21 @@ export class LotTrackingService {
                 supLot: e.vendorLot!.trim(),
                 manfLot: e.vendorLot!.trim(),
                 receivedDate: at,
+                unitCost,
               },
             });
           } else {
             lotNumber = e.lotNumber!.trim();
             const existing = await tx.lot.findUnique({ where: { lot: lotNumber }, select: { itemId: true } });
             if (!existing) {
-              await tx.lot.create({ data: { lot: lotNumber, context: 'LOT', itemId, manfLot: lotNumber } });
+              await tx.lot.create({ data: { lot: lotNumber, context: 'LOT', itemId, manfLot: lotNumber, unitCost } });
             } else if (existing.itemId != null && existing.itemId !== itemId) {
               throw new BadRequestException(
                 `Lot ${lotNumber} already belongs to a different item — enter a lot number for ${item.itemCode}.`,
               );
+            } else if (unitCost != null) {
+              // Existing (e.g. imported) finished-good lot — record the entered cost.
+              await tx.lot.update({ where: { lot: lotNumber }, data: { unitCost } });
             }
           }
 
@@ -177,7 +182,7 @@ export class LotTrackingService {
           await tx.inventory.create({
             data: { id: (invId += 1), itemId, sublotId, locationId: g.locationId, qty: e.qty, status: null },
           });
-          created.push({ lot: lotNumber, vendorLot: e.vendorLot?.trim() ?? null, qty: e.qty, locationId: g.locationId, raw });
+          created.push({ lot: lotNumber, vendorLot: e.vendorLot?.trim() ?? null, qty: e.qty, unitCost, locationId: g.locationId, raw });
         }
       }
 

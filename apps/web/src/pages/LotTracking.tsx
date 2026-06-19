@@ -10,7 +10,7 @@ interface ItemRow {
 }
 interface ListResp { rows: ItemRow[]; total: number; page: number; pageSize: number }
 type LocationOption = { id: number; locationCode: string | null; context: string | null };
-type MintedLot = { lot: string; vendorLot: string | null; qty: number; locationId: number; raw: boolean };
+type MintedLot = { lot: string; vendorLot: string | null; qty: number; unitCost: number | null; locationId: number; raw: boolean };
 
 export function LotTracking() {
   const [page, setPage] = useState(1);
@@ -91,10 +91,10 @@ export function LotTracking() {
 
 // --- enable form ---------------------------------------------------------
 
-interface Entry { id: string; type: 'raw' | 'fg'; qty: string; vendorLot: string; lotNumber: string }
+interface Entry { id: string; type: 'raw' | 'fg'; qty: string; unitCost: string; vendorLot: string; lotNumber: string }
 interface Group { id: string; locationId: string; entries: Entry[] }
 const uid = () => crypto.randomUUID();
-const newEntry = (): Entry => ({ id: uid(), type: 'raw', qty: '', vendorLot: '', lotNumber: '' });
+const newEntry = (): Entry => ({ id: uid(), type: 'raw', qty: '', unitCost: '', vendorLot: '', lotNumber: '' });
 const newGroup = (): Group => ({ id: uid(), locationId: '', entries: [newEntry()] });
 
 function EnablePanel({ item, onClose, onDone }: { item: ItemRow; onClose: () => void; onDone: () => void }) {
@@ -121,9 +121,12 @@ function EnablePanel({ item, onClose, onDone }: { item: ItemRow; onClose: () => 
         locationId: Number(g.locationId),
         entries: g.entries
           .filter((e) => Number(e.qty) > 0 && (e.type === 'raw' ? e.vendorLot.trim() : e.lotNumber.trim()))
-          .map((e) => e.type === 'raw'
-            ? { qty: Number(e.qty), vendorLot: e.vendorLot.trim() }
-            : { qty: Number(e.qty), lotNumber: e.lotNumber.trim() }),
+          .map((e) => {
+            const cost = e.unitCost.trim() !== '' && Number(e.unitCost) >= 0 ? { unitCost: Number(e.unitCost) } : {};
+            return e.type === 'raw'
+              ? { qty: Number(e.qty), vendorLot: e.vendorLot.trim(), ...cost }
+              : { qty: Number(e.qty), lotNumber: e.lotNumber.trim(), ...cost };
+          }),
       }))
       .filter((g) => g.entries.length > 0);
 
@@ -145,7 +148,7 @@ function EnablePanel({ item, onClose, onDone }: { item: ItemRow; onClose: () => 
         <p className="mb-2 text-sm text-slate-500">Label the physical stock with these ERP1 lot numbers:</p>
         <table className="w-full text-sm">
           <thead className="border-b border-slate-200 text-left text-slate-500">
-            <tr><th className="py-1 pr-2 font-medium">ERP1 lot</th><th className="py-1 pr-2 font-medium">Vendor lot</th><th className="py-1 pr-2 text-right font-medium">Qty</th><th className="py-1 pr-2 font-medium">Location</th></tr>
+            <tr><th className="py-1 pr-2 font-medium">ERP1 lot</th><th className="py-1 pr-2 font-medium">Vendor lot</th><th className="py-1 pr-2 text-right font-medium">Qty</th><th className="py-1 pr-2 text-right font-medium">Unit cost</th><th className="py-1 pr-2 font-medium">Location</th></tr>
           </thead>
           <tbody>
             {result.map((l) => (
@@ -153,6 +156,7 @@ function EnablePanel({ item, onClose, onDone }: { item: ItemRow; onClose: () => 
                 <td className="py-1 pr-2 font-medium">{l.lot}</td>
                 <td className="py-1 pr-2">{l.vendorLot ?? <span className="text-slate-400">— (finished good)</span>}</td>
                 <td className="py-1 pr-2 text-right tabular-nums">{l.qty}</td>
+                <td className="py-1 pr-2 text-right tabular-nums">{l.unitCost != null ? l.unitCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : ''}</td>
                 <td className="py-1 pr-2">{locById.get(l.locationId) ?? l.locationId}</td>
               </tr>
             ))}
@@ -187,7 +191,7 @@ function EnablePanel({ item, onClose, onDone }: { item: ItemRow; onClose: () => 
             </div>
             <table className="w-full text-sm">
               <thead className="text-left text-xs text-slate-400">
-                <tr><th className="py-0.5 pr-2 font-medium">Type</th><th className="py-0.5 pr-2 font-medium">Lot</th><th className="py-0.5 pr-2 text-right font-medium">Qty on hand</th><th /></tr>
+                <tr><th className="py-0.5 pr-2 font-medium">Type</th><th className="py-0.5 pr-2 font-medium">Lot</th><th className="py-0.5 pr-2 text-right font-medium">Qty on hand</th><th className="py-0.5 pr-2 text-right font-medium">Unit cost</th><th /></tr>
               </thead>
               <tbody>
                 {g.entries.map((e, ei) => (
@@ -205,6 +209,9 @@ function EnablePanel({ item, onClose, onDone }: { item: ItemRow; onClose: () => 
                     </td>
                     <td className="py-0.5 pr-2 text-right">
                       <input type="number" min="0" step="any" value={e.qty} onChange={(ev) => setEntry(gi, ei, { qty: ev.target.value })} className="w-28 rounded border border-slate-300 px-1.5 py-1 text-right" />
+                    </td>
+                    <td className="py-0.5 pr-2 text-right">
+                      <input type="number" min="0" step="any" value={e.unitCost} onChange={(ev) => setEntry(gi, ei, { unitCost: ev.target.value })} placeholder="$/unit" className="w-24 rounded border border-slate-300 px-1.5 py-1 text-right" />
                     </td>
                     <td className="py-0.5">
                       {g.entries.length > 1 && <button type="button" onClick={() => removeEntry(gi, ei)} className="text-slate-400 hover:text-red-600">remove</button>}

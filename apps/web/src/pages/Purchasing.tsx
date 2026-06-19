@@ -344,6 +344,7 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
 interface RecallRow {
   lot: string; manufacturerLot: string | null; itemCode: string | null; itemDescription: string | null;
   supplier: string | null; receivedDate: string | null; qty: number | null; unit: string | null; poId: number | null;
+  unitCost: number | null; extendedCost: number | null;
 }
 
 function RecallLookup() {
@@ -377,6 +378,8 @@ function RecallLookup() {
                 <th className="py-1 pr-2 font-medium">Item</th>
                 <th className="py-1 pr-2 font-medium">Supplier</th>
                 <th className="py-1 pr-2 text-right font-medium">Qty</th>
+                <th className="py-1 pr-2 text-right font-medium">Unit cost</th>
+                <th className="py-1 pr-2 text-right font-medium">Value</th>
                 <th className="py-1 pr-2 font-medium">Received</th>
                 <th className="py-1 pr-2 font-medium">PO</th>
               </tr>
@@ -389,6 +392,8 @@ function RecallLookup() {
                   <td className="py-1 pr-2">{r.itemCode} <span className="text-slate-500">{r.itemDescription}</span></td>
                   <td className="py-1 pr-2">{r.supplier}</td>
                   <td className="py-1 pr-2 text-right tabular-nums">{num3(r.qty)} {r.unit ?? ''}</td>
+                  <td className="py-1 pr-2 text-right tabular-nums">{r.unitCost != null ? money(r.unitCost) : ''}</td>
+                  <td className="py-1 pr-2 text-right tabular-nums">{r.extendedCost != null ? money(r.extendedCost) : ''}</td>
                   <td className="py-1 pr-2">{fmtDate(r.receivedDate)}</td>
                   <td className="py-1 pr-2">
                     {r.poId != null

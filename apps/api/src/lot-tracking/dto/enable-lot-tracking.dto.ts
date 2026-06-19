@@ -10,6 +10,7 @@ import {
   IsString,
   Max,
   MaxLength,
+  Min,
   ValidateNested,
 } from 'class-validator';
 
@@ -22,6 +23,13 @@ export class OpeningLotEntryDto {
   @IsPositive()
   @Max(1_000_000_000)
   qty!: number;
+
+  /** Cost per unit for this lot (specific-identification costing for lot-traced items). */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100_000_000)
+  unitCost?: number;
 
   /** Raw material: the vendor/manufacturer lot — ERP1 mints + assigns the lot number. */
   @IsOptional()

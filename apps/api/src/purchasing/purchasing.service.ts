@@ -462,7 +462,7 @@ export class PurchasingService {
     const lineIds = [...new Set(dto.lines.map((l) => l.ordDetailId))];
     const poLines = await this.prisma.ordDetail.findMany({
       where: { id: { in: lineIds }, ordrId: id, context: PO_CONTEXT },
-      select: { id: true, itemId: true, entityUnit: true },
+      select: { id: true, itemId: true, entityUnit: true, price: true },
     });
     const lineById = new Map(poLines.map((l) => [l.id, l]));
     for (const l of dto.lines) {
@@ -470,6 +470,24 @@ export class PurchasingService {
         throw new BadRequestException(`Line ${l.ordDetailId} is not a line on purchase order #${id}.`);
       }
     }
+
+    // Per-unit cost for the lot = the PO line's unit price. When the line is priced
+    // PER PACKAGE (OrdDetailPricing.PriceByPackage), divide by the package quantity
+    // to get a true per-unit cost (mirrors the PO document's value math).
+    const pricing = await this.prisma.ordDetailPricing.findMany({
+      where: { ordDetailId: { in: lineIds } },
+      select: { ordDetailId: true, priceByPackage: true, entityQuantity: true },
+    });
+    const pricingByLine = new Map<number, (typeof pricing)[number]>();
+    for (const p of pricing) {
+      if (p.ordDetailId != null && !pricingByLine.has(p.ordDetailId)) pricingByLine.set(p.ordDetailId, p);
+    }
+    const unitCostOf = (lineId: number, price: Prisma.Decimal | null): Prisma.Decimal | number | null => {
+      if (price == null) return null;
+      const pr = pricingByLine.get(lineId);
+      if (pr?.priceByPackage && pr.entityQuantity && pr.entityQuantity > 0) return Number(price) / pr.entityQuantity;
+      return price;
+    };
 
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
@@ -501,6 +519,7 @@ export class PurchasingService {
               supLot: lot.manufacturerLot,
               manfLot: lot.manufacturerLot,
               receivedDate: at,
+              unitCost: unitCostOf(dl.ordDetailId, line.price),
             },
           });
           await tx.sublot.create({
@@ -590,7 +609,7 @@ export class PurchasingService {
           { supLot: { contains: term, mode: 'insensitive' } },
         ],
       },
-      select: { lot: true, itemId: true, supplierId: true, manfLot: true, supLot: true, receivedDate: true },
+      select: { lot: true, itemId: true, supplierId: true, manfLot: true, supLot: true, receivedDate: true, unitCost: true },
       orderBy: { receivedDate: 'desc' },
       take: 200,
     });
@@ -625,6 +644,21 @@ export class PurchasingService {
       recByLot.set(lotCode, cur);
     }
 
+    // Current on-hand per lot (from Inventory) — the recall-relevant quantity,
+    // and the only quantity for enabled opening-stock lots (which have no receipt).
+    const onHandByLot = new Map<string, number>();
+    if (subIds.length) {
+      const inv = await this.prisma.inventory.findMany({
+        where: { sublotId: { in: subIds }, qty: { gt: 0 } },
+        select: { sublotId: true, qty: true },
+      });
+      for (const iv of inv) {
+        const lotCode = iv.sublotId != null ? lotBySub.get(iv.sublotId) : undefined;
+        if (!lotCode) continue;
+        onHandByLot.set(lotCode, (onHandByLot.get(lotCode) ?? 0) + num(iv.qty));
+      }
+    }
+
     const itemIds = [...new Set(lots.map((l) => l.itemId).filter((v): v is number => v != null))];
     const [items, parties] = await Promise.all([
       this.prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, itemCode: true, description: true } }),
@@ -636,6 +670,11 @@ export class PurchasingService {
       rows: lots.map((l) => {
         const rec = recByLot.get(l.lot);
         const item = l.itemId != null ? itemById.get(l.itemId) : undefined;
+        const unitCost = l.unitCost != null ? Number(l.unitCost) : null;
+        // On-hand is the recall quantity; fall back to received qty (received lots
+        // don't yet create on-hand inventory).
+        const onHand = onHandByLot.get(l.lot);
+        const qty = onHand ?? rec?.qty ?? null;
         return {
           lot: l.lot,
           manufacturerLot: l.manfLot ?? l.supLot ?? null,
@@ -646,9 +685,11 @@ export class PurchasingService {
               ? (parties.get(l.supplierId)?.name ?? parties.get(l.supplierId)?.entityCode ?? null)
               : null,
           receivedDate: l.receivedDate ?? rec?.date ?? null,
-          qty: rec?.qty ?? null,
+          qty,
           unit: rec?.unit ?? null,
           poId: rec?.poId ?? null,
+          unitCost,
+          extendedCost: unitCost != null && qty != null ? round3(qty * unitCost) : null,
         };
       }),
     };
