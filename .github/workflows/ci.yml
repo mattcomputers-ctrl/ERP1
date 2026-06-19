@@ -31,6 +31,9 @@ jobs:
       - name: Typecheck
         run: pnpm -r typecheck
 
+      - name: Run tests
+        run: pnpm test
+
   docker:
     runs-on: ubuntu-latest
     steps:
