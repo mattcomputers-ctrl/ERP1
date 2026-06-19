@@ -219,7 +219,7 @@ export class GenealogyService {
         producedByOrderId: ordr?.id ?? null,
         producedByContext: ordr?.context ?? null,
         disposition: rel
-          ? { status: rel.status, grade: rel.grade, purity: rel.purity, expiryDate: rel.expiryDate, releasedBy: rel.releasedBy }
+          ? { releaseId: rel.id, status: rel.status, grade: rel.grade, purity: rel.purity, expiryDate: rel.expiryDate, releasedBy: rel.releasedBy }
           : null,
       };
     });

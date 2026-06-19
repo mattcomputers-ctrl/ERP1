@@ -1,7 +1,8 @@
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
+import { useMe } from '../lib/auth';
 
 interface OnHand {
   id: number;
@@ -13,6 +14,7 @@ interface OnHand {
   lot: string | null;
 }
 interface Disposition {
+  releaseId?: number;
   status: string | null;
   grade: string | null;
   purity: number | null;
@@ -101,6 +103,13 @@ export function Recall() {
                   {f.disposition.expiryDate && <span>Expiry: <span className="text-slate-700">{new Date(f.disposition.expiryDate).toISOString().slice(0, 10)}</span></span>}
                   {f.disposition.releasedBy && <span>Released by: <span className="text-slate-700">{f.disposition.releasedBy}</span></span>}
                 </div>
+              )}
+              {f.disposition?.releaseId != null && (
+                <DispositionControls
+                  releaseId={f.disposition.releaseId}
+                  currentStatus={f.disposition.status}
+                  onDone={() => m.mutate(f.lot)}
+                />
               )}
             </Card>
           ))}
@@ -191,6 +200,93 @@ export function Recall() {
           </details>
         </>
       )}
+    </div>
+  );
+}
+
+// Change a lot's QA disposition (release / hold / reject) with the electronic
+// signature its secured item requires. Mirrors the order-completion sign-off.
+const DISPO_STATUSES = ['Approved', 'Hold', 'Rejected'];
+function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: number; currentStatus: string | null; onDone: () => void }) {
+  const me = useMe();
+  const req = useQuery({
+    queryKey: ['disposition-requirement', me.data?.id],
+    queryFn: () => api.get<{ requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>('/releases/disposition-requirement'),
+  });
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState(currentStatus && DISPO_STATUSES.includes(currentStatus) ? currentStatus : 'Approved');
+  const [grade, setGrade] = useState('');
+  const [expiryDate, setExpiryDate] = useState('');
+  const [reason, setReason] = useState('');
+  const [password, setPassword] = useState('');
+  const [showWitness, setShowWitness] = useState(false);
+  const [witnessEmail, setWitnessEmail] = useState('');
+  const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessExplanation, setWitnessExplanation] = useState('');
+
+  const r = req.data;
+  const sig = !!r?.requireSignature;
+  const reasonRequired = !!r?.requireReason;
+  const witnessRequired = !!r?.requireWitness;
+  const witnessOpen = witnessRequired || showWitness;
+
+  const m = useMutation({
+    mutationFn: () =>
+      api.post(`/releases/${releaseId}/disposition`, {
+        status,
+        grade: grade || undefined,
+        expiryDate: expiryDate || undefined,
+        reason: reason || undefined,
+        password: password || undefined,
+        witnessEmail: witnessOpen && witnessEmail ? witnessEmail : undefined,
+        witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
+        witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
+      }),
+    onSuccess: () => { setOpen(false); setPassword(''); setWitnessPassword(''); onDone(); },
+  });
+
+  const canSubmit =
+    !req.isLoading &&
+    (!reasonRequired || !!reason.trim()) &&
+    (!sig || !!password) &&
+    (!witnessRequired || (!!witnessEmail && !!witnessPassword));
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mt-3 text-sm font-medium text-indigo-600 hover:underline">
+        Change disposition
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded-md bg-slate-50 p-3">
+      <div className="flex flex-wrap items-end gap-2">
+        <Field label="Disposition">
+          <select value={status} onChange={(e) => setStatus(e.target.value)} className="rounded-md border border-slate-300 px-2 py-1.5 text-sm">
+            {DISPO_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </Field>
+        <Field label="Grade"><Input value={grade} onChange={(e) => setGrade(e.target.value)} placeholder="e.g. GMP" className="w-28" /></Field>
+        <Field label="Expiry"><Input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className="w-40" /></Field>
+        <Field label={reasonRequired ? 'Reason (required)' : 'Reason'}><Input value={reason} onChange={(e) => setReason(e.target.value)} className="w-48" /></Field>
+        {sig && <Field label="Your password (sign)"><Input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} className="w-44" /></Field>}
+      </div>
+      {sig && witnessOpen && (
+        <div className="mt-2 flex flex-wrap items-end gap-2">
+          <Field label={`Witness email${witnessRequired ? ' (required)' : ''}`}><Input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} className="w-52" /></Field>
+          <Field label="Witness password"><Input type="password" autoComplete="off" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} className="w-44" /></Field>
+          <Field label="Witness note"><Input value={witnessExplanation} onChange={(e) => setWitnessExplanation(e.target.value)} maxLength={500} className="w-48" /></Field>
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <Button onClick={() => m.mutate()} disabled={!canSubmit || m.isPending}>{m.isPending ? 'Signing…' : 'Apply disposition'}</Button>
+        {sig && !witnessRequired && !showWitness && (
+          <button type="button" onClick={() => setShowWitness(true)} className="text-xs text-indigo-600 hover:underline">+ add witness</button>
+        )}
+        <button type="button" onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
     </div>
   );
 }

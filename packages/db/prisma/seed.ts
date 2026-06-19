@@ -30,6 +30,7 @@ const BASELINE_PROGRAMS = [
   { key: 'sales.invoices', name: 'Invoices', folder: 'Transactions/Sales' },
   { key: 'sales.shipments', name: 'Packing Slips', folder: 'Transactions/Sales' },
   { key: 'qa.cofa', name: 'Certificates of Analysis', folder: 'Quality' },
+  { key: 'qa.disposition', name: 'QA Disposition', folder: 'Quality' },
   { key: 'inventory.browser', name: 'Inventory Browser', folder: 'Transactions/Inventory' },
   { key: 'inventory.trace', name: 'Trace Genealogy', folder: 'Transactions/Inventory' },
   { key: 'inventory.recall', name: 'Recall', folder: 'Transactions/Inventory' },
@@ -45,6 +46,13 @@ const SECURED_ITEMS = [
   {
     key: 'order.complete',
     description: 'Sign-off on completing a batch order',
+    requireReason: true,
+    requireSignature: true,
+    requireWitness: false,
+  },
+  {
+    key: 'release.disposition',
+    description: 'Sign-off on a QA lot disposition (release / hold / reject)',
     requireReason: true,
     requireSignature: true,
     requireWitness: false,
