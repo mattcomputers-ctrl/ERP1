@@ -1045,3 +1045,26 @@ model Waybill {
 
   @@map("Waybill")
 }
+
+// Receipt line (mirrors legacy). 1:1 with its receipt ChangeSet (PK = ChangeSet):
+// the legacy model is ONE ChangeSet per received order line. Records the quantity
+// received (PSQty) against an order line (OrdDetail) — for a purchase receipt the
+// ChangeSet has Context='PO' and ChangeSet.Ordr is the purchase order. Sublot is
+// unpopulated in this install (see genealogy-data-reality), so a receipt records
+// the event + quantity, not on-hand sublot/lot creation.
+model ChangeSetReceipt {
+  changeSetId        Int     @id @map("ChangeSet")
+  ordDetailId        Int?    @map("OrdDetail")
+  itemId             Int?    @map("Item")
+  sublotId           Int?    @map("Sublot")
+  billToId           Int?    @map("BillTo")
+  divisionId         Int?    @map("Division")
+  psQty              Float?  @map("PSQty")
+  psUnit             String? @map("PSUnit") @db.VarChar(20)
+  psQtyEntered       String? @map("PSQtyEntered") @db.VarChar(20)
+  qtyPerPsQty        Float?  @map("QtyPerPSQty")
+  numberOfContainers Int?    @map("NumberOfContainers")
+
+  @@index([ordDetailId])
+  @@map("ChangeSetReceipt")
+}

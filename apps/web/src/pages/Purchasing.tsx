@@ -33,6 +33,7 @@ export function Purchasing() {
   const [q, setQ] = useState('');
   const [sort, setSort] = useState('id:desc');
   const [showCreate, setShowCreate] = useState(false);
+  const [selected, setSelected] = useState<number | null>(null);
   const qc = useQueryClient();
 
   const params = new URLSearchParams({ page: String(page), pageSize: '25', sort });
@@ -40,6 +41,11 @@ export function Purchasing() {
   const list = useQuery({
     queryKey: ['purchase-orders', page, q, sort],
     queryFn: () => api.get<ListResp>(`/purchase-orders?${params.toString()}`),
+  });
+  const detail = useQuery({
+    queryKey: ['purchase-order', selected],
+    queryFn: () => api.get<PurchaseOrderDetail>(`/purchase-orders/${selected}`),
+    enabled: selected != null,
   });
 
   const columns: GridColumn<PoRow>[] = [
@@ -49,6 +55,10 @@ export function Purchasing() {
     { key: 'status', header: 'Status', sortable: true, value: (r) => statusLabel(r.status), render: (r) => statusLabel(r.status) },
     { key: 'dateOrdered', header: 'Ordered', sortable: true, value: (r) => fmtDate(r.dateOrdered), render: (r) => fmtDate(r.dateOrdered) },
     { key: 'total', header: 'Total', value: (r) => r.total, render: (r) => <span className="tabular-nums">{money(r.total)}</span> },
+    {
+      key: 'receiving', header: '',
+      render: (r) => <button onClick={() => setSelected(r.id)} className="text-indigo-600 hover:underline">Receiving</button>,
+    },
     {
       key: 'view', header: '',
       render: (r) => <a href={`/purchase-orders/${r.id}/print`} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">View / print</a>,
@@ -87,7 +97,110 @@ export function Purchasing() {
         rowKey={(r) => r.id}
         exportName="purchase-orders"
       />
+
+      {selected != null && (
+        <ReceivingPanel
+          poId={selected}
+          data={detail.data}
+          loading={detail.isLoading}
+          onClose={() => setSelected(null)}
+        />
+      )}
     </div>
+  );
+}
+
+// --- receiving detail panel (read) ---------------------------------------
+
+interface DetailLine {
+  lineId: number; itemCode: string | null; description: string | null;
+  qty: number | null; unit: string | null; received: number; backordered: number;
+}
+interface Receipt {
+  changeSetId: number; date: string | null; ordDetailId: number | null;
+  itemCode: string | null; qty: number | null; unit: string | null; numberOfContainers: number | null;
+}
+interface PurchaseOrderDetail {
+  header: { poId: number; poNumber: string | null; status: string | null };
+  supplier: { name: string | null } | null;
+  lines: DetailLine[];
+  receipts: Receipt[];
+}
+
+const num3 = (n: number | null) => (n == null ? '' : Number(n.toFixed(3)).toString());
+
+function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?: PurchaseOrderDetail; loading: boolean; onClose: () => void }) {
+  return (
+    <Card>
+      <div className="mb-3 flex items-start justify-between">
+        <h2 className="text-lg font-medium">Receiving — PO #{data?.header.poNumber ?? poId}</h2>
+        <button onClick={onClose} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+      </div>
+      {loading && <p className="text-sm text-slate-400">Loading…</p>}
+      {data && (
+        <>
+          <div className="mb-1 text-sm text-slate-500">{data.supplier?.name}</div>
+          <table className="w-full text-sm">
+            <thead className="border-b border-slate-200 text-left text-slate-500">
+              <tr>
+                <th className="py-1 pr-2 font-medium">Item</th>
+                <th className="py-1 pr-2 font-medium">Description</th>
+                <th className="py-1 pr-2 text-right font-medium">Ordered</th>
+                <th className="py-1 pr-2 text-right font-medium">Received</th>
+                <th className="py-1 pr-2 text-right font-medium">Backordered</th>
+                <th className="py-1 pr-2 font-medium">Unit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.lines.map((l) => (
+                <tr key={l.lineId} className="border-b border-slate-100">
+                  <td className="py-1 pr-2 font-medium">{l.itemCode}</td>
+                  <td className="py-1 pr-2 text-slate-600">{l.description}</td>
+                  <td className="py-1 pr-2 text-right tabular-nums">{num3(l.qty)}</td>
+                  <td className="py-1 pr-2 text-right tabular-nums">{num3(l.received)}</td>
+                  <td className="py-1 pr-2 text-right tabular-nums">
+                    {l.backordered > 0
+                      ? <span className="rounded-full bg-amber-50 px-2 py-0.5 text-amber-700">{num3(l.backordered)}</span>
+                      : <span className="text-emerald-600">0</span>}
+                  </td>
+                  <td className="py-1 pr-2">{l.unit}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div className="mt-4 mb-1 text-sm font-medium text-slate-700">Receipt history</div>
+          {data.receipts.length === 0 ? (
+            <p className="text-sm text-slate-400">No receipts recorded against this purchase order.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="border-b border-slate-200 text-left text-slate-500">
+                <tr>
+                  <th className="py-1 pr-2 font-medium">Receipt #</th>
+                  <th className="py-1 pr-2 font-medium">Date</th>
+                  <th className="py-1 pr-2 font-medium">Item</th>
+                  <th className="py-1 pr-2 text-right font-medium">Qty</th>
+                  <th className="py-1 pr-2 font-medium">Unit</th>
+                  <th className="py-1 pr-2 text-right font-medium">Containers</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.receipts.map((r) => (
+                  <tr key={r.changeSetId} className="border-b border-slate-100">
+                    <td className="py-1 pr-2 font-medium">{r.changeSetId}</td>
+                    <td className="py-1 pr-2">{fmtDate(r.date)}</td>
+                    <td className="py-1 pr-2">{r.itemCode}</td>
+                    <td className="py-1 pr-2 text-right tabular-nums">{num3(r.qty)}</td>
+                    <td className="py-1 pr-2">{r.unit}</td>
+                    <td className="py-1 pr-2 text-right tabular-nums">{r.numberOfContainers ?? ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+    </Card>
   );
 }
 

@@ -329,6 +329,16 @@ const TABLES: TableSpec[] = [
       shipViaId: r.ShipVia, poNumber: r.PoNumber, trailerNumber: r.TrailerNumber,
     }),
   },
+  {
+    // Receipt lines (1:1 with their ChangeSet; PK = ChangeSet, not autoincrement).
+    name: 'ChangeSetReceipt', legacyTable: 'dbo.ChangeSetReceipt', delegate: 'changeSetReceipt',
+    where: (d) => ({ changeSetId: d.changeSetId }),
+    map: (r) => ({
+      changeSetId: r.ChangeSet, ordDetailId: r.OrdDetail, itemId: r.Item, sublotId: r.Sublot,
+      billToId: r.BillTo, divisionId: r.Division, psQty: r.PSQty, psUnit: r.PSUnit,
+      psQtyEntered: r.PSQtyEntered, qtyPerPsQty: r.QtyPerPSQty, numberOfContainers: r.NumberOfContainers,
+    }),
+  },
 ];
 
 @Injectable()

@@ -10,6 +10,7 @@ import { SettingsService } from '../settings/settings.service';
 import type { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
 
 const num = (v: unknown) => (v == null ? 0 : Number(v));
+const round3 = (n: number) => Math.round(n * 1000) / 1000;
 
 // Purchase orders are Ordr rows discriminated by Context='PO'; their lines are
 // OrdDetail rows with the same context. Entity = the supplier (unlike SH orders,
@@ -93,7 +94,14 @@ export class PurchasingService {
     };
   }
 
-  /** Assemble the print-faithful Purchase Order document model. */
+  /**
+   * Assemble the Purchase Order document model: print-faithful header + supplier +
+   * priced lines, plus the receiving status (received / backordered per line,
+   * derived from the receipt quantities — ChangeSetReceipt.PSQty grouped by
+   * OrdDetail) and the receipt history (the Context='PO' ChangeSets + their
+   * ChangeSetReceipt lines). The printed doc uses the header + lines; the
+   * interactive Purchasing detail also shows the receiving status + history.
+   */
   async get(id: number) {
     const po = await this.prisma.ordr.findUnique({ where: { id } });
     if (!po || po.context !== PO_CONTEXT) throw new NotFoundException('Purchase order not found');
@@ -103,34 +111,79 @@ export class PurchasingService {
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
       select: { id: true, itemId: true, qtyReqd: true, price: true, entityUnit: true, description: true },
     });
-    const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is number => v != null))];
-    const items = await this.prisma.item.findMany({
-      where: { id: { in: itemIds } },
-      select: { id: true, itemCode: true, description: true },
-    });
-    const itemById = new Map(items.map((i) => [i.id, i]));
 
-    const [terms, currencyRow, parties, companyName] = await Promise.all([
+    // Receipt history: the PO's Context='PO' ChangeSets, each 1:1 with a receipt line.
+    const changeSets = await this.prisma.changeSet.findMany({
+      where: { context: PO_CONTEXT, ordrId: id },
+      select: { id: true, changeDate: true },
+      orderBy: { id: 'asc' },
+    });
+    const csIds = changeSets.map((c) => c.id);
+    const receiptRows = csIds.length
+      ? await this.prisma.changeSetReceipt.findMany({
+          where: { changeSetId: { in: csIds } },
+          select: { changeSetId: true, ordDetailId: true, itemId: true, psQty: true, psUnit: true, numberOfContainers: true },
+        })
+      : [];
+
+    // One items lookup covering both order lines and receipt lines.
+    const itemIds = [
+      ...new Set(
+        [...lines.map((l) => l.itemId), ...receiptRows.map((r) => r.itemId)].filter((v): v is number => v != null),
+      ),
+    ];
+    const [items, terms, currencyRow, parties, companyName] = await Promise.all([
+      this.prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, itemCode: true, description: true } }),
       po.terms ? this.prisma.terms.findUnique({ where: { code: po.terms }, select: { description: true } }) : Promise.resolve(null),
       po.currency ? this.prisma.currency.findUnique({ where: { code: po.currency }, select: { description: true } }) : Promise.resolve(null),
       this.party.resolve([po.entityId, po.shipViaId]),
       this.settings.get('company.name', 'Precision Ink'),
     ]);
+    const itemById = new Map(items.map((i) => [i.id, i]));
+
+    // Received per line = sum of the receipt quantities booked against that line
+    // (ChangeSetReceipt.PSQty by OrdDetail) — the same source as the history, so
+    // the two always agree and it doesn't depend on OrdDetail.QtyUsed being set.
+    const receivedByLine = new Map<number, number>();
+    for (const r of receiptRows) {
+      if (r.ordDetailId == null) continue;
+      receivedByLine.set(r.ordDetailId, (receivedByLine.get(r.ordDetailId) ?? 0) + num(r.psQty));
+    }
 
     const docLines = lines.map((l) => {
       const item = l.itemId != null ? itemById.get(l.itemId) : undefined;
       const price = num(l.price);
-      const qty = num(l.qtyReqd);
+      const ordered = num(l.qtyReqd);
+      const rawReceived = receivedByLine.get(l.id) ?? 0;
+      // Round to 3 dp so float residue from summing Float quantities can't leave
+      // e.g. backordered = 1e-13 on a fully-received line (which would otherwise
+      // trip the "backordered" badge).
       return {
+        lineId: l.id,
         itemCode: item?.itemCode ?? null,
         description: item?.description ?? l.description ?? null,
         qty: l.qtyReqd,
         unit: l.entityUnit,
         price,
-        extended: qty * price,
+        extended: ordered * price,
+        received: round3(rawReceived),
+        backordered: Math.max(round3(ordered - rawReceived), 0),
       };
     });
     const subtotal = docLines.reduce((s, l) => s + l.extended, 0);
+
+    const csDate = new Map(changeSets.map((c) => [c.id, c.changeDate]));
+    const receipts = receiptRows
+      .map((r) => ({
+        changeSetId: r.changeSetId,
+        date: csDate.get(r.changeSetId) ?? null,
+        ordDetailId: r.ordDetailId,
+        itemCode: r.itemId != null ? (itemById.get(r.itemId)?.itemCode ?? null) : null,
+        qty: r.psQty,
+        unit: r.psUnit,
+        numberOfContainers: r.numberOfContainers,
+      }))
+      .sort((a, b) => a.changeSetId - b.changeSetId);
 
     return {
       header: {
@@ -151,6 +204,7 @@ export class PurchasingService {
       buyer: { name: companyName },
       lines: docLines,
       totals: { subtotal, total: subtotal },
+      receipts,
     };
   }
 
