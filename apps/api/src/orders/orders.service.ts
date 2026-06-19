@@ -11,6 +11,7 @@ import { ValuationService } from '../inventory/valuation.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
+import { fgLotPrefix, formatSpec } from './order-format';
 import type { CompleteOrderDto } from './dto/complete-order.dto';
 import type { CloseOrderDto } from './dto/close-order.dto';
 import type { ConsumeLotsDto } from './dto/consume-lots.dto';
@@ -1309,22 +1310,3 @@ export class OrdersService {
   }
 }
 
-// The plant's lot-number day prefix YYMMDD (lots are YYMMDD###). UTC date
-// components match the app's plant-wall-clock convention; see
-// [[datetime-timezone-handling]] (normalize to true plant-local at cutover).
-function fgLotPrefix(at: Date): string {
-  const yy = String(at.getUTCFullYear() % 100).padStart(2, '0');
-  const mm = String(at.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(at.getUTCDate()).padStart(2, '0');
-  return `${yy}${mm}${dd}`;
-}
-
-// Format a test spec the way the paper ticket reads: explicit Specification text
-// wins; otherwise a min/max range ("13.5 - 14.5", "- 2", "825 -").
-function formatSpec(min: number | null, max: number | null, spec: string | null): string {
-  if (spec && spec.trim()) return spec.trim();
-  if (min != null && max != null) return `${min} - ${max}`;
-  if (max != null) return `- ${max}`;
-  if (min != null) return `${min} -`;
-  return '';
-}
