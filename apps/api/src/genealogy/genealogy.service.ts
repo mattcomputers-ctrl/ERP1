@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { PartyService } from '../sales/party.service';
 
 interface InventoryRow {
   id: number;
@@ -22,7 +23,10 @@ const CAVEATS = [
 export class GenealogyService {
   private readonly logger = new Logger(GenealogyService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly party: PartyService,
+  ) {}
 
   /**
    * Recompute the derived lot-to-lot genealogy from OrdDetailCommit. Each
@@ -69,12 +73,14 @@ export class GenealogyService {
 
     const onHand = await this.onHandForLots(affected);
     const totalQty = onHand.reduce((s, r) => s + (Number(r.qty) || 0), 0);
-    const [focus, lineage, upstream, provenance] = await Promise.all([
+    const [focus, lineage, upstream, provenance, shipments] = await Promise.all([
       this.labelLots(startLots),
       this.labelLots(descendants),
       this.labelLots(ancestors),
       this.provenanceOf(startLots),
+      this.shipmentsForLots(affected),
     ]);
+    const shippedQty = shipments.reduce((s, r) => s + (Number(r.qty) || 0), 0);
 
     return {
       start: params,
@@ -83,6 +89,7 @@ export class GenealogyService {
       upstream,
       lineage,
       onHand,
+      shipments,
       provenance,
       caveats: CAVEATS,
       summary: {
@@ -94,6 +101,9 @@ export class GenealogyService {
         distinctItems: new Set(onHand.map((r) => r.itemCode)).size,
         distinctLocations: new Set(onHand.map((r) => r.locationCode)).size,
         totalOnHandQty: totalQty,
+        shipments: shipments.length,
+        distinctCustomers: new Set(shipments.map((r) => r.customer).filter(Boolean)).size,
+        shippedQty,
       },
     };
   }
@@ -248,6 +258,54 @@ export class GenealogyService {
       percent: i.percent,
     }));
     return { producedBy, ingredients };
+  }
+
+  /**
+   * Shipments that carried any of the given lots — the customer / PO# / ship date
+   * / quantity a recalled lot reached. Captured at SH-order close (shipment_lot);
+   * the legacy CMS never recorded shipment lots, so only lots shipped through ERP1
+   * appear here. Customer = the SH order's BillTo, then ShipTo, then Entity.
+   */
+  private async shipmentsForLots(lots: string[]) {
+    if (!lots.length) return [];
+    const rows = await this.prisma.shipmentLot.findMany({
+      where: { lot: { in: lots } },
+      orderBy: { shippedAt: 'desc' },
+      select: { lot: true, ordrId: true, itemId: true, qty: true, unit: true, shippedAt: true },
+    });
+    if (!rows.length) return [];
+
+    const ordrIds = [...new Set(rows.map((r) => r.ordrId))];
+    const itemIds = [...new Set(rows.map((r) => r.itemId).filter((v): v is number => v != null))];
+    const [orders, items] = await Promise.all([
+      this.prisma.ordr.findMany({
+        where: { id: { in: ordrIds } },
+        select: { id: true, poNumber: true, billToId: true, shipToId: true, entityId: true },
+      }),
+      itemIds.length
+        ? this.prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, itemCode: true } })
+        : Promise.resolve([]),
+    ]);
+    const orderById = new Map(orders.map((o) => [o.id, o]));
+    const itemById = new Map(items.map((i) => [i.id, i]));
+    const parties = await this.party.resolve(
+      orders.flatMap((o) => [o.billToId, o.shipToId, o.entityId]),
+    );
+    const nameOf = (oid: number | null | undefined) => (oid != null ? parties.get(oid)?.name ?? null : null);
+
+    return rows.map((r) => {
+      const o = orderById.get(r.ordrId);
+      return {
+        lot: r.lot,
+        itemCode: r.itemId != null ? itemById.get(r.itemId)?.itemCode ?? null : null,
+        orderId: r.ordrId,
+        customer: o ? nameOf(o.billToId) ?? nameOf(o.shipToId) ?? nameOf(o.entityId) : null,
+        poNumber: o?.poNumber ?? null,
+        shippedAt: r.shippedAt,
+        qty: r.qty,
+        unit: r.unit,
+      };
+    });
   }
 
   /** Current on-hand inventory (qty>0) for every sublot of the given lots. */

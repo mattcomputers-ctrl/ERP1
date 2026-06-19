@@ -35,12 +35,23 @@ interface Ingredient {
   itemDescription: string | null;
   percent: number | null;
 }
+interface Shipment {
+  lot: string;
+  itemCode: string | null;
+  orderId: number;
+  customer: string | null;
+  poNumber: string | null;
+  shippedAt: string | null;
+  qty: number | null;
+  unit: string | null;
+}
 interface RecallResp {
   startLots: string[];
   focus: LotLabel[];
   upstream: LotLabel[];
   lineage: LotLabel[];
   onHand: OnHand[];
+  shipments: Shipment[];
   provenance: { producedBy: LotLabel[]; ingredients: Ingredient[] };
   caveats: string[];
   summary: {
@@ -52,6 +63,9 @@ interface RecallResp {
     distinctItems: number;
     distinctLocations: number;
     totalOnHandQty: number;
+    shipments: number;
+    distinctCustomers: number;
+    shippedQty: number;
   };
 }
 
@@ -117,11 +131,12 @@ export function Recall() {
             </Card>
           ))}
 
-          <div className="grid gap-4 sm:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-5">
             <Stat label="Source lots" value={m.data.summary.ancestorLots} />
             <Stat label="Packout lots" value={m.data.summary.descendantLots} />
             <Stat label="On-hand containers" value={m.data.summary.onHandContainers} />
             <Stat label="On-hand qty" value={m.data.summary.totalOnHandQty} />
+            <Stat label="Shipments" value={m.data.summary.shipments} />
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">
@@ -192,6 +207,51 @@ export function Recall() {
             </table>
             {m.data.onHand.length === 0 && (
               <p className="px-4 py-6 text-slate-500">No on-hand inventory for the affected lots.</p>
+            )}
+          </Card>
+
+          {/* Where the affected lots shipped — customer / PO# / date / qty (captured
+              at SH-order close). The recall list the user needs to notify customers. */}
+          <Card className="overflow-x-auto p-0">
+            <div className="border-b border-slate-100 px-4 py-2 text-sm font-medium text-slate-700">
+              Shipments containing the affected lots
+              {m.data.shipments.length > 0 && (
+                <span className="ml-2 font-normal text-slate-400">
+                  {m.data.summary.shipments} shipment{m.data.summary.shipments === 1 ? '' : 's'}
+                  {m.data.summary.distinctCustomers > 0 && ` · ${m.data.summary.distinctCustomers} customer${m.data.summary.distinctCustomers === 1 ? '' : 's'}`}
+                </span>
+              )}
+            </div>
+            <table className="w-full text-sm">
+              <thead className="border-b border-slate-200 bg-slate-50 text-left text-slate-500">
+                <tr>
+                  <th className="px-4 py-2 font-medium">Lot</th>
+                  <th className="px-4 py-2 font-medium">Item</th>
+                  <th className="px-4 py-2 font-medium">Customer</th>
+                  <th className="px-4 py-2 font-medium">PO #</th>
+                  <th className="px-4 py-2 font-medium">Ship date</th>
+                  <th className="px-4 py-2 font-medium">Order</th>
+                  <th className="px-4 py-2 font-medium text-right">Qty</th>
+                </tr>
+              </thead>
+              <tbody>
+                {m.data.shipments.map((s, i) => (
+                  <tr key={`${s.orderId}-${s.lot}-${i}`} className="border-b border-slate-100 last:border-0">
+                    <td className="px-4 py-2">{s.lot}</td>
+                    <td className="px-4 py-2">{s.itemCode}</td>
+                    <td className="px-4 py-2">{s.customer || <span className="text-slate-400">—</span>}</td>
+                    <td className="px-4 py-2">{s.poNumber || <span className="text-slate-400">—</span>}</td>
+                    <td className="px-4 py-2">{s.shippedAt ? new Date(s.shippedAt).toISOString().slice(0, 10) : ''}</td>
+                    <td className="px-4 py-2">#{s.orderId}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">{s.qty}{s.unit ? ` ${s.unit}` : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {m.data.shipments.length === 0 && (
+              <p className="px-4 py-6 text-slate-500">
+                No recorded shipments for the affected lots. Shipment lots are captured when a shipping order is closed.
+              </p>
             )}
           </Card>
 

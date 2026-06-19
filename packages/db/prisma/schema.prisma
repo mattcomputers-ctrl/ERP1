@@ -893,6 +893,30 @@ model LotGenealogy {
   @@map("lot_genealogy")
 }
 
+// Forward shipment-lineage capture (ERP1, not a legacy mirror — clean
+// snake_case). Which finished-good lot(s) + quantity shipped on a shipping (SH)
+// order, recorded when the order is closed from the hand-written pick list. The
+// legacy CMS never recorded this (OrdDetail.Lot/Sublot are null on shipment
+// lines — see genealogy-data-reality), so the link is captured going forward.
+// This is the lot -> shipment edge recall walks to surface the customer / PO# /
+// ship date / quantity that a recalled lot reached. Only meaningful once the
+// shipped item is lot-traced. The legacy import never touches this table.
+model ShipmentLot {
+  id          BigInt   @id @default(autoincrement())
+  lot         String   @map("lot") @db.VarChar(50)
+  ordrId      Int      @map("ordr") // the SH order the lot shipped on
+  ordDetailId Int?     @map("ord_detail") // the SH line fulfilled (optional)
+  itemId      Int?     @map("item")
+  qty         Float?   @map("qty")
+  unit        String?  @map("unit") @db.VarChar(20)
+  shippedAt   DateTime @map("shipped_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([lot])
+  @@index([ordrId])
+  @@map("shipment_lot")
+}
+
 // QA disposition of a sublot (mirrors legacy). The release gate: Status
 // (Approved/Hold/Rejected), Grade, Purity, ExpiryDate, ReleasedBy. Linked from
 // Sublot.releaseId; surfaced as the QA status on the Lot Trace.

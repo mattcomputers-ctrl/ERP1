@@ -261,6 +261,7 @@ export function Orders() {
 
           {lifeState(detail.data.status) === 'NST' && <EditOrder order={detail.data} onDone={refresh} />}
           {detail.data.context === 'MFBA' && <ConsumeLots orderId={detail.data.id} onDone={refresh} />}
+          {detail.data.context === 'SH' && <ShipLots orderId={detail.data.id} onDone={refresh} />}
 
           <dl className="mb-4 grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
             <Detail label="Status" value={detail.data.status} />
@@ -491,6 +492,123 @@ function ConsumeLots({ orderId, onDone }: { orderId: number; onDone: () => void 
         <button type="button" onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
         {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
       </div>
+    </Card>
+  );
+}
+
+// Record the finished-good lots a shipping order shipped — the lot -> shipment
+// link recall walks to list the customer / PO# / ship date / qty a lot reached.
+// Entered at close from the hand-written pick list. The "slick" part: per
+// lot-traced line it offers the on-hand FG lots to pick from (one click adds a
+// row), and you can still type a lot. Capture only; it doesn't deplete on-hand.
+interface ShipLotOption {
+  ordDetailId: number;
+  itemId: number | null;
+  itemCode: string | null;
+  description: string | null;
+  qtyReqd: number | null;
+  qtyUsed: number | null;
+  unit: string | null;
+  lots: { lot: string; onHand: number; locationCode: string | null }[];
+}
+function ShipLots({ orderId, onDone }: { orderId: number; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<{ lot: string; qty: string; ordDetailId?: number }[]>([]);
+  const [shippedAt, setShippedAt] = useState('');
+
+  const opts = useQuery({
+    queryKey: ['ship-lot-options', orderId],
+    queryFn: () => api.get<{ shippable: boolean; lines: ShipLotOption[] }>(`/orders/${orderId}/ship-lot-options`),
+    enabled: open,
+  });
+
+  const m = useMutation({
+    mutationFn: () =>
+      api.post(`/orders/${orderId}/ship-lots`, {
+        lots: rows
+          .filter((r) => r.lot.trim() && Number(r.qty) > 0)
+          .map((r) => ({ lot: r.lot.trim(), qty: Number(r.qty), ordDetailId: r.ordDetailId })),
+        shippedAt: shippedAt || undefined,
+      }),
+    onSuccess: () => { setOpen(false); setRows([]); setShippedAt(''); onDone(); },
+  });
+
+  const addRow = (lot: string, ordDetailId?: number) => setRows((p) => [...p, { lot, qty: '', ordDetailId }]);
+  const valid = rows.some((r) => r.lot.trim() && Number(r.qty) > 0);
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mb-4 text-sm font-medium text-indigo-600 hover:underline">
+        Record shipped lots
+      </button>
+    );
+  }
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 text-sm font-medium text-slate-700">
+        Finished-good lots shipped <span className="font-normal text-slate-400">— from the pick list; traceability for recall</span>
+      </div>
+
+      {opts.isLoading && <p className="text-sm text-slate-400">Loading on-hand lots…</p>}
+      {opts.isError && <p className="text-sm text-red-600">{(opts.error as Error).message}</p>}
+      {opts.data && !opts.data.shippable && (
+        <p className="text-sm text-slate-500">
+          No lot-traced items on this order — enable lot tracking on the shipped items to record shipped lots.
+        </p>
+      )}
+
+      {opts.data?.shippable && (
+        <>
+          {/* Per-line picker: on-hand FG lots to ship; one click adds an entry row. */}
+          <div className="mb-3 space-y-2">
+            {opts.data.lines.map((ln) => (
+              <div key={ln.ordDetailId} className="rounded-md border border-slate-200 px-3 py-2">
+                <div className="text-sm">
+                  <span className="font-medium text-slate-700">{ln.itemCode}</span>
+                  {ln.description && <span className="ml-2 text-slate-400">{ln.description}</span>}
+                  <span className="ml-2 text-xs text-slate-400">ordered {ln.qtyReqd ?? '—'} {ln.unit}</span>
+                </div>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {ln.lots.length === 0 ? (
+                    <span className="text-xs text-slate-400">No on-hand lots — type a lot below.</span>
+                  ) : (
+                    ln.lots.map((lt) => (
+                      <button
+                        key={lt.lot}
+                        type="button"
+                        onClick={() => addRow(lt.lot, ln.ordDetailId)}
+                        className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700 hover:bg-indigo-100"
+                      >
+                        {lt.lot} · {lt.onHand}{lt.locationCode ? ` @ ${lt.locationCode}` : ''}
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Entry rows */}
+          {rows.map((r, i) => (
+            <div key={i} className="mb-2 flex items-center gap-2">
+              <input value={r.lot} onChange={(e) => setRows((p) => p.map((x, j) => (j === i ? { ...x, lot: e.target.value } : x)))} maxLength={50} placeholder="Lot #" className="w-48 rounded border border-slate-300 px-2 py-1 text-sm" />
+              <input type="number" min="0" step="any" value={r.qty} onChange={(e) => setRows((p) => p.map((x, j) => (j === i ? { ...x, qty: e.target.value } : x)))} placeholder="Qty shipped" className="w-32 rounded border border-slate-300 px-2 py-1 text-right text-sm" />
+              <button type="button" onClick={() => setRows((p) => p.filter((_, j) => j !== i))} className="text-sm text-slate-400 hover:text-red-600">remove</button>
+            </div>
+          ))}
+          <button type="button" onClick={() => addRow('')} className="text-xs text-indigo-600 hover:underline">+ add lot manually</button>
+
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-slate-500">
+              Ship date
+              <input type="date" value={shippedAt} onChange={(e) => setShippedAt(e.target.value)} className="rounded border border-slate-300 px-2 py-1 text-sm" />
+            </label>
+            <Button onClick={() => m.mutate()} disabled={!valid || m.isPending}>{m.isPending ? 'Recording…' : 'Record shipped lots'}</Button>
+            <button type="button" onClick={() => { setOpen(false); setRows([]); }} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+            {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+          </div>
+        </>
+      )}
     </Card>
   );
 }

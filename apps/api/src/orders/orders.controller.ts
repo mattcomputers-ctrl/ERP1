@@ -7,6 +7,7 @@ import { CompleteOrderDto } from './dto/complete-order.dto';
 import { ConsumeLotsDto } from './dto/consume-lots.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { EditOrderDto } from './dto/edit-order.dto';
+import { ShipLotsDto } from './dto/ship-lots.dto';
 import { OrdersService, type OrdersListQuery } from './orders.service';
 
 @UseGuards(SessionAuthGuard, ProgramGuard)
@@ -84,5 +85,19 @@ export class OrdersController {
   @RequireProgram('orders.consume')
   consumeLots(@Param('id', ParseIntPipe) id: number, @Body() dto: ConsumeLotsDto, @CurrentUser() actor: Actor) {
     return this.orders.consumeLots(id, dto, actor);
+  }
+
+  // Lot-picker options for closing a shipping order (on-hand FG lots per traced line).
+  @Get(':id/ship-lot-options')
+  @RequireProgram('orders.ship')
+  shipLotOptions(@Param('id', ParseIntPipe) id: number) {
+    return this.orders.shipLotOptions(id);
+  }
+
+  // Record the finished-good lots a shipping order shipped (lot -> shipment for recall).
+  @Post(':id/ship-lots')
+  @RequireProgram('orders.ship')
+  shipLots(@Param('id', ParseIntPipe) id: number, @Body() dto: ShipLotsDto, @CurrentUser() actor: Actor) {
+    return this.orders.shipLots(id, dto, actor);
   }
 }

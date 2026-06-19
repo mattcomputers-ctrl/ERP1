@@ -15,6 +15,7 @@ import type { CloseOrderDto } from './dto/close-order.dto';
 import type { ConsumeLotsDto } from './dto/consume-lots.dto';
 import type { CreateOrderDto } from './dto/create-order.dto';
 import type { EditOrderDto } from './dto/edit-order.dto';
+import type { ShipLotsDto } from './dto/ship-lots.dto';
 
 const LB_TO_GRAMS = 453.59237;
 
@@ -850,6 +851,209 @@ export class OrdersService {
         tx,
       );
       return { id, producedLot: childLot, consumed: dto.lots.length };
+    });
+  }
+
+  /**
+   * The "slick lot-picker" data for closing a shipping (SH) order: for each line
+   * whose item is lot-traced, the on-hand finished-good lots available to ship
+   * (lot + on-hand qty + location). Lot tracking is captured per item, so a line
+   * is only "shippable by lot" once its item has been enabled — the picker shows
+   * exactly those lines (a not-yet-traced item ships FIFO by quantity, no lot).
+   */
+  async shipLotOptions(id: number) {
+    const order = await this.prisma.ordr.findUnique({ where: { id }, select: { id: true, context: true } });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.context !== 'SH') {
+      throw new BadRequestException('Only shipping (SH) orders ship finished-good lots.');
+    }
+
+    const lines = await this.prisma.ordDetail.findMany({
+      where: { ordrId: id, itemId: { not: null } },
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+      select: { id: true, itemId: true, qtyReqd: true, qtyUsed: true, entityUnit: true, description: true },
+    });
+    const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is number => v != null))];
+    if (!itemIds.length) return { shippable: false, lines: [] };
+
+    // Only lot-traced items offer a lot picker.
+    const items = await this.prisma.item.findMany({
+      where: { id: { in: itemIds } },
+      select: { id: true, itemCode: true, description: true, unit: true, lotTracked: true },
+    });
+    const itemById = new Map(items.map((i) => [i.id, i]));
+    const tracedItemIds = items.filter((i) => i.lotTracked).map((i) => i.id);
+
+    // On-hand finished-good lots for the traced items, grouped by lot (a lot may
+    // sit in several locations). Sublot -> lot, Inventory(qty>0) -> Location code.
+    const lotsByItem = new Map<number, { lot: string; onHand: number; locationId: number | null; locationCode: string | null }[]>();
+    if (tracedItemIds.length) {
+      const inv = await this.prisma.inventory.findMany({
+        where: { itemId: { in: tracedItemIds }, qty: { gt: 0 }, sublotId: { not: null } },
+        select: { itemId: true, sublotId: true, locationId: true, qty: true },
+      });
+      const subIds = [...new Set(inv.map((r) => r.sublotId).filter((v): v is number => v != null))];
+      const locIds = [...new Set(inv.map((r) => r.locationId).filter((v): v is number => v != null))];
+      const [subs, locs] = await Promise.all([
+        subIds.length
+          ? this.prisma.sublot.findMany({ where: { id: { in: subIds } }, select: { id: true, lot: true } })
+          : Promise.resolve([]),
+        locIds.length
+          ? this.prisma.location.findMany({ where: { id: { in: locIds } }, select: { id: true, locationCode: true } })
+          : Promise.resolve([]),
+      ]);
+      const lotBySub = new Map(subs.map((s) => [s.id, s.lot]));
+      const locById = new Map(locs.map((l) => [l.id, l.locationCode]));
+      // Sum qty per (item, lot, location) so the picker lists each parcel once.
+      const agg = new Map<string, { itemId: number; lot: string; onHand: number; locationId: number | null; locationCode: string | null }>();
+      for (const r of inv) {
+        const lot = r.sublotId != null ? lotBySub.get(r.sublotId) ?? null : null;
+        if (!lot || r.itemId == null) continue;
+        const key = `${r.itemId}|${lot}|${r.locationId ?? ''}`;
+        const cur = agg.get(key) ?? {
+          itemId: r.itemId,
+          lot,
+          onHand: 0,
+          locationId: r.locationId ?? null,
+          locationCode: r.locationId != null ? locById.get(r.locationId) ?? null : null,
+        };
+        cur.onHand += Number(r.qty) || 0;
+        agg.set(key, cur);
+      }
+      for (const v of agg.values()) {
+        const arr = lotsByItem.get(v.itemId) ?? [];
+        arr.push({ lot: v.lot, onHand: v.onHand, locationId: v.locationId, locationCode: v.locationCode });
+        lotsByItem.set(v.itemId, arr);
+      }
+      for (const arr of lotsByItem.values()) arr.sort((a, b) => a.lot.localeCompare(b.lot));
+    }
+
+    const out = lines
+      .filter((l) => l.itemId != null && itemById.get(l.itemId)?.lotTracked)
+      .map((l) => {
+        const item = itemById.get(l.itemId!);
+        return {
+          ordDetailId: l.id,
+          itemId: l.itemId,
+          itemCode: item?.itemCode ?? null,
+          description: item?.description ?? l.description ?? null,
+          qtyReqd: l.qtyReqd,
+          qtyUsed: l.qtyUsed,
+          unit: l.entityUnit ?? item?.unit ?? null,
+          lots: lotsByItem.get(l.itemId!) ?? [],
+        };
+      });
+
+    return { shippable: out.length > 0, lines: out };
+  }
+
+  /**
+   * Record the finished-good lots a shipping (SH) order shipped — the lot ->
+   * shipment link that lets a recall list the customer / PO# / ship date / qty a
+   * recalled lot reached. Entered when the order is closed, from the hand-written
+   * pick list (the legacy CMS never recorded shipment lots — see
+   * genealogy-data-reality — so it's captured going forward). Only lots of
+   * lot-traced items are accepted (a not-yet-traced item has no lot identity).
+   * Capture only: this does NOT deplete the lot's on-hand (the inventory
+   * valuation/consumption engine does that). One transaction, atomic audit.
+   */
+  async shipLots(id: number, dto: ShipLotsDto, actor: Actor) {
+    const order = await this.prisma.ordr.findUnique({
+      where: { id },
+      select: { id: true, context: true, poNumber: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.context !== 'SH') {
+      throw new BadRequestException('Only shipping (SH) orders ship finished-good lots.');
+    }
+
+    // Ship date: the pick-list date if given, else now (close time). UTC-stored
+    // like every other timestamp (see datetime-timezone-handling).
+    let shippedAt = new Date();
+    if (dto.shippedAt) {
+      shippedAt = new Date(dto.shippedAt);
+      if (Number.isNaN(shippedAt.getTime())) throw new BadRequestException('shippedAt is not a valid date');
+    }
+
+    // Each lot must exist AND belong to a lot-traced item (the rule: shipment-lot
+    // capture is only active once the item is enabled). Resolve item.lotTracked
+    // through the lot's item.
+    const lotCodes = [...new Set(dto.lots.map((l) => l.lot.trim()))];
+    const lots = await this.prisma.lot.findMany({
+      where: { lot: { in: lotCodes } },
+      select: { lot: true, itemId: true },
+    });
+    const lotByCode = new Map(lots.map((l) => [l.lot, l]));
+    const lotItemIds = [...new Set(lots.map((l) => l.itemId).filter((v): v is number => v != null))];
+    const tracedItems = lotItemIds.length
+      ? await this.prisma.item.findMany({
+          where: { id: { in: lotItemIds } },
+          select: { id: true, itemCode: true, unit: true, lotTracked: true },
+        })
+      : [];
+    const itemById = new Map(tracedItems.map((i) => [i.id, i]));
+    for (const code of lotCodes) {
+      const lot = lotByCode.get(code);
+      if (!lot) throw new BadRequestException(`Lot ${code} not found.`);
+      const item = lot.itemId != null ? itemById.get(lot.itemId) : undefined;
+      if (!item || !item.lotTracked) {
+        throw new BadRequestException(
+          `Lot ${code}'s item is not lot-traced — enable lot tracking for it before shipping it by lot.`,
+        );
+      }
+    }
+
+    // Any referenced order line must be a line on THIS order (IDOR-safe).
+    const refLineIds = [...new Set(dto.lots.map((l) => l.ordDetailId).filter((v): v is number => v != null))];
+    if (refLineIds.length) {
+      const validLines = await this.prisma.ordDetail.findMany({
+        where: { id: { in: refLineIds }, ordrId: id },
+        select: { id: true },
+      });
+      const validSet = new Set(validLines.map((l) => l.id));
+      for (const lineId of refLineIds) {
+        if (!validSet.has(lineId)) throw new BadRequestException(`Line ${lineId} is not a line on shipping order #${id}.`);
+      }
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.shipmentLot.createMany({
+        data: dto.lots.map((l) => {
+          const lot = lotByCode.get(l.lot.trim())!;
+          const item = lot.itemId != null ? itemById.get(lot.itemId) : undefined;
+          return {
+            lot: l.lot.trim(),
+            ordrId: id,
+            ordDetailId: l.ordDetailId ?? null,
+            itemId: lot.itemId ?? null,
+            qty: l.qty,
+            // Default the shipped unit to the item's stock unit when not given.
+            unit: l.unit?.trim() || item?.unit || null,
+            shippedAt,
+          };
+        }),
+      });
+      await this.audit.record(
+        {
+          action: 'order.shiplots',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.ship',
+          summary:
+            `Shipping order #${id} recorded ${dto.lots.length} shipped lot${dto.lots.length === 1 ? '' : 's'}` +
+            (order.poNumber ? ` (PO ${order.poNumber})` : '') +
+            (dto.reason ? ` — ${dto.reason}` : ''),
+          changes: dto.lots.map((l) => ({
+            tableName: 'shipment_lot',
+            recordId: String(id),
+            fieldName: 'shipped',
+            oldValue: null,
+            newValue: `${l.lot.trim()} (qty ${l.qty})`,
+          })),
+        },
+        tx,
+      );
+      return { id, shipped: dto.lots.length, shippedAt: shippedAt.toISOString() };
     });
   }
 
