@@ -12,6 +12,7 @@ import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
 import type { CompleteOrderDto } from './dto/complete-order.dto';
 import type { CloseOrderDto } from './dto/close-order.dto';
+import type { ConsumeLotsDto } from './dto/consume-lots.dto';
 import type { CreateOrderDto } from './dto/create-order.dto';
 import type { EditOrderDto } from './dto/edit-order.dto';
 
@@ -776,6 +777,79 @@ export class OrdersService {
         tx,
       );
       return { id, status: u.status };
+    });
+  }
+
+  /**
+   * Record the input (raw-material) lots a batch consumed — the lineage that lets
+   * a recall trace a raw lot forward to the batches (and their packouts) it went
+   * into. Writes consumed-lot → produced-lot edges into the derived lot_genealogy
+   * graph (source='consumption', preserved across re-derive, which only rebuilds
+   * the OrdDetailCommit-sourced edges). This captures lineage only; depleting the
+   * consumed lots' on-hand and rolling their cost into the batch is the inventory
+   * valuation/consumption engine (separate).
+   */
+  async consumeLots(id: number, dto: ConsumeLotsDto, actor: Actor) {
+    const order = await this.prisma.ordr.findUnique({ where: { id }, select: { id: true, context: true } });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.context !== 'MFBA') {
+      throw new BadRequestException('Only batch (MFBA) orders consume raw-material lots.');
+    }
+
+    // The produced lot (child) = the batch order's PK-line lot of record.
+    const pkLines = await this.prisma.ordDetail.findMany({
+      where: { ordrId: id, context: 'PK' },
+      select: { id: true },
+    });
+    const producedLot = pkLines.length
+      ? await this.prisma.lot.findFirst({
+          where: { ordDetailId: { in: pkLines.map((l) => l.id) } },
+          select: { lot: true },
+        })
+      : null;
+    if (!producedLot) {
+      throw new BadRequestException(`Order #${id} has no produced lot yet — it must be created/released first.`);
+    }
+    const childLot = producedLot.lot;
+
+    const lotCodes = [...new Set(dto.lots.map((l) => l.lot.trim()))];
+    const existing = await this.prisma.lot.findMany({ where: { lot: { in: lotCodes } }, select: { lot: true } });
+    const existingSet = new Set(existing.map((l) => l.lot));
+    for (const l of dto.lots) {
+      const code = l.lot.trim();
+      if (!existingSet.has(code)) throw new BadRequestException(`Lot ${code} not found.`);
+      if (code === childLot) throw new BadRequestException(`A batch can't consume its own produced lot ${childLot}.`);
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      for (const l of dto.lots) {
+        // Accumulate qty if the same input lot is recorded against this batch again.
+        await tx.$executeRaw`
+          INSERT INTO lot_genealogy (child_lot, parent_lot, via_ordr, qty, source)
+          VALUES (${childLot}, ${l.lot.trim()}, ${id}, ${l.qty}, 'consumption')
+          ON CONFLICT (child_lot, parent_lot, via_ordr)
+          DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
+      }
+      await this.audit.record(
+        {
+          action: 'order.consume',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.consume',
+          summary:
+            `Order #${id} recorded ${dto.lots.length} consumed lot${dto.lots.length === 1 ? '' : 's'} ` +
+            `into lot ${childLot}${dto.reason ? ` — ${dto.reason}` : ''}`,
+          changes: dto.lots.map((l) => ({
+            tableName: 'lot_genealogy',
+            recordId: childLot,
+            fieldName: 'consumed',
+            oldValue: null,
+            newValue: `${l.lot.trim()} (qty ${l.qty})`,
+          })),
+        },
+        tx,
+      );
+      return { id, producedLot: childLot, consumed: dto.lots.length };
     });
   }
 

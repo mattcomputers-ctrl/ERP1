@@ -260,6 +260,7 @@ export function Orders() {
           </div>
 
           {lifeState(detail.data.status) === 'NST' && <EditOrder order={detail.data} onDone={refresh} />}
+          {detail.data.context === 'MFBA' && <ConsumeLots orderId={detail.data.id} onDone={refresh} />}
 
           <dl className="mb-4 grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
             <Detail label="Status" value={detail.data.status} />
@@ -446,6 +447,50 @@ function EditOrder({ order, onDone }: { order: OrderFull; onDone: () => void }) 
           {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
         </div>
       </form>
+    </Card>
+  );
+}
+
+// Record the raw-material lots a batch consumed — lineage so a recall can trace a
+// raw lot forward to the batches (and packouts) it went into. Capture only; it
+// doesn't deplete on-hand or roll cost (the inventory valuation engine does that).
+function ConsumeLots({ orderId, onDone }: { orderId: number; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<{ lot: string; qty: string }[]>([{ lot: '', qty: '' }]);
+  const m = useMutation({
+    mutationFn: () =>
+      api.post(`/orders/${orderId}/consume-lots`, {
+        lots: rows.filter((r) => r.lot.trim() && Number(r.qty) > 0).map((r) => ({ lot: r.lot.trim(), qty: Number(r.qty) })),
+      }),
+    onSuccess: () => { setOpen(false); setRows([{ lot: '', qty: '' }]); onDone(); },
+  });
+  const valid = rows.some((r) => r.lot.trim() && Number(r.qty) > 0);
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mb-4 text-sm font-medium text-indigo-600 hover:underline">
+        Record consumed raw lots
+      </button>
+    );
+  }
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 text-sm font-medium text-slate-700">
+        Raw lots consumed by this batch <span className="font-normal text-slate-400">— traceability for recall</span>
+      </div>
+      {rows.map((r, i) => (
+        <div key={i} className="mb-2 flex items-center gap-2">
+          <input value={r.lot} onChange={(e) => setRows((p) => p.map((x, j) => (j === i ? { ...x, lot: e.target.value } : x)))} maxLength={50} placeholder="Consumed lot #" className="w-48 rounded border border-slate-300 px-2 py-1 text-sm" />
+          <input type="number" min="0" step="any" value={r.qty} onChange={(e) => setRows((p) => p.map((x, j) => (j === i ? { ...x, qty: e.target.value } : x)))} placeholder="Qty" className="w-28 rounded border border-slate-300 px-2 py-1 text-right text-sm" />
+          {rows.length > 1 && <button type="button" onClick={() => setRows((p) => p.filter((_, j) => j !== i))} className="text-sm text-slate-400 hover:text-red-600">remove</button>}
+        </div>
+      ))}
+      <button type="button" onClick={() => setRows((p) => [...p, { lot: '', qty: '' }])} className="text-xs text-indigo-600 hover:underline">+ add lot</button>
+      <div className="mt-3 flex items-center gap-3">
+        <Button onClick={() => m.mutate()} disabled={!valid || m.isPending}>{m.isPending ? 'Recording…' : 'Record consumed lots'}</Button>
+        <button type="button" onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
     </Card>
   );
 }

@@ -28,6 +28,7 @@ const BASELINE_PROGRAMS = [
   { key: 'orders.release', name: 'Release Order', folder: 'Transactions/Orders' },
   { key: 'orders.complete', name: 'Complete Order', folder: 'Transactions/Orders' },
   { key: 'orders.close', name: 'Close Order', folder: 'Transactions/Orders' },
+  { key: 'orders.consume', name: 'Record Consumed Lots', folder: 'Transactions/Orders' },
   { key: 'sales.invoices', name: 'Invoices', folder: 'Transactions/Sales' },
   { key: 'sales.shipments', name: 'Packing Slips', folder: 'Transactions/Sales' },
   { key: 'sales.bills', name: 'Supplier Bills', folder: 'Transactions/Purchasing' },

@@ -4,6 +4,7 @@ import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
 import { CloseOrderDto } from './dto/close-order.dto';
 import { CompleteOrderDto } from './dto/complete-order.dto';
+import { ConsumeLotsDto } from './dto/consume-lots.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { EditOrderDto } from './dto/edit-order.dto';
 import { OrdersService, type OrdersListQuery } from './orders.service';
@@ -76,5 +77,12 @@ export class OrdersController {
   @RequireProgram('orders.close')
   close(@Param('id', ParseIntPipe) id: number, @Body() dto: CloseOrderDto, @CurrentUser() actor: Actor) {
     return this.orders.close(id, dto, actor);
+  }
+
+  // Record the raw-material lots a batch consumed (lineage for recall).
+  @Post(':id/consume-lots')
+  @RequireProgram('orders.consume')
+  consumeLots(@Param('id', ParseIntPipe) id: number, @Body() dto: ConsumeLotsDto, @CurrentUser() actor: Actor) {
+    return this.orders.consumeLots(id, dto, actor);
   }
 }
