@@ -105,11 +105,14 @@ export function Recall() {
                 </div>
               )}
               {f.disposition?.releaseId != null && (
-                <DispositionControls
-                  releaseId={f.disposition.releaseId}
-                  currentStatus={f.disposition.status}
-                  onDone={() => m.mutate(f.lot)}
-                />
+                <>
+                  <ResultsControls releaseId={f.disposition.releaseId} onDone={() => m.mutate(f.lot)} />
+                  <DispositionControls
+                    releaseId={f.disposition.releaseId}
+                    currentStatus={f.disposition.status}
+                    onDone={() => m.mutate(f.lot)}
+                  />
+                </>
               )}
             </Card>
           ))}
@@ -200,6 +203,86 @@ export function Recall() {
           </details>
         </>
       )}
+    </div>
+  );
+}
+
+interface TestRow {
+  id: number;
+  test: string;
+  specification: string;
+  result: string | null;
+  passed: boolean | null;
+  testedBy: string | null;
+  testedTime: string | null;
+}
+
+// Enter / update recorded LIMS test results for the focus lot's sample set.
+// Pass/fail is computed server-side against the product spec.
+function ResultsControls({ releaseId, onDone }: { releaseId: number; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [edits, setEdits] = useState<Record<number, string>>({});
+  const q = useQuery({
+    queryKey: ['release-tests', releaseId],
+    queryFn: () => api.get<{ hasSampleSet: boolean; tests: TestRow[] }>(`/releases/${releaseId}/tests`),
+    enabled: open,
+  });
+  const tests = q.data?.tests ?? [];
+  // Only send rows whose value genuinely differs from what's loaded — typing and
+  // then reverting (or re-saving an untouched row) must not re-stamp/clear it.
+  const changed = Object.entries(edits)
+    .map(([id, result]) => ({ id: Number(id), result }))
+    .filter((e) => {
+      const row = tests.find((t) => t.id === e.id);
+      return row != null && (e.result ?? '') !== (row.result ?? '');
+    });
+  const m = useMutation({
+    mutationFn: () => api.post(`/releases/${releaseId}/tests`, { results: changed }),
+    onSuccess: () => { setEdits({}); q.refetch(); onDone(); },
+  });
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mt-3 mr-4 text-sm font-medium text-indigo-600 hover:underline">
+        Enter test results
+      </button>
+    );
+  }
+
+  const dirty = changed.length > 0;
+  return (
+    <div className="mt-3 rounded-md bg-slate-50 p-3">
+      {q.isLoading && <span className="text-sm text-slate-400">Loading…</span>}
+      {q.data && !q.data.hasSampleSet && <span className="text-sm text-slate-500">No sample set recorded for this lot.</span>}
+      {q.data?.hasSampleSet && (
+        <table className="w-full text-sm">
+          <thead className="border-b border-slate-200 text-left text-slate-500">
+            <tr><th className="py-1 pr-2 font-medium">Test</th><th className="py-1 pr-2 font-medium">Specification</th><th className="py-1 pr-2 font-medium">Result</th><th className="py-1 pr-2 font-medium">Pass</th><th className="py-1 font-medium">Tested by</th></tr>
+          </thead>
+          <tbody>
+            {tests.map((t) => (
+              <tr key={t.id} className="border-b border-slate-100 last:border-0">
+                <td className="py-1 pr-2 font-medium">{t.test}</td>
+                <td className="py-1 pr-2 text-slate-500">{t.specification || <span className="text-slate-400">visual / report</span>}</td>
+                <td className="py-1 pr-2">
+                  <input
+                    value={edits[t.id] ?? t.result ?? ''}
+                    onChange={(e) => setEdits({ ...edits, [t.id]: e.target.value })}
+                    className="w-28 rounded border border-slate-300 px-2 py-1"
+                  />
+                </td>
+                <td className="py-1 pr-2">{t.passed == null ? <span className="text-slate-300">—</span> : t.passed ? <span className="font-medium text-green-700">Pass</span> : <span className="font-medium text-red-700">Fail</span>}</td>
+                <td className="py-1 text-slate-500">{t.testedBy}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="mt-3 flex items-center gap-3">
+        <Button onClick={() => m.mutate()} disabled={!dirty || m.isPending}>{m.isPending ? 'Saving…' : 'Save results'}</Button>
+        <button type="button" onClick={() => { setOpen(false); setEdits({}); }} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
     </div>
   );
 }

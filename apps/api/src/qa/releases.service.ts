@@ -6,6 +6,7 @@ import type { Actor } from '../auth/current-user.decorator';
 import { PermissionService } from '../auth/permission.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { DispositionDto } from './dto/disposition.dto';
+import type { EnterResultsDto } from './dto/enter-results.dto';
 
 // Secured item governing QA lot disposition — its response level (reason /
 // signature / witness) is seeded and operator-configurable.
@@ -161,4 +162,142 @@ export class ReleasesService {
       return { id, status: u.status, signed: req.requireSignature, witness: witness?.label ?? null };
     });
   }
+
+  /**
+   * The recorded test results for a release's sample set, each lined up against
+   * the product's spec (ItemTest, matched by test name) — the grid an operator
+   * fills in. Rows are pre-created with the sample set (legacy); this lists them.
+   */
+  async tests(releaseId: number) {
+    const release = await this.prisma.release.findUnique({
+      where: { id: releaseId },
+      select: { sampleSetId: true, sublotId: true },
+    });
+    if (!release) throw new NotFoundException('Release not found');
+    if (release.sampleSetId == null) return { hasSampleSet: false, tests: [] };
+
+    const rows = await this.prisma.locationSampleTest.findMany({
+      where: { sampleSetId: release.sampleSetId },
+      orderBy: { id: 'asc' },
+      select: { id: true, test: true, result: true, passed: true, testedBy: true, testedTime: true },
+    });
+    const specByTest = await this.specsForRelease(release.sublotId);
+
+    return {
+      hasSampleSet: true,
+      tests: rows.map((r) => {
+        const spec = specByTest.get(norm(r.test));
+        return {
+          id: r.id,
+          test: r.test,
+          specification: formatSpec(spec?.min ?? null, spec?.max ?? null, spec?.specification ?? null),
+          result: r.result,
+          passed: r.passed,
+          testedBy: r.testedBy,
+          testedTime: r.testedTime,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Record/update test results for a release's sample set. Each item updates an
+   * existing LocationSampleTest row (validated to belong to this sample set);
+   * Pass/fail is computed against the product spec; tester + time are stamped.
+   * Audited (no e-signature — the signed gate is the disposition).
+   */
+  async enterResults(releaseId: number, dto: EnterResultsDto, actor: Actor) {
+    const release = await this.prisma.release.findUnique({
+      where: { id: releaseId },
+      select: { sampleSetId: true, sublotId: true },
+    });
+    if (!release) throw new NotFoundException('Release not found');
+    if (release.sampleSetId == null) throw new BadRequestException('This release has no sample set to record results against.');
+
+    const items = (dto.results ?? []).filter((r) => Number.isInteger(r.id));
+    if (!items.length) throw new BadRequestException('No results to record.');
+
+    // Only rows that actually belong to this release's sample set may be updated.
+    const rows = await this.prisma.locationSampleTest.findMany({
+      where: { sampleSetId: release.sampleSetId, id: { in: items.map((r) => r.id) } },
+      select: { id: true, test: true, result: true },
+    });
+    const rowById = new Map(rows.map((r) => [r.id, r]));
+    const specByTest = await this.specsForRelease(release.sublotId);
+
+    const at = new Date();
+    const testedBy = actor.label ?? actor.id;
+    return this.prisma.$transaction(async (tx) => {
+      const changes: FieldChange[] = [];
+      for (const item of items) {
+        const row = rowById.get(item.id);
+        if (!row) continue;
+        const result = item.result?.trim() ? item.result.trim() : null;
+        const passed = computePassed(result, specByTest.get(norm(row.test)));
+        await tx.locationSampleTest.update({
+          where: { id: row.id },
+          data: { result, passed, testedBy, testedTime: at },
+        });
+        changes.push({ tableName: 'LocationSampleTest', recordId: String(row.id), fieldName: `Result:${row.test}`, oldValue: row.result, newValue: result });
+      }
+      if (!changes.length) throw new BadRequestException('None of the given tests belong to this release.');
+
+      await this.audit.record(
+        {
+          action: 'lims.results',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'qa.results',
+          summary: `Recorded ${changes.length} test result(s) for release #${releaseId}`,
+          changes,
+        },
+        tx,
+      );
+      return { releaseId, updated: changes.length };
+    });
+  }
+
+  /** Product spec (ItemTest) keyed by normalised test name, via sublot -> lot -> item. */
+  private async specsForRelease(sublotId: number | null) {
+    const empty = new Map<string, { min: number | null; max: number | null; specification: string | null }>();
+    if (sublotId == null) return empty;
+    const sublot = await this.prisma.sublot.findUnique({ where: { id: sublotId }, select: { lot: true } });
+    if (!sublot?.lot) return empty;
+    const lot = await this.prisma.lot.findUnique({ where: { lot: sublot.lot }, select: { itemId: true } });
+    if (lot?.itemId == null) return empty;
+    const specs = await this.prisma.itemTest.findMany({
+      where: { itemId: lot.itemId },
+      select: { test: true, min: true, max: true, specification: true },
+    });
+    return new Map(specs.map((s) => [norm(s.test), { min: s.min, max: s.max, specification: s.specification }]));
+  }
+}
+
+const norm = (s: string | null | undefined) => (s ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+
+// Pass/fail for a recorded result against a spec: numeric result within
+// [min,max] (either bound optional) passes; a non-numeric or unspec'd result
+// passes when present (operator-judged visual/report tests); blank -> unknown.
+function computePassed(
+  result: string | null,
+  spec: { min: number | null; max: number | null } | undefined,
+): boolean | null {
+  if (result == null || result === '') return null;
+  const n = Number(result);
+  if (spec && !Number.isNaN(n) && (spec.min != null || spec.max != null)) {
+    if (spec.min != null && n < spec.min) return false;
+    if (spec.max != null && n > spec.max) return false;
+    return true;
+  }
+  return true;
+}
+
+// Format a spec the way a result sheet reads: explicit text wins; else a min/max
+// range ("28 - 33", "90 -" min-only, "- 2" max-only).
+function formatSpec(min: number | null, max: number | null, spec: string | null): string {
+  if (spec && spec.trim()) return spec.trim();
+  if (min != null && max != null) return `${min} - ${max}`;
+  if (min != null) return `${min} -`;
+  if (max != null) return `- ${max}`;
+  return '';
 }

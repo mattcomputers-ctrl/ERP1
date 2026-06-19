@@ -31,6 +31,7 @@ const BASELINE_PROGRAMS = [
   { key: 'sales.shipments', name: 'Packing Slips', folder: 'Transactions/Sales' },
   { key: 'qa.cofa', name: 'Certificates of Analysis', folder: 'Quality' },
   { key: 'qa.disposition', name: 'QA Disposition', folder: 'Quality' },
+  { key: 'qa.results', name: 'Enter Test Results', folder: 'Quality' },
   { key: 'inventory.browser', name: 'Inventory Browser', folder: 'Transactions/Inventory' },
   { key: 'inventory.trace', name: 'Trace Genealogy', folder: 'Transactions/Inventory' },
   { key: 'inventory.recall', name: 'Recall', folder: 'Transactions/Inventory' },
