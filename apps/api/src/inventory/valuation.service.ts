@@ -3,6 +3,7 @@ import { Prisma } from '@erp1/db';
 import { NATIVE_ID_BASE } from '../common/locks';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
+import { fifoCompare, greedyDeplete, producedUnitCost } from './valuation.math';
 
 /**
  * Inventory valuation / consumption engine. Encapsulates the on-hand movements
@@ -109,17 +110,11 @@ export class ValuationService {
       orderBy: { id: 'asc' },
       select: { id: true, qty: true },
     });
-    let remaining = qty;
-    let depleted = 0;
-    for (const r of rows) {
-      if (remaining <= 0) break;
-      const avail = r.qty ?? 0;
-      const take = Math.min(avail, remaining);
-      await tx.inventory.update({ where: { id: r.id }, data: { qty: avail - take } });
-      remaining -= take;
-      depleted += take;
+    const { takes, depleted, shortfall } = greedyDeplete(rows.map((r) => ({ qty: r.qty ?? 0 })), qty);
+    for (let i = 0; i < rows.length; i++) {
+      if (takes[i] > 0) await tx.inventory.update({ where: { id: rows[i].id }, data: { qty: (rows[i].qty ?? 0) - takes[i] } });
     }
-    return { depleted, shortfall: Math.max(remaining, 0) };
+    return { depleted, shortfall };
   }
 
   /**
@@ -151,17 +146,11 @@ export class ValuationService {
         l.unitCost != null ? Number(l.unitCost) : l.itemId != null ? priceByItem.get(l.itemId) ?? null : null,
       ]),
     );
-    let totalCost = 0;
-    let anyCost = false;
-    for (const e of edges) {
-      const uc = costByLot.get(e.parent_lot);
-      if (uc != null && e.qty != null) {
-        totalCost += Number(e.qty) * uc;
-        anyCost = true;
-      }
-    }
-    if (!anyCost) return null;
-    const perUnit = totalCost / producedQty;
+    const perUnit = producedUnitCost(
+      edges.map((e) => ({ qty: e.qty != null ? Number(e.qty) : 0, unitCost: costByLot.get(e.parent_lot) ?? null })),
+      producedQty,
+    );
+    if (perUnit == null) return null;
     await tx.lot.update({ where: { lot: producedLot }, data: { unitCost: perUnit } });
     return perUnit;
   }
@@ -193,36 +182,28 @@ export class ValuationService {
       ? await tx.lot.findMany({ where: { lot: { in: lotCodes } }, select: { lot: true, receivedDate: true, manfDate: true } })
       : [];
     const dateByLot = new Map(lots.map((l) => [l.lot, l.receivedDate ?? l.manfDate ?? null]));
-    const fifoTime = (sublotId: number | null) => {
-      const lot = sublotId != null ? lotBySub.get(sublotId) ?? null : null;
-      const d = lot ? dateByLot.get(lot) ?? null : null;
+    const timeForLot = (lot: string) => {
+      const d = dateByLot.get(lot) ?? null;
       return d ? d.getTime() : Number.POSITIVE_INFINITY; // undated parcels last
     };
-    const ordered = rows.slice().sort((a, b) => {
-      const ta = fifoTime(a.sublotId);
-      const tb = fifoTime(b.sublotId);
-      return ta !== tb ? ta - tb : a.id - b.id;
-    });
 
-    let remaining = qty;
-    let depleted = 0;
+    // Parcels with a resolvable lot, ordered FIFO (oldest first), then drawn down.
+    const parcels = rows
+      .map((r) => ({ id: r.id, qty: r.qty ?? 0, lot: r.sublotId != null ? lotBySub.get(r.sublotId) ?? null : null }))
+      .filter((p): p is { id: number; qty: number; lot: string } => p.lot != null)
+      .sort((a, b) => fifoCompare({ time: timeForLot(a.lot), seq: a.id }, { time: timeForLot(b.lot), seq: b.id }));
+    const { takes, depleted, shortfall } = greedyDeplete(parcels, qty);
+
     const pickByLot = new Map<string, number>();
-    for (const r of ordered) {
-      if (remaining <= 0) break;
-      const lot = r.sublotId != null ? lotBySub.get(r.sublotId) ?? null : null;
-      if (!lot) continue;
-      const avail = r.qty ?? 0;
-      const take = Math.min(avail, remaining);
-      if (take <= 0) continue;
-      await tx.inventory.update({ where: { id: r.id }, data: { qty: avail - take } });
-      pickByLot.set(lot, (pickByLot.get(lot) ?? 0) + take);
-      remaining -= take;
-      depleted += take;
+    for (let i = 0; i < parcels.length; i++) {
+      if (takes[i] <= 0) continue;
+      await tx.inventory.update({ where: { id: parcels[i].id }, data: { qty: parcels[i].qty - takes[i] } });
+      pickByLot.set(parcels[i].lot, (pickByLot.get(parcels[i].lot) ?? 0) + takes[i]);
     }
     return {
       picks: [...pickByLot.entries()].map(([lot, q]) => ({ lot, qty: q })),
       depleted,
-      shortfall: Math.max(remaining, 0),
+      shortfall,
     };
   }
 }

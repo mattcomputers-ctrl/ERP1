@@ -9,6 +9,7 @@
     "start:worker": "node dist/worker.js",
     "dev": "tsx watch src/main.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
     "lint": "echo \"(lint configured in a later increment)\""
   },
   "dependencies": {
@@ -37,6 +38,7 @@
     "@types/mssql": "^9.1.7",
     "@types/node": "^22.7.4",
     "tsx": "^4.19.1",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
   }
 }
