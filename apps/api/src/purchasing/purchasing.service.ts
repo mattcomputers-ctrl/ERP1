@@ -5,9 +5,14 @@ import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { maxRawLotNumber } from '../common/lot-numbers';
+import { ValuationService } from '../inventory/valuation.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
+
+// Operator setting: the location received stock lands in (a LocationCode). Empty
+// -> the engine auto-resolves the install's default stock location.
+const RECEIVING_LOCATION_SETTING = 'inventory.receivingLocation';
 import type { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
 import type { ReceivePurchaseOrderDto } from './dto/receive-purchase-order.dto';
 
@@ -28,6 +33,7 @@ export class PurchasingService {
     private readonly settings: SettingsService,
     private readonly audit: AuditService,
     private readonly party: PartyService,
+    private readonly valuation: ValuationService,
   ) {}
 
   /** Browse purchase orders (Ordr Context='PO') with supplier name + line total. */
@@ -444,9 +450,8 @@ export class PurchasingService {
    * Native ids (ChangeSet, Sublot) are ≥ NATIVE_ID_BASE and the system lot sequence
    * is read live, all under the shared id-allocation lock so concurrent receives
    * can't collide. Over-receipt is allowed. One transaction, atomic hash-chained
-   * audit. On-hand Inventory (qty in a location) is intentionally NOT created here —
-   * that needs a receiving-location decision; the Lot/Sublot + manufacturer lot are
-   * what recall needs.
+   * audit. On-hand Inventory is minted for each received lot (qty in the configured
+   * receiving location) by the valuation engine, so the lot is available to consume.
    */
   async receive(id: number, dto: ReceivePurchaseOrderDto, actor: Actor) {
     const po = await this.prisma.ordr.findUnique({
@@ -500,6 +505,8 @@ export class PurchasingService {
         NATIVE_ID_BASE;
       // Raw-material system lot numbers are a simple shared sequence from 100.
       let lotSeq = await maxRawLotNumber(tx);
+      // On-hand for received stock lands in the configured receiving location.
+      const receivingLocationId = await this.valuation.resolveLocationId(tx, RECEIVING_LOCATION_SETTING);
 
       const created: { lot: string; manufacturerLot: string; ordDetailId: number; qty: number }[] = [];
       const incByLine = new Map<number, number>();
@@ -525,6 +532,16 @@ export class PurchasingService {
           await tx.sublot.create({
             data: { id: newSubId, lot: lotNumber, sublotCode: lotNumber, context: 'LOT' },
           });
+          // Mint on-hand for the received quantity (the engine no-ops if the
+          // install has no location to put it in).
+          if (line.itemId != null) {
+            await this.valuation.mintInventory(tx, {
+              itemId: line.itemId,
+              sublotId: newSubId,
+              locationId: receivingLocationId,
+              qty: lot.qty,
+            });
+          }
           await tx.changeSet.create({
             data: {
               id: newCsId,

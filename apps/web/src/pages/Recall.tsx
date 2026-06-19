@@ -28,6 +28,7 @@ interface LotLabel {
   itemDescription: string | null;
   kind: string;
   manufacturerLot: string | null;
+  unitCost: number | null;
   producedByOrderId: number | null;
   producedByContext: string | null;
   disposition: Disposition | null;
@@ -147,6 +148,7 @@ export function Recall() {
                   <KindBadge f={f} className="ml-2" />
                   <span className="ml-2 text-slate-600">{f.itemCode}</span>
                   {f.itemDescription && <span className="ml-2 text-slate-400">{f.itemDescription}</span>}
+                  {f.unitCost != null && <span className="ml-2 text-xs text-slate-500">unit cost {f.unitCost.toFixed(4)}</span>}
                   <QABadge d={f.disposition} className="ml-2" />
                 </div>
                 <span className="text-sm text-slate-500">
@@ -483,13 +485,14 @@ function LotTable({ rows }: { rows: LotLabel[] }) {
   return (
     <table className="w-full text-sm">
       <thead className="border-b border-slate-200 text-left text-slate-500">
-        <tr><th className="py-1 font-medium">Lot</th><th className="py-1 font-medium">Item</th><th className="py-1 font-medium">QA</th><th className="py-1 font-medium">Via</th></tr>
+        <tr><th className="py-1 font-medium">Lot</th><th className="py-1 font-medium">Item</th><th className="py-1 text-right font-medium">Unit cost</th><th className="py-1 font-medium">QA</th><th className="py-1 font-medium">Via</th></tr>
       </thead>
       <tbody>
         {rows.map((l) => (
           <tr key={l.lot} className="border-b border-slate-100 last:border-0">
             <td className="py-1 pr-2">{l.lot}</td>
             <td className="py-1 pr-2">{l.itemCode}<span className="text-slate-400"> {l.itemDescription}</span></td>
+            <td className="py-1 pr-2 text-right tabular-nums">{l.unitCost != null ? l.unitCost.toFixed(4) : ''}</td>
             <td className="py-1 pr-2"><QABadge d={l.disposition} /></td>
             <td className="py-1 text-slate-500">{via(l)}</td>
           </tr>

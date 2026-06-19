@@ -241,7 +241,7 @@ export class GenealogyService {
     const [lotRows, sublots] = await Promise.all([
       this.prisma.lot.findMany({
         where: { lot: { in: lots } },
-        select: { lot: true, itemId: true, ordDetailId: true, supplierId: true, supLot: true },
+        select: { lot: true, itemId: true, ordDetailId: true, supplierId: true, supLot: true, unitCost: true },
       }),
       this.prisma.sublot.findMany({
         where: { lot: { in: lots } },
@@ -287,6 +287,7 @@ export class GenealogyService {
         // produced (batch/packout) lot; otherwise unknown.
         kind: l.supLot ? 'raw' : ordr?.context ? 'produced' : 'other',
         manufacturerLot: l.supLot ?? null,
+        unitCost: l.unitCost != null ? Number(l.unitCost) : null,
         producedByOrderId: ordr?.id ?? null,
         producedByContext: ordr?.context ?? null,
         disposition: rel

@@ -7,12 +7,14 @@ import type { Actor } from '../auth/current-user.decorator';
 import { PermissionService } from '../auth/permission.service';
 import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
+import { ValuationService } from '../inventory/valuation.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
 import type { CompleteOrderDto } from './dto/complete-order.dto';
 import type { CloseOrderDto } from './dto/close-order.dto';
 import type { ConsumeLotsDto } from './dto/consume-lots.dto';
+import type { ConsumeQtyDto } from './dto/consume-qty.dto';
 import type { CreateOrderDto } from './dto/create-order.dto';
 import type { EditOrderDto } from './dto/edit-order.dto';
 import type { ShipLotsDto } from './dto/ship-lots.dto';
@@ -31,6 +33,10 @@ const RECIPE_TO_ORDER_CONTEXT: Record<string, string> = { RMBA: 'MFBA', RMPP: 'M
 // Secured item governing order completion — its response level (reason /
 // signature / witness) is seeded and operator-configurable.
 const COMPLETE_SECURED_ITEM = 'order.complete';
+
+// Operator setting: the location finished-goods output lands in (a LocationCode).
+// Empty -> the valuation engine auto-resolves the install's default stock location.
+const PRODUCTION_LOCATION_SETTING = 'inventory.productionLocation';
 
 // Order lifecycle: Not started -> Released -> Completed -> Closed (legacy
 // Ordr.Status NST/RLS/CMP/CLS). A null/empty status is treated as Not started.
@@ -61,6 +67,7 @@ export class OrdersService {
     private readonly auth: AuthService,
     private readonly permissions: PermissionService,
     private readonly esign: ESignatureService,
+    private readonly valuation: ValuationService,
   ) {}
 
   async list(query: OrdersListQuery) {
@@ -589,6 +596,30 @@ export class OrdersService {
   }
 
   /**
+   * Item picker for the FIFO consume-by-quantity form: items matching a search,
+   * with their lot-tracked flag so the UI can steer lot-traced items to the
+   * specific-lot consume path. Gated by orders.consume (not master.items).
+   */
+  async consumeItemOptions(q?: string) {
+    const term = q?.trim();
+    const where: Record<string, unknown> = term
+      ? {
+          OR: [
+            { itemCode: { contains: term, mode: 'insensitive' as const } },
+            { description: { contains: term, mode: 'insensitive' as const } },
+          ],
+        }
+      : {};
+    const rows = await this.prisma.item.findMany({
+      where,
+      orderBy: { itemCode: 'asc' },
+      take: 15,
+      select: { id: true, itemCode: true, description: true, unit: true, lotTracked: true },
+    });
+    return { rows };
+  }
+
+  /**
    * Recipe picker for the create-order form: published production recipes (RMBA
    * batching + RMPP packaging) matching a search, with their context so the UI
    * can label the resulting order type. Lives here (gated by orders.create) so
@@ -709,9 +740,20 @@ export class OrdersService {
           ...(dto.actualBatchSize != null ? { actualBatchSize: dto.actualBatchSize } : {}),
         },
       });
+
+      // The batch now physically exists — mint finished-goods on-hand for the
+      // produced lot(s) (valuation engine). Idempotent; no-op for non-production
+      // orders. Needs the native-id lock for Inventory/Sublot allocation.
+      const effectiveBatch = dto.actualBatchSize ?? order.actualBatchSize ?? null;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const minted = await this.mintProducedLots(tx, order, effectiveBatch);
+
       const changes = [
         { tableName: 'Ordr', recordId: String(id), fieldName: 'Status', oldValue: order.status, newValue: 'CMP' },
         { tableName: 'Ordr', recordId: String(id), fieldName: 'DateCompleted', oldValue: null, newValue: at.toISOString() },
+        ...minted.map((mn) => ({
+          tableName: 'Inventory', recordId: mn.lot, fieldName: 'onHand', oldValue: null, newValue: String(mn.qty),
+        })),
       ];
       if (dto.actualBatchSize != null) {
         changes.push({
@@ -759,6 +801,54 @@ export class OrdersService {
     });
   }
 
+  /**
+   * Mint finished-goods on-hand for a production order's produced (PK-line)
+   * lot(s) — called at completion, when the batch physically exists. Produced
+   * quantity = the actual batch size (MFBA) or the packaging-line quantity
+   * (MFPP). The produced lot is valued via its Lot.unitCost (rolled up from the
+   * consumed inputs when those are recorded). Lots are minted at order creation
+   * without a Sublot, so the Sublot is created here if absent (1:1 with the lot).
+   * Idempotent: a lot that already has on-hand is skipped. Runs inside the
+   * caller's transaction, which must already hold the native-id allocation lock.
+   */
+  private async mintProducedLots(
+    tx: Prisma.TransactionClient,
+    order: { id: number; context: string | null; actualBatchSize: number | null },
+    effectiveBatchSize: number | null,
+  ): Promise<{ lot: string; qty: number }[]> {
+    if (order.context !== 'MFBA' && order.context !== 'MFPP') return [];
+    const pkLines = await tx.ordDetail.findMany({
+      where: { ordrId: order.id, context: 'PK' },
+      select: { id: true, itemId: true, qtyReqd: true },
+    });
+    if (!pkLines.length) return [];
+
+    const prodLocationId = await this.valuation.resolveLocationId(tx, PRODUCTION_LOCATION_SETTING);
+    let subId = (await tx.sublot.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE;
+    const minted: { lot: string; qty: number }[] = [];
+    for (const pk of pkLines) {
+      if (pk.itemId == null) continue;
+      const lotRow = await tx.lot.findFirst({ where: { ordDetailId: pk.id }, select: { lot: true } });
+      if (!lotRow) continue;
+      const producedQty = order.context === 'MFBA' ? effectiveBatchSize ?? pk.qtyReqd ?? 0 : pk.qtyReqd ?? 0;
+      if (!(producedQty > 0)) continue;
+
+      let sublotId: number;
+      const sub = await tx.sublot.findFirst({ where: { lot: lotRow.lot }, select: { id: true } });
+      if (sub) {
+        sublotId = sub.id;
+        const existing = await tx.inventory.aggregate({ _sum: { qty: true }, where: { sublotId } });
+        if ((existing._sum.qty ?? 0) > 0) continue; // already on-hand — don't double-mint
+      } else {
+        sublotId = subId += 1;
+        await tx.sublot.create({ data: { id: sublotId, lot: lotRow.lot, sublotCode: lotRow.lot, context: 'LOT' } });
+      }
+      await this.valuation.mintInventory(tx, { itemId: pk.itemId, sublotId, locationId: prodLocationId, qty: producedQty });
+      minted.push({ lot: lotRow.lot, qty: producedQty });
+    }
+    return minted;
+  }
+
   /** Close a completed order (Completed -> Closed). */
   async close(id: number, dto: CloseOrderDto, actor: Actor) {
     const order = await this.requireTransition(id, 'CMP', 'close');
@@ -791,7 +881,7 @@ export class OrdersService {
    * valuation/consumption engine (separate).
    */
   async consumeLots(id: number, dto: ConsumeLotsDto, actor: Actor) {
-    const order = await this.prisma.ordr.findUnique({ where: { id }, select: { id: true, context: true } });
+    const order = await this.prisma.ordr.findUnique({ where: { id }, select: { id: true, context: true, actualBatchSize: true } });
     if (!order) throw new NotFoundException('Order not found');
     if (order.context !== 'MFBA') {
       throw new BadRequestException('Only batch (MFBA) orders consume raw-material lots.');
@@ -800,7 +890,7 @@ export class OrdersService {
     // The produced lot (child) = the batch order's PK-line lot of record.
     const pkLines = await this.prisma.ordDetail.findMany({
       where: { ordrId: id, context: 'PK' },
-      select: { id: true },
+      select: { id: true, qtyReqd: true },
     });
     const producedLot = pkLines.length
       ? await this.prisma.lot.findFirst({
@@ -822,15 +912,29 @@ export class OrdersService {
       if (code === childLot) throw new BadRequestException(`A batch can't consume its own produced lot ${childLot}.`);
     }
 
+    // Produced quantity for the per-unit cost roll-up: the actual batch size, else
+    // the product (PK) line's quantity.
+    const producedQty = order.actualBatchSize ?? pkLines[0]?.qtyReqd ?? 0;
+
     return this.prisma.$transaction(async (tx) => {
+      const shortfalls: { lot: string; shortfall: number }[] = [];
       for (const l of dto.lots) {
+        const lotCode = l.lot.trim();
         // Accumulate qty if the same input lot is recorded against this batch again.
         await tx.$executeRaw`
           INSERT INTO lot_genealogy (child_lot, parent_lot, via_ordr, qty, source)
-          VALUES (${childLot}, ${l.lot.trim()}, ${id}, ${l.qty}, 'consumption')
+          VALUES (${childLot}, ${lotCode}, ${id}, ${l.qty}, 'consumption')
           ON CONFLICT (child_lot, parent_lot, via_ordr)
           DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
+        // Deplete the consumed lot's on-hand (specific identification). A shortfall
+        // is recorded, not blocked — the plant records what it actually consumed.
+        const { shortfall } = await this.valuation.depleteSpecific(tx, lotCode, l.qty);
+        if (shortfall > 0) shortfalls.push({ lot: lotCode, shortfall });
       }
+
+      // Roll the consumed inputs' real cost into the produced batch lot's unitCost.
+      const unitCost = await this.valuation.rollUpProducedCost(tx, childLot, producedQty);
+
       await this.audit.record(
         {
           action: 'order.consume',
@@ -839,7 +943,8 @@ export class OrdersService {
           program: 'orders.consume',
           summary:
             `Order #${id} recorded ${dto.lots.length} consumed lot${dto.lots.length === 1 ? '' : 's'} ` +
-            `into lot ${childLot}${dto.reason ? ` — ${dto.reason}` : ''}`,
+            `into lot ${childLot}${unitCost != null ? ` (unit cost ${unitCost.toFixed(4)})` : ''}` +
+            `${shortfalls.length ? `; ${shortfalls.length} lot(s) short on-hand` : ''}${dto.reason ? ` — ${dto.reason}` : ''}`,
           changes: dto.lots.map((l) => ({
             tableName: 'lot_genealogy',
             recordId: childLot,
@@ -850,7 +955,102 @@ export class OrdersService {
         },
         tx,
       );
-      return { id, producedLot: childLot, consumed: dto.lots.length };
+      return { id, producedLot: childLot, consumed: dto.lots.length, unitCost, shortfalls };
+    });
+  }
+
+  /**
+   * Consume NOT-lot-traced items by quantity, FIFO (oldest units first). The
+   * operator gives an item + quantity (no specific lot); the engine depletes that
+   * item's on-hand oldest-first across its lots, records the drawn-from lots as
+   * consumption lineage (so recall still traces them), and rolls their cost into
+   * the produced batch lot (each lot at its own unitCost, falling back to the
+   * item's purchase price). Lot-traced items are rejected here — their specific
+   * lots are recorded via consume-lots. Capture + valuation; atomic audit.
+   */
+  async consumeQuantity(id: number, dto: ConsumeQtyDto, actor: Actor) {
+    const order = await this.prisma.ordr.findUnique({ where: { id }, select: { id: true, context: true, actualBatchSize: true } });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.context !== 'MFBA') {
+      throw new BadRequestException('Only batch (MFBA) orders consume materials.');
+    }
+
+    const pkLines = await this.prisma.ordDetail.findMany({
+      where: { ordrId: id, context: 'PK' },
+      select: { id: true, qtyReqd: true },
+    });
+    const producedLot = pkLines.length
+      ? await this.prisma.lot.findFirst({ where: { ordDetailId: { in: pkLines.map((l) => l.id) } }, select: { lot: true } })
+      : null;
+    if (!producedLot) {
+      throw new BadRequestException(`Order #${id} has no produced lot yet — it must be created/released first.`);
+    }
+    const childLot = producedLot.lot;
+
+    // Items must exist and be NOT lot-traced (FIFO is for not-traced items; a
+    // lot-traced item's specific lots are recorded via consume-lots).
+    const itemIds = [...new Set(dto.items.map((i) => i.itemId))];
+    const items = await this.prisma.item.findMany({
+      where: { id: { in: itemIds } },
+      select: { id: true, itemCode: true, lotTracked: true },
+    });
+    const itemById = new Map(items.map((i) => [i.id, i]));
+    for (const it of dto.items) {
+      const item = itemById.get(it.itemId);
+      if (!item) throw new BadRequestException(`Item ${it.itemId} not found.`);
+      if (item.lotTracked) {
+        throw new BadRequestException(
+          `Item ${item.itemCode} is lot-traced — record its specific consumed lots via consume-lots, not FIFO by quantity.`,
+        );
+      }
+    }
+    const producedQty = order.actualBatchSize ?? pkLines[0]?.qtyReqd ?? 0;
+
+    return this.prisma.$transaction(async (tx) => {
+      const results: { itemId: number; picks: { lot: string; qty: number }[]; shortfall: number }[] = [];
+      for (const it of dto.items) {
+        const { picks, shortfall } = await this.valuation.depleteFifo(tx, it.itemId, it.qty);
+        for (const p of picks) {
+          if (p.lot === childLot) continue; // never self-edge the produced lot
+          await tx.$executeRaw`
+            INSERT INTO lot_genealogy (child_lot, parent_lot, via_ordr, qty, source)
+            VALUES (${childLot}, ${p.lot}, ${id}, ${p.qty}, 'consumption')
+            ON CONFLICT (child_lot, parent_lot, via_ordr)
+            DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
+        }
+        results.push({ itemId: it.itemId, picks, shortfall });
+      }
+
+      const unitCost = await this.valuation.rollUpProducedCost(tx, childLot, producedQty);
+      // Surface FIFO shortfalls in the same shape consume-lots uses (labelled by
+      // item code) so the shared result banner renders them.
+      const shortfalls = results
+        .filter((r) => r.shortfall > 0)
+        .map((r) => ({ lot: itemById.get(r.itemId)?.itemCode ?? `item ${r.itemId}`, shortfall: r.shortfall }));
+
+      await this.audit.record(
+        {
+          action: 'order.consumeQty',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.consume',
+          summary:
+            `Order #${id} consumed ${dto.items.length} item(s) FIFO into lot ${childLot}` +
+            `${unitCost != null ? ` (unit cost ${unitCost.toFixed(4)})` : ''}` +
+            `${shortfalls.length ? `; ${shortfalls.length} item(s) short on-hand` : ''}${dto.reason ? ` — ${dto.reason}` : ''}`,
+          changes: results.flatMap((r) =>
+            r.picks.map((p) => ({
+              tableName: 'lot_genealogy',
+              recordId: childLot,
+              fieldName: 'consumed',
+              oldValue: null,
+              newValue: `item ${r.itemId}: ${p.lot} (qty ${p.qty})`,
+            })),
+          ),
+        },
+        tx,
+      );
+      return { id, producedLot: childLot, items: results, unitCost, shortfalls };
     });
   }
 
@@ -1033,6 +1233,15 @@ export class OrdersService {
           };
         }),
       });
+
+      // Deplete the shipped lots' on-hand (specific identification). A shortfall is
+      // recorded, not blocked — the goods left the building regardless.
+      const shortfalls: { lot: string; shortfall: number }[] = [];
+      for (const l of dto.lots) {
+        const { shortfall } = await this.valuation.depleteSpecific(tx, l.lot.trim(), l.qty);
+        if (shortfall > 0) shortfalls.push({ lot: l.lot.trim(), shortfall });
+      }
+
       await this.audit.record(
         {
           action: 'order.shiplots',
@@ -1042,6 +1251,7 @@ export class OrdersService {
           summary:
             `Shipping order #${id} recorded ${dto.lots.length} shipped lot${dto.lots.length === 1 ? '' : 's'}` +
             (order.poNumber ? ` (PO ${order.poNumber})` : '') +
+            (shortfalls.length ? `; ${shortfalls.length} lot(s) short on-hand` : '') +
             (dto.reason ? ` — ${dto.reason}` : ''),
           changes: dto.lots.map((l) => ({
             tableName: 'shipment_lot',
@@ -1053,7 +1263,7 @@ export class OrdersService {
         },
         tx,
       );
-      return { id, shipped: dto.lots.length, shippedAt: shippedAt.toISOString() };
+      return { id, shipped: dto.lots.length, shippedAt: shippedAt.toISOString(), shortfalls };
     });
   }
 

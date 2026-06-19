@@ -75,6 +75,8 @@ const DEFAULT_SETTINGS = [
   { key: 'company.phone', value: '847-952-1500', description: 'Company phone shown in the purchase-order footer.' },
   { key: 'company.email', value: 'PURCHASING@PRECISIONINKCORP.COM', description: 'Purchasing email shown in the purchase-order footer.' },
   { key: 'batchSheet.gramsThresholdLb', value: '0.05', description: 'Batch-ticket quantities at or below this many pounds are shown in grams instead.' },
+  { key: 'inventory.receivingLocation', value: '', description: 'Location code that received purchase stock lands in. Empty = auto-resolve the most-used inventory location.' },
+  { key: 'inventory.productionLocation', value: '', description: 'Location code that finished-goods batch output lands in. Empty = auto-resolve the most-used inventory location.' },
 ];
 
 async function main() {

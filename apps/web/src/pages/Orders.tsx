@@ -260,7 +260,12 @@ export function Orders() {
           </div>
 
           {lifeState(detail.data.status) === 'NST' && <EditOrder order={detail.data} onDone={refresh} />}
-          {detail.data.context === 'MFBA' && <ConsumeLots orderId={detail.data.id} onDone={refresh} />}
+          {detail.data.context === 'MFBA' && (
+            <>
+              <ConsumeLots orderId={detail.data.id} onDone={refresh} />
+              <ConsumeByQty orderId={detail.data.id} onDone={refresh} />
+            </>
+          )}
           {detail.data.context === 'SH' && <ShipLots orderId={detail.data.id} onDone={refresh} />}
 
           <dl className="mb-4 grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
@@ -452,32 +457,50 @@ function EditOrder({ order, onDone }: { order: OrderFull; onDone: () => void }) 
   );
 }
 
-// Record the raw-material lots a batch consumed — lineage so a recall can trace a
-// raw lot forward to the batches (and packouts) it went into. Capture only; it
-// doesn't deplete on-hand or roll cost (the inventory valuation engine does that).
+type ConsumeResult = { producedLot: string; unitCost: number | null; shortfalls?: { lot: string; shortfall: number }[] };
+
+// Result banner shared by both consume controls: produced-lot unit cost + any
+// on-hand shortfalls (recorded, not blocking).
+function ConsumeOutcome({ r }: { r: ConsumeResult }) {
+  const shortfalls = r.shortfalls ?? [];
+  return (
+    <div className="mt-3 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+      Recorded. {r.unitCost != null ? <>Produced lot <span className="font-medium">{r.producedLot}</span> unit cost <span className="font-medium">{r.unitCost.toFixed(4)}</span>.</> : <>Produced lot <span className="font-medium">{r.producedLot}</span> — no input cost available to roll up.</>}
+      {shortfalls.length > 0 && (
+        <div className="mt-1 text-amber-700">
+          Short on-hand (recorded anyway): {shortfalls.map((s) => `${s.lot} (−${s.shortfall})`).join(', ')}.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Record the SPECIFIC raw-material lots a batch consumed (lot-traced inputs).
+// Records lineage for recall, depletes each consumed lot's on-hand (specific
+// identification) and rolls its real cost into the produced batch lot's unit cost.
 function ConsumeLots({ orderId, onDone }: { orderId: number; onDone: () => void }) {
   const [open, setOpen] = useState(false);
   const [rows, setRows] = useState<{ lot: string; qty: string }[]>([{ lot: '', qty: '' }]);
   const m = useMutation({
     mutationFn: () =>
-      api.post(`/orders/${orderId}/consume-lots`, {
+      api.post<ConsumeResult>(`/orders/${orderId}/consume-lots`, {
         lots: rows.filter((r) => r.lot.trim() && Number(r.qty) > 0).map((r) => ({ lot: r.lot.trim(), qty: Number(r.qty) })),
       }),
-    onSuccess: () => { setOpen(false); setRows([{ lot: '', qty: '' }]); onDone(); },
+    onSuccess: () => { setRows([{ lot: '', qty: '' }]); onDone(); },
   });
   const valid = rows.some((r) => r.lot.trim() && Number(r.qty) > 0);
 
   if (!open) {
     return (
-      <button type="button" onClick={() => setOpen(true)} className="mb-4 text-sm font-medium text-indigo-600 hover:underline">
-        Record consumed raw lots
+      <button type="button" onClick={() => setOpen(true)} className="mb-4 mr-4 text-sm font-medium text-indigo-600 hover:underline">
+        Record consumed lots (specific)
       </button>
     );
   }
   return (
     <Card className="mb-4">
       <div className="mb-2 text-sm font-medium text-slate-700">
-        Raw lots consumed by this batch <span className="font-normal text-slate-400">— traceability for recall</span>
+        Lot-traced lots consumed by this batch <span className="font-normal text-slate-400">— specific identification; depletes on-hand + rolls cost</span>
       </div>
       {rows.map((r, i) => (
         <div key={i} className="mb-2 flex items-center gap-2">
@@ -489,9 +512,77 @@ function ConsumeLots({ orderId, onDone }: { orderId: number; onDone: () => void 
       <button type="button" onClick={() => setRows((p) => [...p, { lot: '', qty: '' }])} className="text-xs text-indigo-600 hover:underline">+ add lot</button>
       <div className="mt-3 flex items-center gap-3">
         <Button onClick={() => m.mutate()} disabled={!valid || m.isPending}>{m.isPending ? 'Recording…' : 'Record consumed lots'}</Button>
-        <button type="button" onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+        <button type="button" onClick={() => { setOpen(false); m.reset(); }} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
         {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
       </div>
+      {m.data && <ConsumeOutcome r={m.data} />}
+    </Card>
+  );
+}
+
+// Consume NOT-lot-traced items by quantity, FIFO (oldest units first). Item
+// typeahead; the engine depletes on-hand oldest-first across lots and rolls the
+// FIFO cost into the produced lot. Lot-traced items are steered to the specific path.
+type ConsumeItemOption = { id: number; itemCode: string | null; description: string | null; unit: string | null; lotTracked: boolean };
+function ConsumeByQty({ orderId, onDone }: { orderId: number; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const [items, setItems] = useState<{ item: ConsumeItemOption; qty: string }[]>([]);
+
+  const opts = useQuery({
+    queryKey: ['consume-item-options', search],
+    queryFn: () => api.get<{ rows: ConsumeItemOption[] }>(`/orders/consume-item-options?q=${encodeURIComponent(search)}`),
+    enabled: open && search.trim().length >= 1,
+  });
+  const m = useMutation({
+    mutationFn: () =>
+      api.post<ConsumeResult>(`/orders/${orderId}/consume-qty`, {
+        items: items.filter((r) => Number(r.qty) > 0).map((r) => ({ itemId: r.item.id, qty: Number(r.qty) })),
+      }),
+    onSuccess: () => { setItems([]); onDone(); },
+  });
+
+  const add = (it: ConsumeItemOption) => { setItems((p) => (p.some((x) => x.item.id === it.id) ? p : [...p, { item: it, qty: '' }])); setSearch(''); };
+  const valid = items.some((r) => Number(r.qty) > 0);
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mb-4 text-sm font-medium text-indigo-600 hover:underline">
+        Consume by quantity (FIFO)
+      </button>
+    );
+  }
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 text-sm font-medium text-slate-700">
+        Consume not-lot-traced items <span className="font-normal text-slate-400">— FIFO (oldest units first); depletes on-hand + rolls cost</span>
+      </div>
+      <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search item code / description…" className="max-w-sm" />
+      {search.trim().length >= 1 && (
+        <div className="mt-1 max-h-40 overflow-y-auto rounded-md border border-slate-200">
+          {opts.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
+          {opts.data?.rows.map((it) => (
+            <button type="button" key={it.id} onClick={() => add(it)} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
+              <span>{it.itemCode} <span className="text-slate-400">{it.description}</span></span>
+              {it.lotTracked && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">lot-traced → use specific</span>}
+            </button>
+          ))}
+        </div>
+      )}
+      {items.map((r, i) => (
+        <div key={r.item.id} className="mt-2 flex items-center gap-2">
+          <span className="w-56 text-sm">{r.item.itemCode} <span className="text-slate-400">{r.item.description}</span></span>
+          <input type="number" min="0" step="any" value={r.qty} onChange={(e) => setItems((p) => p.map((x, j) => (j === i ? { ...x, qty: e.target.value } : x)))} placeholder={`Qty ${r.item.unit ?? ''}`} className="w-32 rounded border border-slate-300 px-2 py-1 text-right text-sm" />
+          {r.item.lotTracked && <span className="text-xs text-amber-700">lot-traced — record specific lots instead</span>}
+          <button type="button" onClick={() => setItems((p) => p.filter((_, j) => j !== i))} className="text-sm text-slate-400 hover:text-red-600">remove</button>
+        </div>
+      ))}
+      <div className="mt-3 flex items-center gap-3">
+        <Button onClick={() => m.mutate()} disabled={!valid || m.isPending}>{m.isPending ? 'Consuming…' : 'Consume (FIFO)'}</Button>
+        <button type="button" onClick={() => { setOpen(false); m.reset(); }} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
+      {m.data && <ConsumeOutcome r={m.data} />}
     </Card>
   );
 }

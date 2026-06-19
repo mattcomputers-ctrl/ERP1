@@ -5,6 +5,7 @@ import { SessionAuthGuard } from '../auth/session-auth.guard';
 import { CloseOrderDto } from './dto/close-order.dto';
 import { CompleteOrderDto } from './dto/complete-order.dto';
 import { ConsumeLotsDto } from './dto/consume-lots.dto';
+import { ConsumeQtyDto } from './dto/consume-qty.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { EditOrderDto } from './dto/edit-order.dto';
 import { ShipLotsDto } from './dto/ship-lots.dto';
@@ -34,6 +35,13 @@ export class OrdersController {
   @RequireProgram('orders.create')
   recipeOptions(@Query('q') q?: string) {
     return this.orders.recipeOptions(q);
+  }
+
+  // Item picker for the FIFO consume-by-quantity form (gated by orders.consume).
+  @Get('consume-item-options')
+  @RequireProgram('orders.consume')
+  consumeItemOptions(@Query('q') q?: string) {
+    return this.orders.consumeItemOptions(q);
   }
 
   // E-signature requirements for completing an order (drives the complete form).
@@ -85,6 +93,13 @@ export class OrdersController {
   @RequireProgram('orders.consume')
   consumeLots(@Param('id', ParseIntPipe) id: number, @Body() dto: ConsumeLotsDto, @CurrentUser() actor: Actor) {
     return this.orders.consumeLots(id, dto, actor);
+  }
+
+  // Consume not-lot-traced items by quantity, FIFO (oldest units first).
+  @Post(':id/consume-qty')
+  @RequireProgram('orders.consume')
+  consumeQuantity(@Param('id', ParseIntPipe) id: number, @Body() dto: ConsumeQtyDto, @CurrentUser() actor: Actor) {
+    return this.orders.consumeQuantity(id, dto, actor);
   }
 
   // Lot-picker options for closing a shipping order (on-hand FG lots per traced line).
