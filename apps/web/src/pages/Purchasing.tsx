@@ -382,6 +382,7 @@ function RecallLookup() {
                 <th className="py-1 pr-2 text-right font-medium">Value</th>
                 <th className="py-1 pr-2 font-medium">Received</th>
                 <th className="py-1 pr-2 font-medium">PO</th>
+                <th className="py-1 pr-2 font-medium">Recall</th>
               </tr>
             </thead>
             <tbody>
@@ -399,6 +400,11 @@ function RecallLookup() {
                     {r.poId != null
                       ? <a href={`/purchase-orders/${r.poId}/print`} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">#{r.poId}</a>
                       : ''}
+                  </td>
+                  <td className="py-1 pr-2">
+                    {/* Trace this raw lot forward — into the batches that consumed it,
+                        their packouts, and the shipments that carried them. */}
+                    <a href={`/recall?q=${encodeURIComponent(r.lot)}`} className="text-indigo-600 hover:underline">trace forward →</a>
                   </td>
                 </tr>
               ))}

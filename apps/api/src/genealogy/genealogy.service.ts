@@ -60,11 +60,15 @@ export class GenealogyService {
   }
 
   /**
-   * Recall: from a lot (or sublot), forward-trace to every descendant lot it
-   * became and show the current on-hand inventory + upstream provenance.
+   * Recall: from a lot (or sublot, or a free-text query that may be an ERP1 lot
+   * OR a supplier's manufacturer lot), forward-trace to every descendant lot it
+   * became and show the current on-hand inventory + shipments + upstream
+   * provenance. The query form first-classes both a finished-good lot (off a
+   * label / pick list) and a raw-material lot (the supplier's manufacturer lot on
+   * the drum); a raw lot then forward-traces raw -> batch -> packout -> shipment.
    */
-  async recall(params: { lot?: string; sublot?: number }) {
-    const startLots = await this.resolveStartLots(params);
+  async recall(params: { lot?: string; sublot?: number; q?: string }) {
+    const { startLots, matched } = await this.resolveStart(params);
     const [descendants, ancestors] = await Promise.all([
       this.descendantsOf(startLots),
       this.ancestorsOf(startLots),
@@ -85,6 +89,7 @@ export class GenealogyService {
     return {
       start: params,
       startLots,
+      matched,
       focus,
       upstream,
       lineage,
@@ -108,15 +113,16 @@ export class GenealogyService {
     };
   }
 
-  /** Full genealogy for a lot/sublot: ancestors (what's in it) + descendants. */
-  async trace(params: { lot?: string; sublot?: number }) {
-    const startLots = await this.resolveStartLots(params);
+  /** Full genealogy for a lot/sublot/query: ancestors (what's in it) + descendants. */
+  async trace(params: { lot?: string; sublot?: number; q?: string }) {
+    const { startLots, matched } = await this.resolveStart(params);
     const [ancestors, descendants] = await Promise.all([
       this.ancestorsOf(startLots),
       this.descendantsOf(startLots),
     ]);
     return {
       start: params,
+      matched,
       lots: await this.labelLots(startLots),
       ancestors: await this.labelLots(ancestors),
       descendants: await this.labelLots(descendants),
@@ -127,6 +133,56 @@ export class GenealogyService {
 
   // --- start resolution ----------------------------------------------------
 
+  /**
+   * Resolve recall/trace inputs to start lots + a description of how each
+   * resolved (so the UI can say "manufacturer lot ABC → ERP1 lot 105"). Accepts
+   * an explicit lot, a sublot id, or a free-text query that may be an ERP1 lot
+   * number OR a supplier's manufacturer/supplier lot.
+   */
+  private async resolveStart(
+    params: { lot?: string; sublot?: number; q?: string },
+  ): Promise<{ startLots: string[]; matched: { query: string; lot: string; via: 'lot' | 'manufacturerLot'; manufacturerLot?: string | null }[] }> {
+    if (params.q != null && params.q.trim()) {
+      return this.resolveQuery(params.q.trim());
+    }
+    const startLots = await this.resolveStartLots(params);
+    return { startLots, matched: startLots.map((lot) => ({ query: lot, lot, via: 'lot' as const })) };
+  }
+
+  /**
+   * Resolve a free-text recall query to ERP1 lot(s). An exact ERP1 lot wins; else
+   * match a raw-material lot by its manufacturer/supplier lot (scoped to SupLot
+   * IS NOT NULL — the raw-lot discriminator, so a numeric term can't substring-
+   * match the legacy finished-good self-references). A manufacturer lot may map to
+   * several ERP1 system lots (split across receipts / opening stock) — all are
+   * returned so recall traces every one.
+   */
+  private async resolveQuery(q: string) {
+    const exact = await this.prisma.lot.findUnique({ where: { lot: q }, select: { lot: true } });
+    if (exact) return { startLots: [exact.lot], matched: [{ query: q, lot: exact.lot, via: 'lot' as const }] };
+
+    const rawLots = await this.prisma.lot.findMany({
+      where: {
+        supLot: { not: null },
+        OR: [
+          { manfLot: { equals: q, mode: 'insensitive' } },
+          { supLot: { equals: q, mode: 'insensitive' } },
+        ],
+      },
+      select: { lot: true, manfLot: true, supLot: true },
+      take: 200,
+    });
+    return {
+      startLots: rawLots.map((l) => l.lot),
+      matched: rawLots.map((l) => ({
+        query: q,
+        lot: l.lot,
+        via: 'manufacturerLot' as const,
+        manufacturerLot: l.manfLot ?? l.supLot ?? null,
+      })),
+    };
+  }
+
   private async resolveStartLots(params: { lot?: string; sublot?: number }): Promise<string[]> {
     if (params.sublot != null) {
       const sub = await this.prisma.sublot.findUnique({
@@ -136,7 +192,7 @@ export class GenealogyService {
       return sub?.lot ? [sub.lot] : [];
     }
     if (params.lot) return [params.lot];
-    throw new BadRequestException('Provide a lot or sublot to trace');
+    throw new BadRequestException('Provide a lot, sublot, or search query to trace');
   }
 
   // --- recursive lot-graph traversal (lot_genealogy) -----------------------
@@ -226,6 +282,11 @@ export class GenealogyService {
         lot: l.lot,
         itemCode: l.itemId != null ? (itemById.get(l.itemId)?.itemCode ?? null) : null,
         itemDescription: l.itemId != null ? (itemById.get(l.itemId)?.description ?? null) : null,
+        // A raw-material lot is the one carrying a supplier lot (SupLot is set by
+        // receiving + lot-tracking enablement); a lot with a producing order is a
+        // produced (batch/packout) lot; otherwise unknown.
+        kind: l.supLot ? 'raw' : ordr?.context ? 'produced' : 'other',
+        manufacturerLot: l.supLot ?? null,
         producedByOrderId: ordr?.id ?? null,
         producedByContext: ordr?.context ?? null,
         disposition: rel

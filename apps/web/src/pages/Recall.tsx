@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
 import { useMe } from '../lib/auth';
@@ -25,9 +26,17 @@ interface LotLabel {
   lot: string;
   itemCode: string | null;
   itemDescription: string | null;
+  kind: string;
+  manufacturerLot: string | null;
   producedByOrderId: number | null;
   producedByContext: string | null;
   disposition: Disposition | null;
+}
+interface Matched {
+  query: string;
+  lot: string;
+  via: 'lot' | 'manufacturerLot';
+  manufacturerLot?: string | null;
 }
 interface Ingredient {
   lot: string;
@@ -47,6 +56,7 @@ interface Shipment {
 }
 interface RecallResp {
   startLots: string[];
+  matched: Matched[];
   focus: LotLabel[];
   upstream: LotLabel[];
   lineage: LotLabel[];
@@ -74,41 +84,76 @@ const via = (l: LotLabel) =>
   `${l.producedByContext ? (CTX_LABEL[l.producedByContext] ?? l.producedByContext) : ''}${l.producedByOrderId ? ` #${l.producedByOrderId}` : ''}`.trim();
 
 export function Recall() {
+  const [searchParams] = useSearchParams();
   const [lot, setLot] = useState('');
   const m = useMutation({
-    mutationFn: (l: string) => api.get<RecallResp>(`/recall?lot=${encodeURIComponent(l)}`),
+    mutationFn: (l: string) => api.get<RecallResp>(`/recall?q=${encodeURIComponent(l)}`),
   });
+
+  // Deep-link: /recall?q=<lot> (or ?lot=) prefills and runs the recall — used by
+  // the purchasing manufacturer-lot recall to trace a raw lot forward.
+  useEffect(() => {
+    const initial = (searchParams.get('q') ?? searchParams.get('lot') ?? '').trim();
+    if (initial) { setLot(initial); m.mutate(initial); }
+    // run once on mount for the incoming deep-link
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const noMatch = m.data && m.data.startLots.length === 0;
 
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-semibold text-slate-900">Lot trace &amp; recall</h1>
+      <h1 className="text-2xl font-semibold text-slate-900">Recall &amp; lot trace</h1>
 
       <Card>
-        <form className="flex items-end gap-3" onSubmit={(e) => { e.preventDefault(); if (lot) m.mutate(lot.trim()); }}>
-          <Field label="Lot number"><Input value={lot} onChange={(e) => setLot(e.target.value)} placeholder="lot from a label or pick list" /></Field>
-          <Button type="submit" disabled={m.isPending}>{m.isPending ? 'Tracing…' : 'Trace lot'}</Button>
+        <form className="flex items-end gap-3" onSubmit={(e) => { e.preventDefault(); if (lot.trim()) m.mutate(lot.trim()); }}>
+          <Field label="Lot or manufacturer lot number"><Input value={lot} onChange={(e) => setLot(e.target.value)} placeholder="finished-good, batch/packout, ERP1 raw, or supplier lot" className="w-80" /></Field>
+          <Button type="submit" disabled={m.isPending}>{m.isPending ? 'Tracing…' : 'Run recall'}</Button>
         </form>
         <p className="mt-2 text-sm text-slate-500">
-          Enter your batch lot number to see what it's made from, the package-out lots the system
-          generated for it (you label these as the batch lot), and the current on-hand inventory
-          across every form of the lot.
+          Enter any lot identifier — a <strong>finished-good</strong> lot (off a label / pick list),
+          a <strong>batch or packout</strong> lot, an ERP1 <strong>raw-material</strong> lot, or a
+          supplier&apos;s <strong>manufacturer lot</strong> (off the drum). Recall shows what it&apos;s
+          made from, the lots it became, every shipment that carried it (customer / PO# / date / qty),
+          and current on-hand.
         </p>
         {m.isError && <p className="mt-2 text-sm text-red-600">{(m.error as Error).message}</p>}
+        {noMatch && <p className="mt-2 text-sm text-amber-700">No lot matches “{m.variables}”. Try the ERP1 lot number or the supplier&apos;s manufacturer lot.</p>}
       </Card>
 
-      {m.data && (
+      {m.data && m.data.startLots.length > 0 && (
         <>
+          {/* How the query resolved (e.g. a supplier manufacturer lot -> ERP1 lot). */}
+          {m.data.matched.some((x) => x.via === 'manufacturerLot') && (
+            <Card>
+              <div className="text-sm text-slate-600">
+                Matched <span className="font-medium">{m.data.matched.length}</span> raw-material lot
+                {m.data.matched.length === 1 ? '' : 's'} by manufacturer lot:
+                {m.data.matched.map((x) => (
+                  <span key={x.lot} className="ml-2 inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
+                    {x.manufacturerLot} → ERP1 lot {x.lot}
+                  </span>
+                ))}
+              </div>
+            </Card>
+          )}
+
           {/* The focus lot itself */}
           {m.data.focus.map((f) => (
             <Card key={f.lot}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <div>
                   <span className="text-lg font-semibold text-slate-900">{f.lot}</span>
+                  <KindBadge f={f} className="ml-2" />
                   <span className="ml-2 text-slate-600">{f.itemCode}</span>
                   {f.itemDescription && <span className="ml-2 text-slate-400">{f.itemDescription}</span>}
                   <QABadge d={f.disposition} className="ml-2" />
                 </div>
-                <span className="text-sm text-slate-500">Produced by {via(f) || '—'}</span>
+                <span className="text-sm text-slate-500">
+                  {f.kind === 'raw'
+                    ? `Raw material${f.manufacturerLot ? ` · mfr lot ${f.manufacturerLot}` : ''}`
+                    : `Produced by ${via(f) || '—'}`}
+                </span>
               </div>
               {f.disposition && (f.disposition.grade || f.disposition.expiryDate || f.disposition.releasedBy) && (
                 <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-sm text-slate-500">
@@ -461,6 +506,19 @@ function Stat({ label, value }: { label: string; value: number }) {
       <div className="mt-1 text-lg font-medium">{value.toLocaleString()}</div>
     </Card>
   );
+}
+
+// What kind of lot the focus is — frames a raw-material recall vs a finished-good
+// / batch / packout recall.
+function kindLabel(f: LotLabel): string {
+  if (f.kind === 'raw') return 'Raw material';
+  if (f.producedByContext === 'MFBA') return 'Batch lot';
+  if (f.producedByContext === 'MFPP') return 'Packout lot';
+  return 'Finished good';
+}
+function KindBadge({ f, className = '' }: { f: LotLabel; className?: string }) {
+  const tone = f.kind === 'raw' ? 'bg-sky-50 text-sky-700' : 'bg-violet-50 text-violet-700';
+  return <span className={`rounded-full px-2 py-0.5 text-xs ${tone} ${className}`}>{kindLabel(f)}</span>;
 }
 
 // QA disposition badge (legacy Release.Status: Approved / Hold / Rejected).

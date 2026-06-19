@@ -10,14 +10,14 @@ export class GenealogyController {
 
   @Get('recall')
   @RequireProgram('inventory.recall')
-  recall(@Query('lot') lot?: string, @Query('sublot') sublot?: string) {
-    return this.genealogy.recall({ lot, sublot: sublot ? Number(sublot) : undefined });
+  recall(@Query('lot') lot?: string, @Query('sublot') sublot?: string, @Query('q') q?: string) {
+    return this.genealogy.recall({ lot, sublot: sublot ? Number(sublot) : undefined, q });
   }
 
   @Get('trace')
   @RequireProgram('inventory.trace')
-  trace(@Query('lot') lot?: string, @Query('sublot') sublot?: string) {
-    return this.genealogy.trace({ lot, sublot: sublot ? Number(sublot) : undefined });
+  trace(@Query('lot') lot?: string, @Query('sublot') sublot?: string, @Query('q') q?: string) {
+    return this.genealogy.trace({ lot, sublot: sublot ? Number(sublot) : undefined, q });
   }
 
   // Recompute the derived lot genealogy on demand (also runs after each import).
