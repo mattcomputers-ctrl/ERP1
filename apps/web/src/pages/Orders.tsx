@@ -249,6 +249,8 @@ export function Orders() {
             {action.isError && <span className="text-red-600">{(action.error as Error).message}</span>}
           </div>
 
+          {lifeState(detail.data.status) === 'NST' && <EditOrder order={detail.data} onDone={refresh} />}
+
           <dl className="mb-4 grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
             <Detail label="Status" value={detail.data.status} />
             <Detail label="Party" value={detail.data.entityCode} />
@@ -392,6 +394,46 @@ function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
           <Button type="submit" disabled={!canSubmit || m.isPending}>{m.isPending ? 'Creating…' : 'Create order'}</Button>
           {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
           <span className="text-xs text-slate-400">Quantities scale by batch size; batch orders also pull QC specs from the product&apos;s tests.</span>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
+// Edit a not-yet-released order: rescale to a new batch size (lines rescale from
+// their stored per-unit base) and/or update reference / required date.
+function EditOrder({ order, onDone }: { order: OrderFull; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [batchSize, setBatchSize] = useState(order.actualBatchSize != null ? String(order.actualBatchSize) : '');
+  const [dateRequired, setDateRequired] = useState('');
+  const [reference, setReference] = useState(order.reference ?? '');
+  const m = useMutation({
+    mutationFn: () =>
+      api.post(`/orders/${order.id}/edit`, {
+        batchSize: batchSize ? Number(batchSize) : undefined,
+        dateRequired: dateRequired || undefined,
+        reference: reference !== (order.reference ?? '') ? reference : undefined,
+      }),
+    onSuccess: () => { setOpen(false); onDone(); },
+  });
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mb-4 text-sm font-medium text-indigo-600 hover:underline">
+        Edit order
+      </button>
+    );
+  }
+  return (
+    <Card className="mb-4">
+      <form className="grid gap-3 sm:grid-cols-3" onSubmit={(e) => { e.preventDefault(); m.mutate(); }}>
+        <Field label="Batch size (rescales lines)"><Input type="number" min="0" step="any" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} placeholder="new batch size" /></Field>
+        <Field label="Required date"><Input type="date" value={dateRequired} onChange={(e) => setDateRequired(e.target.value)} /></Field>
+        <Field label="Reference"><Input value={reference} onChange={(e) => setReference(e.target.value)} maxLength={20} /></Field>
+        <div className="flex items-center gap-3 sm:col-span-3">
+          <Button type="submit" disabled={m.isPending}>{m.isPending ? 'Saving…' : 'Save changes'}</Button>
+          <button type="button" onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+          {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
         </div>
       </form>
     </Card>

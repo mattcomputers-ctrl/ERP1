@@ -5,6 +5,7 @@ import { SessionAuthGuard } from '../auth/session-auth.guard';
 import { CloseOrderDto } from './dto/close-order.dto';
 import { CompleteOrderDto } from './dto/complete-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { EditOrderDto } from './dto/edit-order.dto';
 import { OrdersService, type OrdersListQuery } from './orders.service';
 
 @UseGuards(SessionAuthGuard, ProgramGuard)
@@ -48,6 +49,13 @@ export class OrdersController {
   @Get(':id/batch-sheet')
   batchSheet(@Param('id', ParseIntPipe) id: number) {
     return this.orders.batchSheet(id);
+  }
+
+  // Edit a not-yet-released order (rescale to a new batch size / header fields).
+  @Post(':id/edit')
+  @RequireProgram('orders.edit')
+  edit(@Param('id', ParseIntPipe) id: number, @Body() dto: EditOrderDto, @CurrentUser() actor: Actor) {
+    return this.orders.edit(id, dto, actor);
   }
 
   // --- lifecycle transitions (each gated by its own program) ---------------

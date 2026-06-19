@@ -81,7 +81,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 | Material variance analysis; multi-batch | ⬜ | |
 | Full Batch Execution (preweigh, resources, procedure, release, express blend, packaging, reversing, yields, review, scale, auto next/scale) | ⬜ | |
 | Express Execution; batch testing | ⬜ | |
-| Batching order edits (standard + express, rework, over-dispense fixes, publish) | ⬜ | `OrdrEdit`/`OrdDetailEdit` |
+| Batching order edits (standard + express, rework, over-dispense fixes, publish) | 🟡 | **Edit-before-release live**: `POST /orders/:id/edit` (program `orders.edit`, NST orders only) rescales every line to a new batch size from its stored per-unit base (StdQty) and updates header fields (required date, reference), atomic + audited; "Edit order" control on the order detail. Full rework / over-dispense / express edits (`OrdrEdit`/`OrdDetailEdit`) pending |
 
 ## 6. Packaging order processing (UG ch.8–9)
 | Feature | Status | Notes |

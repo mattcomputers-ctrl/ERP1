@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
-import { AuditService } from '../audit/audit.service';
+import { AuditService, type FieldChange } from '../audit/audit.service';
 import { ESignatureService } from '../audit/esignature.service';
 import { AuthService } from '../auth/auth.service';
 import type { Actor } from '../auth/current-user.decorator';
@@ -12,6 +12,7 @@ import { SettingsService } from '../settings/settings.service';
 import type { CompleteOrderDto } from './dto/complete-order.dto';
 import type { CloseOrderDto } from './dto/close-order.dto';
 import type { CreateOrderDto } from './dto/create-order.dto';
+import type { EditOrderDto } from './dto/edit-order.dto';
 
 const LB_TO_GRAMS = 453.59237;
 
@@ -483,6 +484,74 @@ export class OrdersService {
       );
 
       return { id: orderId, status: 'NST', lines: lineData.length, tests: testData.length };
+    });
+  }
+
+  /**
+   * Edit a not-yet-released order: rescale its lines to a new batch size (using
+   * the per-unit base preserved in StdQty at creation) and/or update header
+   * fields. Only NST orders are editable; atomic + audited.
+   */
+  async edit(id: number, dto: EditOrderDto, actor: Actor) {
+    const order = await this.requireTransition(id, 'NST', 'edit');
+    const isBatch = order.context === 'MFBA';
+
+    let dateRequired: Date | null | undefined;
+    if (dto.dateRequired !== undefined) {
+      if (dto.dateRequired) {
+        dateRequired = new Date(dto.dateRequired);
+        if (Number.isNaN(dateRequired.getTime())) throw new BadRequestException('dateRequired is not a valid date');
+      } else {
+        dateRequired = null;
+      }
+    }
+
+    // Lines to rescale carry a per-unit base (StdQty); leave any without it.
+    const lines = dto.batchSize != null
+      ? await this.prisma.ordDetail.findMany({
+          where: { ordrId: id, stdQty: { not: null } },
+          select: { id: true, stdQty: true },
+        })
+      : [];
+
+    return this.prisma.$transaction(async (tx) => {
+      const changes: FieldChange[] = [];
+      const data: Record<string, unknown> = {};
+
+      if (dto.batchSize != null) {
+        for (const l of lines) {
+          await tx.ordDetail.update({ where: { id: l.id }, data: { qtyReqd: (l.stdQty as number) * dto.batchSize } });
+        }
+        changes.push({ tableName: 'OrdDetail', recordId: String(id), fieldName: 'rescaled', oldValue: null, newValue: `${lines.length} lines × ${dto.batchSize}` });
+        if (isBatch) {
+          data.actualBatchSize = dto.batchSize;
+          changes.push({ tableName: 'Ordr', recordId: String(id), fieldName: 'ActualBatchSize', oldValue: order.actualBatchSize != null ? String(order.actualBatchSize) : null, newValue: String(dto.batchSize) });
+        }
+      }
+      if (dto.dateRequired !== undefined) {
+        data.dateRequired = dateRequired ?? null;
+        changes.push({ tableName: 'Ordr', recordId: String(id), fieldName: 'DateRequired', oldValue: order.dateRequired?.toISOString() ?? null, newValue: dateRequired?.toISOString() ?? null });
+      }
+      if (dto.reference !== undefined) {
+        data.reference = dto.reference || null;
+        changes.push({ tableName: 'Ordr', recordId: String(id), fieldName: 'Reference', oldValue: order.reference, newValue: dto.reference || null });
+      }
+
+      if (!changes.length) throw new BadRequestException('Nothing to change.');
+      if (Object.keys(data).length) await tx.ordr.update({ where: { id }, data });
+
+      await this.audit.record(
+        {
+          action: 'order.edit',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.edit',
+          summary: `Order #${id} edited${dto.batchSize != null ? ` (batch size ${dto.batchSize})` : ''}${dto.reason ? ` — ${dto.reason}` : ''}`,
+          changes,
+        },
+        tx,
+      );
+      return { id, batchSize: dto.batchSize ?? order.actualBatchSize, rescaledLines: lines.length };
     });
   }
 
