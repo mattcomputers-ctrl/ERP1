@@ -453,6 +453,41 @@ export class OrdersService {
       await tx.ordDetail.createMany({ data: lineData });
       if (testData.length) await tx.ordDetailTest.createMany({ data: testData });
 
+      // Mint the finished-good lot(s) at creation, per the plant convention
+      // YYMMDD### — ### is the next lot sequence for the day, SHARED across all
+      // production lots (MFBA + MFPP), verified against live data. One lot per
+      // produced (PK) line, linked via Lot.OrdDetail; the batch lot is the lot of
+      // record (see [[genealogy-data-reality]]). The day prefix uses UTC date
+      // components (the app's plant-wall-clock convention, [[datetime-timezone-handling]]).
+      // Same advisory lock as the id allocation serializes the daily sequence.
+      const pkLines = lineData.filter((l) => l.context === 'PK' && l.itemId != null);
+      let firstLot: string | null = null;
+      if (pkLines.length) {
+        const prefix = fgLotPrefix(at);
+        const sameDay = await tx.lot.findMany({ where: { lot: { startsWith: prefix } }, select: { lot: true } });
+        let seq = sameDay.reduce((m, r) => {
+          const n = Number.parseInt(r.lot.slice(prefix.length), 10);
+          return Number.isFinite(n) && n > m ? n : m;
+        }, 0);
+        for (const pk of pkLines) {
+          const lotNumber = `${prefix}${String((seq += 1)).padStart(3, '0')}`;
+          await tx.lot.create({
+            data: {
+              lot: lotNumber,
+              context: 'LOT',
+              itemId: pk.itemId ?? null,
+              ordDetailId: pk.id,
+              manfDate: at,
+              // The batch lot's manufacturer lot IS itself (legacy MFBA); a
+              // packaging lot carries none.
+              manfLot: isBatch ? lotNumber : null,
+            },
+          });
+          if (!firstLot) firstLot = lotNumber;
+        }
+        if (firstLot) await tx.ordr.update({ where: { id: orderId }, data: { manfLot: firstLot } });
+      }
+
       await this.audit.record(
         {
           action: 'order.create',
@@ -462,11 +497,15 @@ export class OrdersService {
           summary:
             `${isBatch ? 'Batch' : 'Packaging'} order #${orderId} created from recipe ` +
             `${recipe.recipeNumber ?? recipe.id} (batch size ${dto.batchSize}, ${lineData.length} lines, ` +
-            `${testData.length} QC specs)`,
+            `${testData.length} QC specs)` +
+            (firstLot ? `, lot ${firstLot}` : ''),
           changes: [
             { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Context', oldValue: null, newValue: orderContext },
             { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Status', oldValue: null, newValue: 'NST' },
             { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Recipe', oldValue: null, newValue: String(recipe.id) },
+            ...(firstLot
+              ? [{ tableName: 'Lot', recordId: firstLot, fieldName: 'Lot', oldValue: null, newValue: firstLot }]
+              : []),
             ...(isBatch
               ? [{ tableName: 'Ordr', recordId: String(orderId), fieldName: 'ActualBatchSize', oldValue: null, newValue: String(dto.batchSize) }]
               : []),
@@ -475,7 +514,7 @@ export class OrdersService {
         tx,
       );
 
-      return { id: orderId, status: 'NST', lines: lineData.length, tests: testData.length };
+      return { id: orderId, status: 'NST', lines: lineData.length, tests: testData.length, lot: firstLot };
     });
   }
 
@@ -780,6 +819,16 @@ export class OrdersService {
     });
     return new Map(entities.map((e) => [e.id, e.entityCode]));
   }
+}
+
+// The plant's lot-number day prefix YYMMDD (lots are YYMMDD###). UTC date
+// components match the app's plant-wall-clock convention; see
+// [[datetime-timezone-handling]] (normalize to true plant-local at cutover).
+function fgLotPrefix(at: Date): string {
+  const yy = String(at.getUTCFullYear() % 100).padStart(2, '0');
+  const mm = String(at.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(at.getUTCDate()).padStart(2, '0');
+  return `${yy}${mm}${dd}`;
 }
 
 // Format a test spec the way the paper ticket reads: explicit Specification text
