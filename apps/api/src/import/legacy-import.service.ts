@@ -29,6 +29,11 @@ const TABLES: TableSpec[] = [
     map: (r) => ({ code: r.Currency, description: r.Description, version: r.Version }),
   },
   {
+    name: 'IncoTerms', legacyTable: 'dbo.IncoTerms', delegate: 'incoTerms',
+    where: (d) => ({ code: d.code }),
+    map: (r) => ({ code: r.IncoTerms, description: r.Description }),
+  },
+  {
     name: 'Terms', legacyTable: 'dbo.Terms', delegate: 'terms',
     where: (d) => ({ code: d.code }),
     map: (r) => ({
@@ -232,6 +237,15 @@ const TABLES: TableSpec[] = [
     name: 'LotIngredient', legacyTable: 'dbo.LotIngredient', delegate: 'lotIngredient', idColumn: 'LotIngredient',
     where: (d) => ({ id: d.id }),
     map: (r) => ({ id: r.LotIngredient, lot: r.Lot, itemId: r.Item, percent: r.Percent }),
+  },
+  {
+    name: 'OrdDetailPricing', legacyTable: 'dbo.OrdDetailPricing', delegate: 'ordDetailPricing', idColumn: 'OrdDetailPricing',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.OrdDetailPricing, ordDetailId: r.OrdDetail, pkgTypeId: r.PkgType,
+      entityItemCode: r.EntityItemCode, entityQuantity: r.EntityQuantity, entityUnit: r.EntityUnit,
+      qtyPerEntityQty: r.QtyPerEntityQty, priceByPackage: r.PriceByPackage, version: r.Version,
+    }),
   },
   {
     name: 'OrdDetailTest', legacyTable: 'dbo.OrdDetailTest', delegate: 'ordDetailTest', idColumn: 'OrdDetailTest',

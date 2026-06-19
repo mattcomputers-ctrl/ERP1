@@ -110,8 +110,21 @@ export class PurchasingService {
     const lines = await this.prisma.ordDetail.findMany({
       where: { ordrId: id, context: PO_CONTEXT },
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-      select: { id: true, itemId: true, qtyReqd: true, price: true, entityUnit: true, description: true },
+      select: { id: true, itemId: true, qtyReqd: true, price: true, entityUnit: true, description: true, datePromised: true },
     });
+
+    // Per-line supplier packaging + "Your Code" (one pricing row per PO line).
+    const lineIds = lines.map((l) => l.id);
+    const pricing = lineIds.length
+      ? await this.prisma.ordDetailPricing.findMany({
+          where: { ordDetailId: { in: lineIds } },
+          select: { ordDetailId: true, pkgTypeId: true, entityItemCode: true, entityQuantity: true, entityUnit: true, priceByPackage: true },
+        })
+      : [];
+    const pricingByLine = new Map<number, (typeof pricing)[number]>();
+    for (const p of pricing) {
+      if (p.ordDetailId != null && !pricingByLine.has(p.ordDetailId)) pricingByLine.set(p.ordDetailId, p);
+    }
 
     // Receipt history: the PO's Context='PO' ChangeSets, each 1:1 with a receipt line.
     const changeSets = await this.prisma.changeSet.findMany({
@@ -139,18 +152,26 @@ export class PurchasingService {
       : [];
     const manfByLot = new Map(lots.map((l) => [l.lot, l.manfLot]));
 
-    // One items lookup covering both order lines and receipt lines.
+    // One items lookup covering order lines, receipt lines, and package-type items
+    // (a line's package type — "DRUM" — is itself an Item referenced by pricing).
     const itemIds = [
       ...new Set(
-        [...lines.map((l) => l.itemId), ...receiptRows.map((r) => r.itemId)].filter((v): v is number => v != null),
+        [
+          ...lines.map((l) => l.itemId),
+          ...receiptRows.map((r) => r.itemId),
+          ...pricing.map((p) => p.pkgTypeId),
+        ].filter((v): v is number => v != null),
       ),
     ];
-    const [items, terms, currencyRow, parties, companyName] = await Promise.all([
+    const [items, terms, currencyRow, incoTermsRow, parties, companyName, companyPhone, companyEmail] = await Promise.all([
       this.prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, itemCode: true, description: true } }),
       po.terms ? this.prisma.terms.findUnique({ where: { code: po.terms }, select: { description: true } }) : Promise.resolve(null),
       po.currency ? this.prisma.currency.findUnique({ where: { code: po.currency }, select: { description: true } }) : Promise.resolve(null),
-      this.party.resolve([po.entityId, po.shipViaId]),
+      po.incoterms ? this.prisma.incoTerms.findUnique({ where: { code: po.incoterms }, select: { description: true } }) : Promise.resolve(null),
+      this.party.resolve([po.entityId, po.shipViaId, po.ownerId]),
       this.settings.get('company.name', 'Precision Ink'),
+      this.settings.get('company.phone', ''),
+      this.settings.get('company.email', ''),
     ]);
     const itemById = new Map(items.map((i) => [i.id, i]));
 
@@ -168,6 +189,18 @@ export class PurchasingService {
       const price = num(l.price);
       const ordered = num(l.qtyReqd);
       const rawReceived = receivedByLine.get(l.id) ?? 0;
+      // Supplier packaging: a line is purchased as N packages of a package type
+      // (e.g. "1 DRUM" of "400 lb per DRUM"). Package count = QtyReqd / qtyPerPkg.
+      const pr = pricingByLine.get(l.id);
+      const perPackageQty = pr?.entityQuantity ?? null;
+      const packageType = pr?.pkgTypeId != null ? (itemById.get(pr.pkgTypeId)?.itemCode ?? null) : null;
+      const packageCount = perPackageQty && perPackageQty > 0 ? round3(ordered / perPackageQty) : null;
+      const perPackageUnit = pr?.entityUnit ?? l.entityUnit ?? null;
+      // When PriceByPackage, Price is per PACKAGE (e.g. $81 / DRUM), not per unit:
+      // value = packageCount × price and the price unit is the package type.
+      // Otherwise price is per stock unit and value = QtyReqd × price (the common
+      // case, proven on PO 189229).
+      const byPackage = !!pr?.priceByPackage && packageCount != null;
       // Round to 3 dp so float residue from summing Float quantities can't leave
       // e.g. backordered = 1e-13 on a fully-received line (which would otherwise
       // trip the "backordered" badge).
@@ -175,12 +208,20 @@ export class PurchasingService {
         lineId: l.id,
         itemCode: item?.itemCode ?? null,
         description: item?.description ?? l.description ?? null,
+        requiredBy: l.datePromised,
         qty: l.qtyReqd,
         unit: l.entityUnit,
         price,
-        extended: ordered * price,
+        priceUnit: byPackage ? packageType : perPackageUnit,
+        extended: byPackage ? (packageCount as number) * price : ordered * price,
         received: round3(rawReceived),
         backordered: Math.max(round3(ordered - rawReceived), 0),
+        // Packaging detail (null for natively-created lines without pricing).
+        packageType,
+        packageCount,
+        perPackageQty,
+        perPackageUnit,
+        theirCode: pr?.entityItemCode ?? null,
       };
     });
     const subtotal = docLines.reduce((s, l) => s + l.extended, 0);
@@ -211,19 +252,51 @@ export class PurchasingService {
         orderedDate: po.dateOrdered,
         requiredDate: po.dateRequired,
         termsText: terms?.description ?? po.terms ?? null,
-        incoterms: po.incoterms ?? null,
+        fob: po.incoterms ? (incoTermsRow?.description ?? po.incoterms) : null,
         currency: po.currency,
         currencyLabel: currencyRow?.description ?? po.currency,
         reference: po.reference,
         placedBy: po.placedBy,
         carrier: po.shipViaId != null ? (parties.get(po.shipViaId)?.name ?? null) : null,
+        companyName,
+        companyPhone: companyPhone || null,
+        companyEmail: companyEmail || null,
       },
       supplier: po.entityId != null ? (parties.get(po.entityId) ?? null) : null,
-      buyer: { name: companyName },
+      // Ship To = our own site (the order Owner); fall back to the company name.
+      shipTo: (po.ownerId != null ? parties.get(po.ownerId) : null) ?? { entityCode: null, name: companyName, line1: null, line2: null, cityStateZip: null },
       lines: docLines,
       totals: { subtotal, total: subtotal },
       receipts,
     };
+  }
+
+  /**
+   * Our own org "Owner" entity — the buyer / Ship-To stamped on every order
+   * (it carries our street address). Org-tree flags don't single it out (several
+   * warehouses share the Site as parent), so resolve it data-drivenly as the most
+   * common Owner across existing orders — which is exactly the org owner in this
+   * single-company install. Null on an order-less install (PO is then owner-less
+   * and the doc falls back to the company name).
+   */
+  private ownerEntityIdResolved = false;
+  private ownerEntityIdValue: number | null = null;
+
+  private async resolveOwnerEntityId(): Promise<number | null> {
+    // Effectively constant for the install; memoize so a manual PO create doesn't
+    // re-run the aggregate each time (a re-import that changed it is picked up on
+    // the next process start).
+    if (this.ownerEntityIdResolved) return this.ownerEntityIdValue;
+    const grouped = await this.prisma.ordr.groupBy({
+      by: ['ownerId'],
+      where: { ownerId: { not: null } },
+      _count: { ownerId: true },
+      orderBy: { _count: { ownerId: 'desc' } },
+      take: 1,
+    });
+    this.ownerEntityIdValue = grouped[0]?.ownerId ?? null;
+    this.ownerEntityIdResolved = true;
+    return this.ownerEntityIdValue;
   }
 
   // --- create (mutating; RBAC + atomic audit) ------------------------------
@@ -264,6 +337,11 @@ export class PurchasingService {
       if (!carrier.isShipVia) throw new BadRequestException('That entity is not flagged as a ship-via / carrier.');
     }
 
+    // Owner = our own org node (the PO's buyer / Ship-To); legacy stamps it on
+    // every order. Resolved generically as the child of the Site in the org tree
+    // (CMS > Installation > Site > Owner) so the printed PO shows our address.
+    const ownerEntityId = await this.resolveOwnerEntityId();
+
     // Terms is a foreign-key code into the Terms table (every legacy order
     // resolves to a real row). Validate it like the other FK fields rather than
     // letting a free-typed value (e.g. the wrong-case "Net 30") mint an orphan
@@ -294,6 +372,7 @@ export class PurchasingService {
           context: PO_CONTEXT,
           status: 'NST',
           entityId: supplier.id,
+          ownerId: ownerEntityId,
           shipViaId: dto.shipViaId ?? null,
           terms: dto.terms ?? null,
           incoterms: dto.incoterms ?? null,

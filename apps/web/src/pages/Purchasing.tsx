@@ -64,6 +64,10 @@ export function Purchasing() {
       key: 'view', header: '',
       render: (r) => <a href={`/purchase-orders/${r.id}/print`} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">View / print</a>,
     },
+    {
+      key: 'pickup', header: '',
+      render: (r) => <a href={`/purchase-orders/${r.id}/pickup`} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">Pickup</a>,
+    },
   ];
 
   return (

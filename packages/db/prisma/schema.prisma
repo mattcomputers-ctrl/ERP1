@@ -397,6 +397,15 @@ model Terms {
   @@map("Terms")
 }
 
+// Incoterms / FOB lookup (mirrors legacy). Code -> printable description
+// (e.g. "Ship Point" -> "Shipping Point") for the PO document's FOB line.
+model IncoTerms {
+  code        String  @id @map("IncoTerms") @db.VarChar(20)
+  description String? @map("Description") @db.VarChar(256)
+
+  @@map("IncoTerms")
+}
+
 model Item {
   id                    Int      @id @default(autoincrement()) @map("Item")
   itemCode              String   @unique @map("ItemCode") @db.VarChar(30)
@@ -765,6 +774,26 @@ model OrdDetailTest {
 
   @@index([ordDetailId])
   @@map("OrdDetailTest")
+}
+
+// Per-line purchase pricing/packaging (mirrors legacy). For a PO line this
+// carries the supplier's packaging: PkgType (an Item whose code is e.g. "DRUM"),
+// EntityQuantity (qty per package), EntityUnit (the stock unit), and
+// EntityItemCode (the supplier's own item code — the PO's "Your Code"). The
+// purchased package count = OrdDetail.QtyReqd / EntityQuantity.
+model OrdDetailPricing {
+  id             Int      @id @default(autoincrement()) @map("OrdDetailPricing")
+  ordDetailId    Int?     @map("OrdDetail")
+  pkgTypeId      Int?     @map("PkgType")
+  entityItemCode String?  @map("EntityItemCode") @db.VarChar(50)
+  entityQuantity Float?   @map("EntityQuantity")
+  entityUnit     String?  @map("EntityUnit") @db.VarChar(20)
+  qtyPerEntityQty Float?  @map("QtyPerEntityQty")
+  priceByPackage Boolean? @map("PriceByPackage")
+  version        Int?     @map("Version")
+
+  @@index([ordDetailId])
+  @@map("OrdDetailPricing")
 }
 
 // Item-level testing requirements (mirrors legacy). The QA spec library keyed by

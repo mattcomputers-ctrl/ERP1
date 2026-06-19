@@ -68,7 +68,9 @@ const SECURED_ITEMS = [
 // Default application settings (seeded only if absent — never overwrite an
 // operator-changed value). Foundation for the Configuration module.
 const DEFAULT_SETTINGS = [
-  { key: 'company.name', value: 'Precision Ink', description: 'Company name shown on printed documents (batch tickets, labels).' },
+  { key: 'company.name', value: 'Precision Ink Corporation', description: 'Company name shown on printed documents (batch tickets, labels, purchase orders).' },
+  { key: 'company.phone', value: '847-952-1500', description: 'Company phone shown in the purchase-order footer.' },
+  { key: 'company.email', value: 'PURCHASING@PRECISIONINKCORP.COM', description: 'Purchasing email shown in the purchase-order footer.' },
   { key: 'batchSheet.gramsThresholdLb', value: '0.05', description: 'Batch-ticket quantities at or below this many pounds are shown in grams instead.' },
 ];
 

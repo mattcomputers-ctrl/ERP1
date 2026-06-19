@@ -61,6 +61,7 @@ export function App() {
         <Route path="/orders/:id/sheet" element={<BatchSheet />} />
         <Route path="/purchasing" element={<Purchasing />} />
         <Route path="/purchase-orders/:id/print" element={<PurchaseOrderDoc />} />
+        <Route path="/purchase-orders/:id/pickup" element={<PurchaseOrderDoc pickup />} />
         <Route path="/invoices" element={<Invoices />} />
         <Route path="/invoices/:id/print" element={<InvoiceDoc />} />
         <Route path="/packing-slips" element={<PackingSlips />} />
