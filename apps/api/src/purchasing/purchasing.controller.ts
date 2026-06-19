@@ -4,6 +4,7 @@ import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
 import type { ListQuery } from '../common/list';
 import { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
+import { ReceivePurchaseOrderDto } from './dto/receive-purchase-order.dto';
 import { PurchasingService } from './purchasing.service';
 
 @UseGuards(SessionAuthGuard, ProgramGuard)
@@ -47,5 +48,12 @@ export class PurchasingController {
   @Get(':id')
   get(@Param('id', ParseIntPipe) id: number) {
     return this.purchasing.get(id);
+  }
+
+  // Record a receipt against a PO. Gated by purchasing.receive.
+  @Post(':id/receive')
+  @RequireProgram('purchasing.receive')
+  receive(@Param('id', ParseIntPipe) id: number, @Body() dto: ReceivePurchaseOrderDto, @CurrentUser() actor: Actor) {
+    return this.purchasing.receive(id, dto, actor);
   }
 }

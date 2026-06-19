@@ -24,11 +24,13 @@ export const AUDIT_CHAIN_LOCK = 4815162342n;
 export const ESIGN_CHAIN_LOCK = 514229n;
 
 /**
- * Serializes allocation of native (ERP1-created) ids for Ordr / OrdDetail /
- * OrdDetailTest so two concurrent creates can't read the same MAX(id) and mint
- * duplicate ids. Held by every code path that allocates native order ids
- * (manufacturing order creation AND purchase-order creation), so they MUST
- * share this one key — they draw from the same id space.
+ * Serializes allocation of native (ERP1-created) ids so two concurrent creates
+ * can't read the same MAX(id) and mint duplicate ids. Held by every code path
+ * that allocates native ids — manufacturing order creation (Ordr / OrdDetail /
+ * OrdDetailTest), purchase-order creation (Ordr / OrdDetail), and purchase
+ * receiving (ChangeSet) — so they MUST share this one key. Each of those tables
+ * has its own legacy id space, but one coarse lock keeps the allocation logic
+ * uniform and avoids any multi-lock ordering concern (each tx takes it once).
  */
 export const NATIVE_ID_ALLOC_LOCK = 906090906n;
 

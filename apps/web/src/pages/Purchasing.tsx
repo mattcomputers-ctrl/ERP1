@@ -100,6 +100,7 @@ export function Purchasing() {
 
       {selected != null && (
         <ReceivingPanel
+          key={selected}
           poId={selected}
           data={detail.data}
           loading={detail.isLoading}
@@ -130,6 +131,42 @@ interface PurchaseOrderDetail {
 const num3 = (n: number | null) => (n == null ? '' : Number(n.toFixed(3)).toString());
 
 function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?: PurchaseOrderDetail; loading: boolean; onClose: () => void }) {
+  const qc = useQueryClient();
+  // Per-line overrides for the receive-now qty (defaults to the backordered qty)
+  // and container count; keyed by lineId. Empty string = use the default.
+  const [qtyById, setQtyById] = useState<Record<number, string>>({});
+  const [contById, setContById] = useState<Record<number, string>>({});
+  const [reference, setReference] = useState('');
+
+  const closed = (data?.header.status?.trim() || 'NST') === 'CLS';
+  const qtyFor = (l: DetailLine) => (qtyById[l.lineId] ?? (l.backordered > 0 ? num3(l.backordered) : ''));
+
+  const m = useMutation({
+    mutationFn: () => {
+      const lines = (data?.lines ?? [])
+        .map((l) => ({ ordDetailId: l.lineId, qty: Number(qtyFor(l)), containers: contById[l.lineId] }))
+        .filter((x) => x.qty > 0)
+        .map((x) => {
+          const c = Math.floor(Number(x.containers));
+          return {
+            ordDetailId: x.ordDetailId,
+            qty: x.qty,
+            numberOfContainers: Number.isFinite(c) && c >= 1 ? c : undefined,
+          };
+        });
+      return api.post(`/purchase-orders/${poId}/receive`, { lines, reference: reference || undefined });
+    },
+    onSuccess: () => {
+      setQtyById({});
+      setContById({});
+      setReference('');
+      qc.invalidateQueries({ queryKey: ['purchase-order', poId] });
+      qc.invalidateQueries({ queryKey: ['purchase-orders'] });
+    },
+  });
+
+  const anyToReceive = (data?.lines ?? []).some((l) => Number(qtyFor(l)) > 0);
+
   return (
     <Card>
       <div className="mb-3 flex items-start justify-between">
@@ -149,6 +186,8 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
                 <th className="py-1 pr-2 text-right font-medium">Received</th>
                 <th className="py-1 pr-2 text-right font-medium">Backordered</th>
                 <th className="py-1 pr-2 font-medium">Unit</th>
+                {!closed && <th className="py-1 pr-2 text-right font-medium">Receive now</th>}
+                {!closed && <th className="py-1 pr-2 text-right font-medium">Containers</th>}
               </tr>
             </thead>
             <tbody>
@@ -164,10 +203,36 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
                       : <span className="text-emerald-600">0</span>}
                   </td>
                   <td className="py-1 pr-2">{l.unit}</td>
+                  {!closed && (
+                    <td className="py-1 pr-2 text-right">
+                      <input type="number" min="0" step="any" value={qtyFor(l)}
+                        onChange={(e) => setQtyById((p) => ({ ...p, [l.lineId]: e.target.value }))}
+                        className="w-24 rounded border border-slate-300 px-1.5 py-1 text-right" />
+                    </td>
+                  )}
+                  {!closed && (
+                    <td className="py-1 pr-2 text-right">
+                      <input type="number" min="1" step="1" placeholder="1" value={contById[l.lineId] ?? ''}
+                        onChange={(e) => setContById((p) => ({ ...p, [l.lineId]: e.target.value }))}
+                        className="w-16 rounded border border-slate-300 px-1.5 py-1 text-right" />
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
+
+          {!closed && (
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <input value={reference} onChange={(e) => setReference(e.target.value)} maxLength={50}
+                placeholder="Packing-slip / receipt ref (optional)" className="w-72 rounded border border-slate-300 px-2 py-1 text-sm" />
+              <Button onClick={() => m.mutate()} disabled={!anyToReceive || m.isPending}>
+                {m.isPending ? 'Recording…' : 'Record receipt'}
+              </Button>
+              {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+              <span className="text-xs text-slate-400">Defaults to the backordered quantity; edit before recording.</span>
+            </div>
+          )}
 
           <div className="mt-4 mb-1 text-sm font-medium text-slate-700">Receipt history</div>
           {data.receipts.length === 0 ? (

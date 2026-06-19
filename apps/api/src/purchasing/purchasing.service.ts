@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
 import type { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
+import type { ReceivePurchaseOrderDto } from './dto/receive-purchase-order.dto';
 
 const num = (v: unknown) => (v == null ? 0 : Number(v));
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -326,6 +327,111 @@ export class PurchasingService {
       );
 
       return { id: orderId, status: 'NST', lines: lineData.length };
+    });
+  }
+
+  // --- receiving (mutating; RBAC + atomic audit) ---------------------------
+
+  /**
+   * Record a receipt against a purchase order: for each received line, create a
+   * Context='PO' ChangeSet (1:1 with its receipt line, native id ≥ NATIVE_ID_BASE
+   * under the shared id-allocation lock) + a ChangeSetReceipt (PSQty = qty
+   * received), and bump the line's OrdDetail.QtyUsed (legacy's running received
+   * total — the AP bill reads it). Over-receipt is allowed. One transaction,
+   * atomic hash-chained audit. On-hand Sublot/Lot/Inventory minting is
+   * intentionally not done here (ChangeSetReceipt.Sublot is unpopulated in this
+   * install); receiving records the event + quantity.
+   */
+  async receive(id: number, dto: ReceivePurchaseOrderDto, actor: Actor) {
+    const po = await this.prisma.ordr.findUnique({
+      where: { id },
+      select: { id: true, context: true, status: true, ownerId: true, poNumber: true },
+    });
+    if (!po || po.context !== PO_CONTEXT) throw new NotFoundException('Purchase order not found');
+    if ((po.status?.trim() || 'NST') === 'CLS') {
+      throw new BadRequestException('Cannot receive against a closed purchase order.');
+    }
+
+    // Every received line must be a PO line on THIS order (IDOR-safe).
+    const lineIds = [...new Set(dto.lines.map((l) => l.ordDetailId))];
+    const poLines = await this.prisma.ordDetail.findMany({
+      where: { id: { in: lineIds }, ordrId: id, context: PO_CONTEXT },
+      select: { id: true, itemId: true, entityUnit: true },
+    });
+    const lineById = new Map(poLines.map((l) => [l.id, l]));
+    for (const l of dto.lines) {
+      if (!lineById.has(l.ordDetailId)) {
+        throw new BadRequestException(`Line ${l.ordDetailId} is not a line on purchase order #${id}.`);
+      }
+    }
+
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      let csId =
+        (await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ??
+        NATIVE_ID_BASE;
+
+      const created: { changeSetId: number; ordDetailId: number; qty: number }[] = [];
+      // Same line can be received more than once in a single call; accumulate.
+      const incByLine = new Map<number, number>();
+      for (const dl of dto.lines) {
+        const line = lineById.get(dl.ordDetailId)!;
+        const newCsId = (csId += 1);
+        await tx.changeSet.create({
+          data: {
+            id: newCsId,
+            context: PO_CONTEXT,
+            ordrId: id,
+            ownerId: po.ownerId,
+            changeDate: at,
+            poNumber: po.poNumber ?? null,
+          },
+        });
+        await tx.changeSetReceipt.create({
+          data: {
+            changeSetId: newCsId,
+            ordDetailId: dl.ordDetailId,
+            itemId: line.itemId,
+            psQty: dl.qty,
+            psUnit: dl.unit ?? line.entityUnit ?? null,
+            qtyPerPsQty: 1,
+            numberOfContainers: dl.numberOfContainers ?? 1,
+          },
+        });
+        incByLine.set(dl.ordDetailId, (incByLine.get(dl.ordDetailId) ?? 0) + dl.qty);
+        created.push({ changeSetId: newCsId, ordDetailId: dl.ordDetailId, qty: dl.qty });
+      }
+
+      // Atomic relative increment (COALESCE because native PO lines start with a
+      // null QtyUsed): a single UPDATE re-reads the committed value under a row
+      // lock, so concurrent receives of the same line can't lose an update — a
+      // read-modify-write on a value read before the tx would.
+      for (const [lineId, inc] of incByLine) {
+        await tx.$executeRaw`UPDATE "OrdDetail" SET "QtyUsed" = COALESCE("QtyUsed", 0) + ${inc} WHERE "OrdDetail" = ${lineId}`;
+      }
+
+      await this.audit.record(
+        {
+          action: 'purchaseorder.receive',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'purchasing.receive',
+          summary:
+            `Received ${created.length} line${created.length === 1 ? '' : 's'} against purchase order #${id}` +
+            (dto.reference ? ` (ref ${dto.reference})` : ''),
+          changes: created.map((c) => ({
+            tableName: 'ChangeSetReceipt',
+            recordId: String(c.changeSetId),
+            fieldName: 'PSQty',
+            oldValue: null,
+            newValue: `OrdDetail ${c.ordDetailId}: ${c.qty}`,
+          })),
+        },
+        tx,
+      );
+
+      return { id, received: created.length, changeSets: created.map((c) => c.changeSetId) };
     });
   }
 
