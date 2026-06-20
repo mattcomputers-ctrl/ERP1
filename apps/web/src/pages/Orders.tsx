@@ -103,6 +103,7 @@ export function Orders() {
   const [sort, setSort] = useState('id:desc');
   const [selected, setSelected] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showCreateShipping, setShowCreateShipping] = useState(false);
 
   const params = new URLSearchParams({ page: String(page), pageSize: '25', sort });
   if (q) params.set('q', q);
@@ -162,13 +163,26 @@ export function Orders() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-slate-900">Orders</h1>
-        <Button onClick={() => setShowCreate((v) => !v)}>{showCreate ? 'Close' : 'New order'}</Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => { setShowCreate((v) => !v); setShowCreateShipping(false); }}>{showCreate ? 'Close' : 'New order'}</Button>
+          <Button onClick={() => { setShowCreateShipping((v) => !v); setShowCreate(false); }}>{showCreateShipping ? 'Close' : 'New shipping order'}</Button>
+        </div>
       </div>
 
       {showCreate && (
         <CreateOrder
           onDone={(newId) => {
             setShowCreate(false);
+            qc.invalidateQueries({ queryKey: ['orders'] });
+            setSelected(newId);
+          }}
+        />
+      )}
+
+      {showCreateShipping && (
+        <CreateShippingOrder
+          onDone={(newId) => {
+            setShowCreateShipping(false);
             qc.invalidateQueries({ queryKey: ['orders'] });
             setSelected(newId);
           }}
@@ -411,6 +425,197 @@ function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
           <Button type="submit" disabled={!canSubmit || m.isPending}>{m.isPending ? 'Creating…' : 'Create order'}</Button>
           {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
           <span className="text-xs text-slate-400">Quantities scale by batch size; batch orders also pull QC specs from the product&apos;s tests.</span>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
+// Create a shipping (SH) order natively: a customer (bill-to) + item lines (the
+// sales side of the order lifecycle). Born Not-started; flows into release →
+// complete → close + the shipment-lot capture and the invoice / packing-slip docs.
+type ShParty = { id: number; entityCode: string | null; name: string | null };
+type ShItemOption = { id: number; itemCode: string | null; description: string | null; unit: string | null; price: number | null };
+interface ShLine { itemId: number; itemCode: string | null; description: string | null; qty: string; price: string; unit: string }
+const money = (n: number) => `$${n.toFixed(2)}`;
+
+function CreateShippingOrder({ onDone }: { onDone: (id: number) => void }) {
+  const [custSearch, setCustSearch] = useState('');
+  const [customer, setCustomer] = useState<ShParty | null>(null);
+  const [lines, setLines] = useState<ShLine[]>([]);
+  const [itemSearch, setItemSearch] = useState('');
+  const [poNumber, setPoNumber] = useState('');
+  const [reference, setReference] = useState('');
+  const [terms, setTerms] = useState('');
+  const [carrierSearch, setCarrierSearch] = useState('');
+  const [carrier, setCarrier] = useState<ShParty | null>(null);
+
+  const customers = useQuery({
+    queryKey: ['sh-customer-options', custSearch],
+    queryFn: () => api.get<{ rows: ShParty[] }>(`/shipping-orders/customer-options?q=${encodeURIComponent(custSearch)}`),
+    enabled: !customer && custSearch.trim().length >= 1,
+  });
+  const termsOptions = useQuery({
+    queryKey: ['sh-terms-options'],
+    queryFn: () => api.get<{ rows: { code: string; description: string | null }[] }>('/shipping-orders/terms-options'),
+  });
+  const carriers = useQuery({
+    queryKey: ['sh-carrier-options', carrierSearch],
+    queryFn: () => api.get<{ rows: ShParty[] }>(`/shipping-orders/carrier-options?q=${encodeURIComponent(carrierSearch)}`),
+    enabled: !carrier && carrierSearch.trim().length >= 1,
+  });
+  const items = useQuery({
+    queryKey: ['sh-item-options', itemSearch],
+    queryFn: () => api.get<{ rows: ShItemOption[] }>(`/shipping-orders/item-options?q=${encodeURIComponent(itemSearch)}`),
+    enabled: itemSearch.trim().length >= 1,
+  });
+
+  const addItem = (it: ShItemOption) => {
+    setLines((p) => (p.some((l) => l.itemId === it.id) ? p : [...p, { itemId: it.id, itemCode: it.itemCode, description: it.description, qty: '1', price: it.price != null ? String(it.price) : '', unit: it.unit ?? '' }]));
+    setItemSearch('');
+  };
+  const updateLine = (i: number, patch: Partial<ShLine>) => setLines((p) => p.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
+  const removeLine = (i: number) => setLines((p) => p.filter((_, idx) => idx !== i));
+
+  const validLines = lines.filter((l) => Number(l.qty) > 0);
+  const total = validLines.reduce((s, l) => s + Number(l.qty) * (Number(l.price) || 0), 0);
+  const canSubmit = !!customer && validLines.length > 0;
+
+  const m = useMutation({
+    mutationFn: () =>
+      api.post<{ id: number }>('/shipping-orders', {
+        billToId: customer!.id,
+        shipViaId: carrier?.id,
+        terms: terms || undefined,
+        poNumber: poNumber || undefined,
+        reference: reference || undefined,
+        lines: validLines.map((l) => ({ itemId: l.itemId, qtyReqd: Number(l.qty), price: l.price !== '' ? Number(l.price) : undefined, unit: l.unit || undefined, description: l.description || undefined })),
+      }),
+    onSuccess: (r) => onDone(r.id),
+  });
+
+  return (
+    <Card>
+      <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (canSubmit) m.mutate(); }}>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Customer (bill-to)">
+            {customer ? (
+              <div className="flex items-center gap-2">
+                <span className="rounded-md bg-indigo-50 px-2 py-1 text-sm font-medium text-indigo-700">{customer.name ?? customer.entityCode}</span>
+                <button type="button" onClick={() => { setCustomer(null); setCustSearch(''); }} className="text-sm text-slate-500 hover:underline">change</button>
+              </div>
+            ) : (
+              <Input value={custSearch} onChange={(e) => setCustSearch(e.target.value)} placeholder="Search customer by name or code…" />
+            )}
+          </Field>
+          <Field label="Customer PO # (optional)">
+            <Input value={poNumber} onChange={(e) => setPoNumber(e.target.value)} maxLength={25} />
+          </Field>
+          <Field label="Reference (optional)">
+            <Input value={reference} onChange={(e) => setReference(e.target.value)} maxLength={20} />
+          </Field>
+          <Field label="Terms (optional)">
+            <select value={terms} onChange={(e) => setTerms(e.target.value)} className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500">
+              <option value="">—</option>
+              {termsOptions.data?.rows.map((t) => (
+                <option key={t.code} value={t.code}>{t.description ? `${t.code} — ${t.description}` : t.code}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Carrier (optional)">
+            {carrier ? (
+              <div className="flex items-center gap-2">
+                <span className="rounded-md bg-slate-100 px-2 py-1 text-sm text-slate-700">{carrier.name ?? carrier.entityCode}</span>
+                <button type="button" onClick={() => { setCarrier(null); setCarrierSearch(''); }} className="text-sm text-slate-500 hover:underline">change</button>
+              </div>
+            ) : (
+              <Input value={carrierSearch} onChange={(e) => setCarrierSearch(e.target.value)} placeholder="Search carrier…" />
+            )}
+          </Field>
+        </div>
+
+        {!customer && custSearch.trim().length >= 1 && (
+          <div className="max-h-48 overflow-y-auto rounded-md border border-slate-200">
+            {customers.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
+            {!customers.isLoading && customers.data?.rows.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">No customers match.</div>}
+            {customers.data?.rows.map((c) => (
+              <button type="button" key={c.id} onClick={() => { setCustomer(c); setCustSearch(''); }} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
+                <span>{c.name ?? c.entityCode}</span>
+                <span className="text-xs text-slate-400">{c.entityCode}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {!carrier && carrierSearch.trim().length >= 1 && (
+          <div className="max-h-40 overflow-y-auto rounded-md border border-slate-200">
+            {carriers.data?.rows.map((c) => (
+              <button type="button" key={c.id} onClick={() => { setCarrier(c); setCarrierSearch(''); }} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
+                <span>{c.name ?? c.entityCode}</span>
+                <span className="text-xs text-slate-400">{c.entityCode}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div>
+          <div className="mb-1 text-sm font-medium text-slate-700">Line items</div>
+          {lines.length === 0 ? (
+            <p className="text-sm text-slate-400">Add at least one item below.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="border-b border-slate-200 text-left text-slate-500">
+                <tr>
+                  <th className="py-1 pr-2 font-medium">Item</th>
+                  <th className="py-1 pr-2 font-medium">Description</th>
+                  <th className="py-1 pr-2 text-right font-medium">Qty</th>
+                  <th className="py-1 pr-2 font-medium">Unit</th>
+                  <th className="py-1 pr-2 text-right font-medium">Unit price</th>
+                  <th className="py-1 pr-2 text-right font-medium">Extended</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((l, i) => (
+                  <tr key={l.itemId} className="border-b border-slate-100 align-middle">
+                    <td className="py-1 pr-2 font-medium">{l.itemCode}</td>
+                    <td className="py-1 pr-2 text-slate-600">{l.description}</td>
+                    <td className="py-1 pr-2 text-right"><input type="number" min="0" step="any" value={l.qty} onChange={(e) => updateLine(i, { qty: e.target.value })} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
+                    <td className="py-1 pr-2"><input value={l.unit} onChange={(e) => updateLine(i, { unit: e.target.value })} maxLength={6} className="w-16 rounded border border-slate-300 px-1.5 py-1" /></td>
+                    <td className="py-1 pr-2 text-right"><input type="number" min="0" step="any" value={l.price} onChange={(e) => updateLine(i, { price: e.target.value })} className="w-24 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
+                    <td className="py-1 pr-2 text-right tabular-nums">{money(Number(l.qty) * (Number(l.price) || 0))}</td>
+                    <td className="py-1 text-right"><button type="button" onClick={() => removeLine(i)} className="text-slate-400 hover:text-red-600">remove</button></td>
+                  </tr>
+                ))}
+                <tr className="font-semibold">
+                  <td colSpan={5} className="py-1 pr-2 text-right text-slate-500">Total</td>
+                  <td className="py-1 pr-2 text-right tabular-nums">{money(total)}</td>
+                  <td />
+                </tr>
+              </tbody>
+            </table>
+          )}
+
+          <div className="mt-2">
+            <Input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)} placeholder="Add item — search by code or description…" />
+            {itemSearch.trim().length >= 1 && (
+              <div className="mt-1 max-h-48 overflow-y-auto rounded-md border border-slate-200">
+                {items.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
+                {!items.isLoading && items.data?.rows.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">No items match.</div>}
+                {items.data?.rows.map((it) => (
+                  <button type="button" key={it.id} onClick={() => addItem(it)} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
+                    <span><span className="font-medium">{it.itemCode}</span> <span className="text-slate-500">{it.description}</span></span>
+                    <span className="text-xs text-slate-400">{it.price != null ? money(it.price) : ''}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <Button type="submit" disabled={!canSubmit || m.isPending}>{m.isPending ? 'Creating…' : 'Create shipping order'}</Button>
+          {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+          <span className="text-xs text-slate-400">A shipping order is created Not-started for the customer; record shipped lots when you close it.</span>
         </div>
       </form>
     </Card>

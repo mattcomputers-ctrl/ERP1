@@ -8,11 +8,13 @@ import { InvoicesService } from './invoices.service';
 import { PackingSlipController } from './packing-slip.controller';
 import { PackingSlipService } from './packing-slip.service';
 import { PartyService } from './party.service';
+import { ShippingController } from './shipping.controller';
+import { ShippingService } from './shipping.service';
 
 @Module({
   imports: [AuthModule, SettingsModule],
-  controllers: [InvoicesController, PackingSlipController, BillsController],
-  providers: [InvoicesService, PackingSlipService, PartyService, BillsService],
+  controllers: [InvoicesController, PackingSlipController, BillsController, ShippingController],
+  providers: [InvoicesService, PackingSlipService, PartyService, BillsService, ShippingService],
   exports: [PartyService],
 })
 export class SalesModule {}
