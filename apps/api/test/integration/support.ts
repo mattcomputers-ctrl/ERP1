@@ -7,6 +7,7 @@ import { PermissionService } from '../../src/auth/permission.service';
 import { ValuationService } from '../../src/inventory/valuation.service';
 import { OrdersService } from '../../src/orders/orders.service';
 import type { PrismaService } from '../../src/prisma/prisma.service';
+import { PriceVersionService } from '../../src/purchasing/price-version.service';
 import { PurchasingService } from '../../src/purchasing/purchasing.service';
 import { PartyService } from '../../src/sales/party.service';
 import { ShippingService } from '../../src/sales/shipping.service';
@@ -65,13 +66,15 @@ export function services(prisma: PrismaClient) {
   const permissions = new PermissionService(p);
   const esign = new ESignatureService(p);
   const valuation = new ValuationService(p, settings);
+  const priceVersions = new PriceVersionService(p);
   return {
     settings,
     audit,
     party,
     valuation,
+    priceVersions,
     orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation),
-    purchasing: new PurchasingService(p, settings, audit, party, valuation),
+    purchasing: new PurchasingService(p, settings, audit, party, valuation, priceVersions),
     shipping: new ShippingService(p, audit, party),
   };
 }
@@ -224,6 +227,36 @@ export async function addOrdDetail(
       qtyReqd: data.qtyReqd ?? null,
       price: data.price ?? null,
       entityUnit: data.entityUnit ?? null,
+    },
+  });
+  return data.id;
+}
+
+export async function addPriceVersion(
+  prisma: PrismaClient,
+  data: { id: number; entityId: number; effectiveDate?: Date | null; version?: number | null },
+): Promise<number> {
+  await prisma.priceVersion.create({
+    data: { id: data.id, entityId: data.entityId, effectiveDate: data.effectiveDate ?? null, version: data.version ?? 1 },
+  });
+  return data.id;
+}
+
+export async function addPriceDetail(
+  prisma: PrismaClient,
+  data: {
+    id: number; priceVersionId: number; itemId: number; pkgTypeId?: number | null; entityQuantity?: number | null;
+    entityUnit?: string | null; priceByPackage?: boolean; entityItemCode?: string | null;
+    minOrder1?: number | null; price1?: number | null; minOrder2?: number | null; price2?: number | null;
+  },
+): Promise<number> {
+  await prisma.priceDetail.create({
+    data: {
+      id: data.id, priceVersionId: data.priceVersionId, itemId: data.itemId, pkgTypeId: data.pkgTypeId ?? null,
+      entityQuantity: data.entityQuantity ?? null, entityUnit: data.entityUnit ?? null,
+      priceByPackage: data.priceByPackage ?? false, entityItemCode: data.entityItemCode ?? null,
+      minOrder1: data.minOrder1 ?? 1, price1: data.price1 ?? null,
+      minOrder2: data.minOrder2 ?? null, price2: data.price2 ?? null,
     },
   });
   return data.id;

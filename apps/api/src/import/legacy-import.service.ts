@@ -101,6 +101,27 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    name: 'PriceVersion', legacyTable: 'dbo.PriceVersion', delegate: 'priceVersion', idColumn: 'PriceVersion',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.PriceVersion, entityId: r.Entity, effectiveDate: r.EffectiveDate, version: r.Version,
+      comment: r.Comment, defaultVerifiedDate: r.DefaultVerifiedDate,
+    }),
+  },
+  {
+    name: 'PriceDetail', legacyTable: 'dbo.PriceDetail', delegate: 'priceDetail', idColumn: 'PriceDetail',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.PriceDetail, priceVersionId: r.PriceVersion, itemId: r.Item, entityItemCode: r.EntityItemCode,
+      description: r.Description, comment: r.Comment, currency: r.Currency, pkgTypeId: r.PkgType,
+      entityQuantity: r.EntityQuantity, entityUnit: r.EntityUnit, priceByPackage: b(r.PriceByPackage),
+      minOrder1: r.MinOrder1, price1: r.Price1, minOrder2: r.MinOrder2, price2: r.Price2,
+      minOrder3: r.MinOrder3, price3: r.Price3, minOrder4: r.MinOrder4, price4: r.Price4,
+      minOrder5: r.MinOrder5, price5: r.Price5, leadTime: r.LeadTime, manufacturerId: r.Manufacturer,
+      version: r.Version,
+    }),
+  },
+  {
     name: 'Address', legacyTable: 'dbo.Address', delegate: 'address', idColumn: 'Address',
     where: (d) => ({ id: d.id }),
     map: (r) => ({

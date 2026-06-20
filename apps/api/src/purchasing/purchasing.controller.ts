@@ -45,6 +45,21 @@ export class PurchasingController {
     return this.purchasing.termsOptions();
   }
 
+  // Supplier price + packaging for a line (from the effective price version) —
+  // drives the create form. Gated by purchasing.create.
+  @Get('price-detail')
+  @RequireProgram('purchasing.create')
+  priceDetail(@Query('supplierId', ParseIntPipe) supplierId: number, @Query('itemId', ParseIntPipe) itemId: number, @Query('qty') qty?: string) {
+    return this.purchasing.priceDetail(supplierId, itemId, qty ? Number(qty) : 1);
+  }
+
+  // Purchase Price Detail Set Viewer — a supplier's current price details.
+  @Get('price-details')
+  @RequireProgram('purchasing.priceDetails')
+  priceDetails(@Query('supplierId', ParseIntPipe) supplierId: number, @Query() query: ListQuery) {
+    return this.purchasing.priceDetails(supplierId, query);
+  }
+
   // Recall lookup by manufacturer lot number (received raw-material lots).
   @Get('recall')
   recall(@Query('q') q?: string) {

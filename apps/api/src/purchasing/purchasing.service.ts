@@ -16,6 +16,7 @@ const RECEIVING_LOCATION_SETTING = 'inventory.receivingLocation';
 import type { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
 import type { ReceivePurchaseOrderDto } from './dto/receive-purchase-order.dto';
 import { poLineMath, round3 } from './po-math';
+import { PriceVersionService } from './price-version.service';
 
 const num = (v: unknown) => (v == null ? 0 : Number(v));
 
@@ -34,6 +35,7 @@ export class PurchasingService {
     private readonly audit: AuditService,
     private readonly party: PartyService,
     private readonly valuation: ValuationService,
+    private readonly priceVersions: PriceVersionService,
   ) {}
 
   /** Browse purchase orders (Ordr Context='PO') with supplier name + line total. */
@@ -362,6 +364,11 @@ export class PurchasingService {
       if (Number.isNaN(dateRequired.getTime())) throw new BadRequestException('dateRequired is not a valid date');
     }
 
+    // Source each line's packaging + price from the supplier's effective price
+    // version (where Mar-Kov configures purchasing packaging). Read-only lookups,
+    // done before the transaction; null for items the supplier has no price for.
+    const sourcing = await Promise.all(dto.lines.map((l) => this.priceVersions.lineSourcing(supplier.id, l.itemId, l.qtyReqd)));
+
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
@@ -397,7 +404,8 @@ export class PurchasingService {
           context: PO_CONTEXT,
           itemId: l.itemId,
           qtyReqd: l.qtyReqd,
-          price: l.price ?? null,
+          // Price: the operator's override, else the supplier price-version tier price.
+          price: l.price ?? sourcing[i]?.price ?? null,
           entityUnit: l.unit ?? item.unit ?? null,
           description: l.description ?? item.description ?? null,
           sortOrder: i + 1,
@@ -407,7 +415,26 @@ export class PurchasingService {
       });
       await tx.ordDetail.createMany({ data: lineData });
 
-      const subtotal = dto.lines.reduce((s, l) => s + l.qtyReqd * (l.price ?? 0), 0);
+      // Snapshot the supplier packaging (OrdDetailPricing) from the price version,
+      // so the PO doc renders "N PKG / qty per pkgType / Your Code" and receiving
+      // can price per package — exactly as imported POs do. Native ids under the lock.
+      let pricingId = (await tx.ordDetailPricing.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
+      const pricingData: Prisma.OrdDetailPricingCreateManyInput[] = [];
+      sourcing.forEach((s, i) => {
+        if (!s) return;
+        pricingData.push({
+          id: (pricingId += 1),
+          ordDetailId: lineData[i].id as number,
+          pkgTypeId: s.pkgTypeId,
+          entityItemCode: s.entityItemCode,
+          entityQuantity: s.entityQuantity,
+          entityUnit: s.entityUnit,
+          priceByPackage: s.priceByPackage,
+        });
+      });
+      if (pricingData.length) await tx.ordDetailPricing.createMany({ data: pricingData });
+
+      const subtotal = dto.lines.reduce((s, l, i) => s + l.qtyReqd * (l.price ?? sourcing[i]?.price ?? 0), 0);
       await this.audit.record(
         {
           action: 'purchaseorder.create',
@@ -426,8 +453,22 @@ export class PurchasingService {
         tx,
       );
 
-      return { id: orderId, status: 'NST', lines: lineData.length };
+      return { id: orderId, status: 'NST', lines: lineData.length, packagedLines: pricingData.length };
     });
+  }
+
+  /**
+   * The supplier price + packaging the form should show for a line (sourced from
+   * the supplier's effective price version). Drives the PO create form so the
+   * operator sees the priced/packaged line before submitting.
+   */
+  async priceDetail(supplierId: number, itemId: number, qty: number) {
+    return (await this.priceVersions.lineSourcing(supplierId, itemId, qty || 1)) ?? null;
+  }
+
+  /** Browse a supplier's price details (the Purchase Price Detail Set Viewer). */
+  async priceDetails(supplierId: number, query: ListQuery) {
+    return this.priceVersions.list(supplierId, query);
   }
 
   // --- receiving (mutating; RBAC + atomic audit) ---------------------------

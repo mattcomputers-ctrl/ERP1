@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { DataGrid, type GridColumn } from '../components/DataGrid';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
@@ -420,11 +420,18 @@ function RecallLookup() {
 
 type SupplierOption = { id: number; entityCode: string | null; name: string | null };
 type ItemOption = { id: number; itemCode: string | null; description: string | null; unit: string | null; price: number | null };
-interface PoLine { itemId: number; itemCode: string | null; description: string | null; qty: string; price: string; unit: string }
+// Packaging + their-code sourced from the supplier's price version (shown read-only on the line).
+type LineSourcing = { entityItemCode: string | null; pkgTypeCode: string | null; entityQuantity: number | null; entityUnit: string | null; priceByPackage: boolean; price: number | null };
+interface PoLine { itemId: number; itemCode: string | null; description: string | null; qty: string; price: string; unit: string; pkg?: LineSourcing | null }
 
 function CreatePurchaseOrder({ onDone }: { onDone: (id: number) => void }) {
   const [supSearch, setSupSearch] = useState('');
   const [supplier, setSupplier] = useState<SupplierOption | null>(null);
+  // Sourced price/packaging on a line is supplier-specific, so changing the
+  // supplier must drop all lines (else supplier A's price persists on supplier B's
+  // PO). The ref guards the in-flight price-detail fetch against a stale supplier.
+  const supplierRef = useRef<number | null>(null);
+  const selectSupplier = (s: SupplierOption | null) => { supplierRef.current = s?.id ?? null; setSupplier(s); setLines([]); setSupSearch(''); };
   const [lines, setLines] = useState<PoLine[]>([]);
   const [itemSearch, setItemSearch] = useState('');
   const [reference, setReference] = useState('');
@@ -447,20 +454,31 @@ function CreatePurchaseOrder({ onDone }: { onDone: (id: number) => void }) {
     enabled: itemSearch.trim().length >= 1,
   });
 
-  const addItem = (it: ItemOption) => {
+  const addItem = async (it: ItemOption) => {
+    setItemSearch('');
+    if (lines.some((l) => l.itemId === it.id)) return;
+    // Source the supplier's price + packaging from its effective price version.
+    const supId = supplier?.id ?? null;
+    let price = it.price != null ? String(it.price) : '';
+    let pkg: LineSourcing | null = null;
+    if (supId != null) {
+      try {
+        const s = await api.get<LineSourcing | null>(`/purchase-orders/price-detail?supplierId=${supId}&itemId=${it.id}&qty=1`);
+        if (s) {
+          pkg = s;
+          if (s.price != null) price = String(s.price);
+        }
+      } catch {
+        /* no price version for this supplier/item — fall back to the generic price */
+      }
+    }
+    // The supplier may have changed during the await — drop this stale add.
+    if (supplierRef.current !== supId) return;
     setLines((prev) =>
       prev.some((l) => l.itemId === it.id)
         ? prev
-        : [...prev, {
-            itemId: it.id,
-            itemCode: it.itemCode,
-            description: it.description,
-            qty: '1',
-            price: it.price != null ? String(it.price) : '',
-            unit: it.unit ?? '',
-          }],
+        : [...prev, { itemId: it.id, itemCode: it.itemCode, description: it.description, qty: '1', price, unit: it.unit ?? '', pkg }],
     );
-    setItemSearch('');
   };
   const updateLine = (i: number, patch: Partial<PoLine>) =>
     setLines((prev) => prev.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
@@ -496,7 +514,7 @@ function CreatePurchaseOrder({ onDone }: { onDone: (id: number) => void }) {
             {supplier ? (
               <div className="flex items-center gap-2">
                 <span className="rounded-md bg-indigo-50 px-2 py-1 text-sm font-medium text-indigo-700">{supplier.name ?? supplier.entityCode}</span>
-                <button type="button" onClick={() => { setSupplier(null); setSupSearch(''); }} className="text-sm text-slate-500 hover:underline">change</button>
+                <button type="button" onClick={() => selectSupplier(null)} className="text-sm text-slate-500 hover:underline">change</button>
               </div>
             ) : (
               <Input value={supSearch} onChange={(e) => setSupSearch(e.target.value)} placeholder="Search supplier by name or code…" />
@@ -530,7 +548,7 @@ function CreatePurchaseOrder({ onDone }: { onDone: (id: number) => void }) {
             {suppliers.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
             {!suppliers.isLoading && suppliers.data?.rows.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">No suppliers match.</div>}
             {suppliers.data?.rows.map((s) => (
-              <button type="button" key={s.id} onClick={() => { setSupplier(s); setSupSearch(''); }} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
+              <button type="button" key={s.id} onClick={() => selectSupplier(s)} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
                 <span>{s.name ?? s.entityCode}</span>
                 <span className="text-xs text-slate-400">{s.entityCode}</span>
               </button>
@@ -560,7 +578,16 @@ function CreatePurchaseOrder({ onDone }: { onDone: (id: number) => void }) {
                 {lines.map((l, i) => (
                   <tr key={l.itemId} className="border-b border-slate-100 align-middle">
                     <td className="py-1 pr-2 font-medium">{l.itemCode}</td>
-                    <td className="py-1 pr-2 text-slate-600">{l.description}</td>
+                    <td className="py-1 pr-2 text-slate-600">
+                      {l.description}
+                      {l.pkg && (l.pkg.pkgTypeCode || l.pkg.entityItemCode) && (
+                        <div className="text-xs text-indigo-600">
+                          {l.pkg.entityQuantity != null && l.pkg.pkgTypeCode ? `${l.pkg.entityQuantity} ${l.pkg.entityUnit ?? ''} per ${l.pkg.pkgTypeCode}` : ''}
+                          {l.pkg.entityItemCode ? ` · your code ${l.pkg.entityItemCode}` : ''}
+                          <span className="ml-1 text-slate-400">(from price version)</span>
+                        </div>
+                      )}
+                    </td>
                     <td className="py-1 pr-2 text-right">
                       <input type="number" min="0" step="any" value={l.qty} onChange={(e) => updateLine(i, { qty: e.target.value })} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" />
                     </td>

@@ -37,6 +37,7 @@ const BASELINE_PROGRAMS = [
   { key: 'purchasing.po', name: 'Purchase Orders', folder: 'Transactions/Purchasing' },
   { key: 'purchasing.create', name: 'Create Purchase Order', folder: 'Transactions/Purchasing' },
   { key: 'purchasing.receive', name: 'Receive Purchase Order', folder: 'Transactions/Purchasing' },
+  { key: 'purchasing.priceDetails', name: 'Purchase Price Details', folder: 'Transactions/Purchasing' },
   { key: 'qa.cofa', name: 'Certificates of Analysis', folder: 'Quality' },
   { key: 'qa.disposition', name: 'QA Disposition', folder: 'Quality' },
   { key: 'qa.results', name: 'Enter Test Results', folder: 'Quality' },

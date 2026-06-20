@@ -8,6 +8,8 @@ import {
   addOrdDetail,
   addOrdDetailPricing,
   addOrder,
+  addPriceDetail,
+  addPriceVersion,
   makePrisma,
   onHandForLot,
   resetDb,
@@ -78,6 +80,102 @@ describe('PurchasingService.receive', () => {
     expect(res.received).toBe(2);
     expect((await prisma.ordDetail.findUnique({ where: { id: 401 } }))!.qtyUsed).toBe(35);
     expect(await prisma.lot.count({ where: { supLot: { in: ['A', 'B'] } } })).toBe(2);
+  });
+
+  it('create() sources line packaging + price from the supplier effective price version', async () => {
+    const supplier = await addEntity(prisma, { id: 200, isSupplier: true });
+    await addItem(prisma, { id: 1, code: 'PIGMENT', unit: 'lb' });
+    await addItem(prisma, { id: 9, code: 'DRUM' }); // the package-type item
+    // Older + newer price versions; the newer (effective) one carries DRUM packaging + tiered price.
+    await addPriceVersion(prisma, { id: 50, entityId: supplier, effectiveDate: new Date('2020-01-01'), version: 1 });
+    await addPriceVersion(prisma, { id: 51, entityId: supplier, effectiveDate: new Date('2025-01-01'), version: 2 });
+    await addPriceDetail(prisma, { id: 800, priceVersionId: 50, itemId: 1, price1: 99 }); // stale version — must be ignored
+    await addPriceDetail(prisma, {
+      id: 801, priceVersionId: 51, itemId: 1, pkgTypeId: 9, entityQuantity: 400, entityUnit: 'lb',
+      priceByPackage: false, entityItemCode: 'THEIR-7', minOrder1: 1, price1: 5.5, minOrder2: 100, price2: 4.25,
+    });
+    const { purchasing } = services(prisma);
+
+    // qty 250 -> the $4.25 tier; packaging from the effective version.
+    const res = await purchasing.create({ supplierId: supplier, lines: [{ itemId: 1, qtyReqd: 250 }] }, actor);
+    expect(res.packagedLines).toBe(1);
+
+    const line = (await prisma.ordDetail.findFirst({ where: { ordrId: res.id }, select: { id: true, price: true } }))!;
+    expect(Number(line.price)).toBe(4.25); // tiered price for qty 250 from the effective version (not the stale 99)
+    const pricing = (await prisma.ordDetailPricing.findFirst({ where: { ordDetailId: line.id } }))!;
+    expect(pricing.pkgTypeId).toBe(9);
+    expect(pricing.entityQuantity).toBe(400);
+    expect(pricing.entityUnit).toBe('lb');
+    expect(pricing.entityItemCode).toBe('THEIR-7');
+  });
+
+  it('create() leaves a line unpackaged when the supplier has no price detail for the item', async () => {
+    const supplier = await addEntity(prisma, { id: 201, isSupplier: true });
+    await addItem(prisma, { id: 1, unit: 'lb' });
+    const { purchasing } = services(prisma);
+    const res = await purchasing.create({ supplierId: supplier, lines: [{ itemId: 1, qtyReqd: 10, price: 2 }] }, actor);
+    expect(res.packagedLines).toBe(0);
+    expect(await prisma.ordDetailPricing.count()).toBe(0);
+  });
+
+  it('create() ignores a FUTURE-dated price version', async () => {
+    const supplier = await addEntity(prisma, { id: 202, isSupplier: true });
+    await addItem(prisma, { id: 1, unit: 'lb' });
+    await addPriceVersion(prisma, { id: 60, entityId: supplier, effectiveDate: new Date('2020-01-01'), version: 1 });
+    await addPriceVersion(prisma, { id: 61, entityId: supplier, effectiveDate: new Date(Date.now() + 365 * 24 * 3600 * 1000), version: 2 });
+    await addPriceDetail(prisma, { id: 810, priceVersionId: 60, itemId: 1, price1: 7 });
+    await addPriceDetail(prisma, { id: 811, priceVersionId: 61, itemId: 1, price1: 99 }); // future — must be ignored
+    const { purchasing } = services(prisma);
+    const res = await purchasing.create({ supplierId: supplier, lines: [{ itemId: 1, qtyReqd: 5 }] }, actor);
+    const line = (await prisma.ordDetail.findFirst({ where: { ordrId: res.id } }))!;
+    expect(Number(line.price)).toBe(7); // current past version, not the future 99
+  });
+
+  it('create() picks a deterministic (lowest-id) detail when the version lists the item under several packages', async () => {
+    const supplier = await addEntity(prisma, { id: 203, isSupplier: true });
+    await addItem(prisma, { id: 1, unit: 'lb' });
+    await addItem(prisma, { id: 8, code: 'DRUM' });
+    await addItem(prisma, { id: 9, code: 'BAG' });
+    await addPriceVersion(prisma, { id: 62, entityId: supplier, effectiveDate: new Date('2025-01-01'), version: 1 });
+    await addPriceDetail(prisma, { id: 820, priceVersionId: 62, itemId: 1, pkgTypeId: 8, entityQuantity: 380, price1: 2.2 });
+    await addPriceDetail(prisma, { id: 821, priceVersionId: 62, itemId: 1, pkgTypeId: 9, entityQuantity: 44, price1: 5.3 });
+    const { purchasing } = services(prisma);
+    const res = await purchasing.create({ supplierId: supplier, lines: [{ itemId: 1, qtyReqd: 10 }] }, actor);
+    const line = (await prisma.ordDetail.findFirst({ where: { ordrId: res.id } }))!;
+    const pricing = (await prisma.ordDetailPricing.findFirst({ where: { ordDetailId: line.id } }))!;
+    expect(pricing.pkgTypeId).toBe(8); // lowest-id detail (820 -> DRUM), deterministically
+    expect(Number(line.price)).toBe(2.2);
+  });
+
+  it('create() preserves a price-by-package detail (raw per-package price + flag)', async () => {
+    const supplier = await addEntity(prisma, { id: 204, isSupplier: true });
+    await addItem(prisma, { id: 1, unit: 'lb' });
+    await addItem(prisma, { id: 8, code: 'DRUM' });
+    await addPriceVersion(prisma, { id: 63, entityId: supplier, effectiveDate: new Date('2025-01-01'), version: 1 });
+    await addPriceDetail(prisma, { id: 830, priceVersionId: 63, itemId: 1, pkgTypeId: 8, entityQuantity: 7, priceByPackage: true, price1: 81 });
+    const { purchasing } = services(prisma);
+    const res = await purchasing.create({ supplierId: supplier, lines: [{ itemId: 1, qtyReqd: 14 }] }, actor);
+    const line = (await prisma.ordDetail.findFirst({ where: { ordrId: res.id } }))!;
+    const pricing = (await prisma.ordDetailPricing.findFirst({ where: { ordDetailId: line.id } }))!;
+    expect(Number(line.price)).toBe(81); // the raw per-package price, NOT divided
+    expect(pricing.priceByPackage).toBe(true);
+    expect(pricing.entityQuantity).toBe(7);
+  });
+
+  it('viewer (list) returns only the effective version details with resolved codes; empty when none', async () => {
+    const supplier = await addEntity(prisma, { id: 205, isSupplier: true });
+    await addItem(prisma, { id: 1, code: 'WIDGET', description: 'A widget' });
+    await addItem(prisma, { id: 8, code: 'DRUM' });
+    await addPriceVersion(prisma, { id: 64, entityId: supplier, effectiveDate: new Date('2020-01-01'), version: 1 });
+    await addPriceVersion(prisma, { id: 65, entityId: supplier, effectiveDate: new Date('2025-01-01'), version: 2 });
+    await addPriceDetail(prisma, { id: 840, priceVersionId: 64, itemId: 1, price1: 1 }); // stale version — excluded
+    await addPriceDetail(prisma, { id: 841, priceVersionId: 65, itemId: 1, pkgTypeId: 8, entityQuantity: 44, entityItemCode: 'THEIR-X', price1: 5 });
+    const { priceVersions } = services(prisma);
+
+    const out = await priceVersions.list(supplier, {});
+    expect(out.total).toBe(1);
+    expect(out.rows[0]).toMatchObject({ itemCode: 'WIDGET', packageType: 'DRUM', perPackageQty: 44, theirCode: 'THEIR-X', price: 5 });
+    expect(await priceVersions.list(999_999, {})).toMatchObject({ rows: [], total: 0 });
   });
 
   it('prices a per-package line at price / package-qty (PriceByPackage), not the raw package price', async () => {

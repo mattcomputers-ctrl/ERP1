@@ -806,6 +806,60 @@ model OrdDetailPricing {
   @@map("OrdDetailPricing")
 }
 
+// Supplier/customer pricing header (mirrors legacy). A price version belongs to an
+// Entity (the supplier, for purchase pricing) and is effective-dated; the CURRENT
+// version for an entity is the one with the latest EffectiveDate (≤ today). Its
+// PriceDetail rows carry the per-item packaging + tiered prices that get copied
+// onto a PO line (OrdDetailPricing) when the item is added to that supplier's PO.
+model PriceVersion {
+  id                  Int       @id @default(autoincrement()) @map("PriceVersion")
+  entityId            Int?      @map("Entity")
+  effectiveDate       DateTime? @map("EffectiveDate")
+  version             Int?      @map("Version")
+  comment             String?   @map("Comment") @db.Text
+  defaultVerifiedDate DateTime? @map("DefaultVerifiedDate")
+
+  @@index([entityId])
+  @@map("PriceVersion")
+}
+
+// Per-item pricing line within a PriceVersion (mirrors legacy). Carries the
+// supplier packaging (PkgType — an Item whose code is e.g. "DRUM" — EntityQuantity,
+// EntityUnit, PriceByPackage), the supplier's own item code (EntityItemCode = the
+// PO's "Your Code"), tiered prices by minimum order quantity (MinOrder1/Price1 ..
+// MinOrder5/Price5), and lead time. This is where purchasing packaging is
+// configured in Mar-Kov; a PO line snapshots the matching row into OrdDetailPricing.
+model PriceDetail {
+  id             Int      @id @default(autoincrement()) @map("PriceDetail")
+  priceVersionId Int?     @map("PriceVersion")
+  itemId         Int?     @map("Item")
+  entityItemCode String?  @map("EntityItemCode") @db.VarChar(50)
+  description    String?  @map("Description") @db.VarChar(256)
+  comment        String?  @map("Comment") @db.Text
+  currency       String?  @map("Currency") @db.VarChar(10)
+  pkgTypeId      Int?     @map("PkgType")
+  entityQuantity Float?   @map("EntityQuantity")
+  entityUnit     String?  @map("EntityUnit") @db.VarChar(20)
+  priceByPackage Boolean? @map("PriceByPackage")
+  minOrder1      Float?   @map("MinOrder1")
+  price1         Decimal? @map("Price1") @db.Money
+  minOrder2      Float?   @map("MinOrder2")
+  price2         Decimal? @map("Price2") @db.Money
+  minOrder3      Float?   @map("MinOrder3")
+  price3         Decimal? @map("Price3") @db.Money
+  minOrder4      Float?   @map("MinOrder4")
+  price4         Decimal? @map("Price4") @db.Money
+  minOrder5      Float?   @map("MinOrder5")
+  price5         Decimal? @map("Price5") @db.Money
+  leadTime       Int?     @map("LeadTime")
+  manufacturerId Int?     @map("Manufacturer")
+  version        Int?     @map("Version")
+
+  @@index([priceVersionId])
+  @@index([itemId])
+  @@map("PriceDetail")
+}
+
 // Item-level testing requirements (mirrors legacy). The QA spec library keyed by
 // item: which tests apply on receipt / production / retest, with Min/Max/Target/
 // Specification. When a batch order is created from a recipe, the produced
