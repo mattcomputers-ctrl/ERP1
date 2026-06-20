@@ -15,9 +15,9 @@ import { SettingsService } from '../settings/settings.service';
 const RECEIVING_LOCATION_SETTING = 'inventory.receivingLocation';
 import type { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
 import type { ReceivePurchaseOrderDto } from './dto/receive-purchase-order.dto';
+import { poLineMath, round3 } from './po-math';
 
 const num = (v: unknown) => (v == null ? 0 : Number(v));
-const round3 = (n: number) => Math.round(n * 1000) / 1000;
 
 // Purchase orders are Ordr rows discriminated by Context='PO'; their lines are
 // OrdDetail rows with the same context. Entity = the supplier (unlike SH orders,
@@ -201,16 +201,13 @@ export class PurchasingService {
       const pr = pricingByLine.get(l.id);
       const perPackageQty = pr?.entityQuantity ?? null;
       const packageType = pr?.pkgTypeId != null ? (itemById.get(pr.pkgTypeId)?.itemCode ?? null) : null;
-      const packageCount = perPackageQty && perPackageQty > 0 ? round3(ordered / perPackageQty) : null;
       const perPackageUnit = pr?.entityUnit ?? l.entityUnit ?? null;
-      // When PriceByPackage, Price is per PACKAGE (e.g. $81 / DRUM), not per unit:
-      // value = packageCount × price and the price unit is the package type.
-      // Otherwise price is per stock unit and value = QtyReqd × price (the common
-      // case, proven on PO 189229).
-      const byPackage = !!pr?.priceByPackage && packageCount != null;
-      // Round to 3 dp so float residue from summing Float quantities can't leave
-      // e.g. backordered = 1e-13 on a fully-received line (which would otherwise
-      // trip the "backordered" badge).
+      // Per-line value + receiving math (pure; see po-math). When PriceByPackage,
+      // Price is per PACKAGE (e.g. $81 / DRUM) so value = packageCount × price and
+      // the price unit is the package type; otherwise price is per stock unit and
+      // value = QtyReqd × price (the common case, proven on PO 189229).
+      const m = poLineMath({ price, ordered, received: rawReceived, perPackageQty, priceByPackage: !!pr?.priceByPackage });
+      const byPackage = !!pr?.priceByPackage && m.packageCount != null;
       return {
         lineId: l.id,
         itemCode: item?.itemCode ?? null,
@@ -220,12 +217,12 @@ export class PurchasingService {
         unit: l.entityUnit,
         price,
         priceUnit: byPackage ? packageType : perPackageUnit,
-        extended: byPackage ? (packageCount as number) * price : ordered * price,
-        received: round3(rawReceived),
-        backordered: Math.max(round3(ordered - rawReceived), 0),
+        extended: m.extended,
+        received: m.received,
+        backordered: m.backordered,
         // Packaging detail (null for natively-created lines without pricing).
         packageType,
-        packageCount,
+        packageCount: m.packageCount,
         perPackageQty,
         perPackageUnit,
         theirCode: pr?.entityItemCode ?? null,
