@@ -1,6 +1,15 @@
 import { PrismaClient } from '@erp1/db';
+import { AuditService } from '../../src/audit/audit.service';
+import { ESignatureService } from '../../src/audit/esignature.service';
+import { AuthService } from '../../src/auth/auth.service';
+import type { Actor } from '../../src/auth/current-user.decorator';
+import { PermissionService } from '../../src/auth/permission.service';
 import { ValuationService } from '../../src/inventory/valuation.service';
+import { OrdersService } from '../../src/orders/orders.service';
 import type { PrismaService } from '../../src/prisma/prisma.service';
+import { PurchasingService } from '../../src/purchasing/purchasing.service';
+import { PartyService } from '../../src/sales/party.service';
+import { ShippingService } from '../../src/sales/shipping.service';
 import { SettingsService } from '../../src/settings/settings.service';
 
 // Integration-test support: a real Prisma client against a DISPOSABLE Postgres
@@ -14,18 +23,66 @@ export function makePrisma(): PrismaClient {
   return new PrismaClient({ datasources: { db: { url } } });
 }
 
-// Tables the valuation/consumption tests touch. RESTART IDENTITY so autoincrement
-// ids are deterministic per test; CASCADE in case db push created FK constraints.
-const TABLES = '"Lot","Sublot","Inventory","Location","lot_genealogy","Item","app_settings"';
-
+// Truncate every public table (RESTART IDENTITY so autoincrement ids are
+// deterministic per test; CASCADE for any FK db push created). Dynamic so it
+// covers whatever tables a flow touches without maintaining a list.
 export async function resetDb(prisma: PrismaClient): Promise<void> {
-  await prisma.$executeRawUnsafe(`TRUNCATE ${TABLES} RESTART IDENTITY CASCADE`);
+  await prisma.$executeRawUnsafe(`
+    DO $$
+    DECLARE r RECORD;
+    BEGIN
+      FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+        EXECUTE 'TRUNCATE TABLE ' || quote_ident(r.tablename) || ' RESTART IDENTITY CASCADE';
+      END LOOP;
+    END $$;
+  `);
 }
 
 /** A fresh ValuationService bound to the test client (its location memo is per-instance). */
 export function valuationService(prisma: PrismaClient): ValuationService {
   const p = prisma as unknown as PrismaService;
   return new ValuationService(p, new SettingsService(p));
+}
+
+/**
+ * The real services wired against the test client (full DI graph — every service
+ * has a Prisma-only constructor, so no stubs). Fresh per call so per-instance
+ * memo (e.g. the owner-entity resolution) doesn't leak across tests.
+ *
+ * SCOPE: these flow tests exercise the SERVICE layer. The controllers' program
+ * authorization (ProgramGuard / @RequireProgram) and the global ValidationPipe
+ * (DTO class-validator) run only at the HTTP layer and are NOT covered here —
+ * an HTTP-level (Nest TestingModule + supertest) suite for guard/pipe wiring is
+ * still owed. Error MESSAGES asserted by the reject cases are thrown inside the
+ * services, so those remain faithful.
+ */
+export function services(prisma: PrismaClient) {
+  const p = prisma as unknown as PrismaService;
+  const settings = new SettingsService(p);
+  const audit = new AuditService(p);
+  const party = new PartyService(p);
+  const auth = new AuthService(p);
+  const permissions = new PermissionService(p);
+  const esign = new ESignatureService(p);
+  const valuation = new ValuationService(p, settings);
+  return {
+    settings,
+    audit,
+    party,
+    valuation,
+    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation),
+    purchasing: new PurchasingService(p, settings, audit, party, valuation),
+    shipping: new ShippingService(p, audit, party),
+  };
+}
+
+/** Create an actor User (audit rows FK to User) and return the Actor identity. */
+export async function seedActor(prisma: PrismaClient): Promise<Actor> {
+  const u = await prisma.user.create({
+    data: { email: 'flow@test.local', displayName: 'Flow Test' },
+    select: { id: true, displayName: true },
+  });
+  return { id: u.id, label: u.displayName };
 }
 
 // --- fixtures -------------------------------------------------------------
@@ -59,13 +116,14 @@ export async function addItem(
 
 export async function addLot(
   prisma: PrismaClient,
-  data: { lot: string; itemId?: number | null; unitCost?: number | null; receivedDate?: Date | null; manfDate?: Date | null; supLot?: string | null },
+  data: { lot: string; itemId?: number | null; ordDetailId?: number | null; unitCost?: number | null; receivedDate?: Date | null; manfDate?: Date | null; supLot?: string | null },
 ): Promise<string> {
   await prisma.lot.create({
     data: {
       lot: data.lot,
       context: 'LOT',
       itemId: data.itemId ?? null,
+      ordDetailId: data.ordDetailId ?? null,
       unitCost: data.unitCost ?? null,
       receivedDate: data.receivedDate ?? null,
       manfDate: data.manfDate ?? null,
@@ -112,4 +170,76 @@ export async function onHandForLot(prisma: PrismaClient, lot: string): Promise<n
   if (!subs.length) return 0;
   const agg = await prisma.inventory.aggregate({ _sum: { qty: true }, where: { sublotId: { in: subs.map((s) => s.id) } } });
   return agg._sum.qty ?? 0;
+}
+
+export async function addEntity(
+  prisma: PrismaClient,
+  data: { id?: number; code?: string; isSupplier?: boolean; isBillTo?: boolean; isShipTo?: boolean; isShipVia?: boolean; isSalesman?: boolean },
+): Promise<number> {
+  const row = await prisma.entity.create({
+    data: {
+      id: data.id,
+      entityCode: data.code ?? `E${data.id ?? ''}`,
+      isSupplier: data.isSupplier ?? false,
+      isBillTo: data.isBillTo ?? false,
+      isShipTo: data.isShipTo ?? false,
+      isShipVia: data.isShipVia ?? false,
+      isSalesman: data.isSalesman ?? false,
+    },
+    select: { id: true },
+  });
+  return row.id;
+}
+
+export async function addOrder(
+  prisma: PrismaClient,
+  data: { id: number; context: string; status?: string; entityId?: number | null; billToId?: number | null; shipToId?: number | null; ownerId?: number | null; actualBatchSize?: number | null; poNumber?: string | null },
+): Promise<number> {
+  await prisma.ordr.create({
+    data: {
+      id: data.id,
+      context: data.context,
+      status: data.status ?? 'NST',
+      entityId: data.entityId ?? null,
+      billToId: data.billToId ?? null,
+      shipToId: data.shipToId ?? null,
+      ownerId: data.ownerId ?? null,
+      actualBatchSize: data.actualBatchSize ?? null,
+      poNumber: data.poNumber ?? null,
+    },
+  });
+  return data.id;
+}
+
+export async function addOrdDetail(
+  prisma: PrismaClient,
+  data: { id: number; ordrId: number; context: string; itemId?: number | null; qtyReqd?: number | null; price?: number | null; entityUnit?: string | null },
+): Promise<number> {
+  await prisma.ordDetail.create({
+    data: {
+      id: data.id,
+      ordrId: data.ordrId,
+      context: data.context,
+      itemId: data.itemId ?? null,
+      qtyReqd: data.qtyReqd ?? null,
+      price: data.price ?? null,
+      entityUnit: data.entityUnit ?? null,
+    },
+  });
+  return data.id;
+}
+
+export async function addOrdDetailPricing(
+  prisma: PrismaClient,
+  data: { ordDetailId: number; entityQuantity?: number | null; priceByPackage?: boolean; pkgTypeId?: number | null; entityItemCode?: string | null },
+): Promise<void> {
+  await prisma.ordDetailPricing.create({
+    data: {
+      ordDetailId: data.ordDetailId,
+      entityQuantity: data.entityQuantity ?? null,
+      priceByPackage: data.priceByPackage ?? false,
+      pkgTypeId: data.pkgTypeId ?? null,
+      entityItemCode: data.entityItemCode ?? null,
+    },
+  });
 }
