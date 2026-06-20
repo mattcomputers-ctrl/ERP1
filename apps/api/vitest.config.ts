@@ -6,5 +6,9 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.spec.ts'],
+    // Integration tests (test/integration/**) need a database and run via
+    // `pnpm test:integration` (vitest.integration.config.ts) — keep them out of
+    // the fast unit suite.
+    exclude: ['**/node_modules/**', 'test/integration/**'],
   },
 });
