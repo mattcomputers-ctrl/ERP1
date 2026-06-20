@@ -52,10 +52,11 @@ export function valuationService(prisma: PrismaClient): ValuationService {
  *
  * SCOPE: these flow tests exercise the SERVICE layer. The controllers' program
  * authorization (ProgramGuard / @RequireProgram) and the global ValidationPipe
- * (DTO class-validator) run only at the HTTP layer and are NOT covered here —
- * an HTTP-level (Nest TestingModule + supertest) suite for guard/pipe wiring is
- * still owed. Error MESSAGES asserted by the reject cases are thrown inside the
- * services, so those remain faithful.
+ * (DTO class-validator) run only at the HTTP layer — those are now covered by
+ * the HTTP-level suite (Nest TestingModule + supertest) in
+ * `http-layer.http.spec.ts` (helpers in `http-support.ts`). Error MESSAGES
+ * asserted by the reject cases here are thrown inside the services, so those
+ * remain faithful.
  */
 export function services(prisma: PrismaClient) {
   const p = prisma as unknown as PrismaService;
