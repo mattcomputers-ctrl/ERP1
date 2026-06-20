@@ -3,10 +3,10 @@ import { buildList, type ListQuery } from '../common/list';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.service';
 import { PartyService } from './party.service';
+import { num, transTotals } from './trans-math';
 
 // Customer invoices are Trans rows with these contexts (CI = customer invoice).
 const INVOICE_CONTEXTS = ['CI', 'TI'];
-const num = (v: unknown) => (v == null ? 0 : Number(v));
 const FOB: Record<string, string> = { Dest: 'DESTINATION', Orig: 'ORIGIN', PPD: 'PREPAID', COL: 'COLLECT' };
 
 @Injectable()
@@ -55,7 +55,7 @@ export class InvoicesService {
         orderId: r.ordrId,
         poNumber: r.poNumber,
         customer: r.billToId != null ? (parties.get(r.billToId)?.name ?? parties.get(r.billToId)?.entityCode ?? null) : null,
-        total: (subtotalByTrans.get(r.id) ?? 0) + num(r.freightCharge) + num(r.tax1Amount) + num(r.tax2Amount) + num(r.tax3Amount),
+        total: transTotals(subtotalByTrans.get(r.id) ?? 0, r).total,
       })),
       total, page, pageSize,
     };
@@ -116,8 +116,7 @@ export class InvoicesService {
     });
 
     const subtotal = docLines.reduce((s, l) => s + l.amount, 0);
-    const freight = num(trans.freightCharge);
-    const tax = num(trans.tax1Amount) + num(trans.tax2Amount) + num(trans.tax3Amount);
+    const totals = transTotals(subtotal, trans);
 
     const companyName = await this.settings.get('company.name', 'Precision Ink Corporation');
 
@@ -138,7 +137,7 @@ export class InvoicesService {
       shipTo: order?.shipToId != null ? parties.get(order.shipToId) ?? null : null,
       seller: { name: companyName, ...(trans.ownerId != null ? parties.get(trans.ownerId) : null) },
       lines: docLines,
-      totals: { subtotal, freight, tax, total: subtotal + freight + tax },
+      totals,
     };
   }
 
