@@ -135,6 +135,15 @@ describe('ProgramGuard authorization', () => {
       .send({ supplierId: 1, lines: [{ itemId: 1, qtyReqd: 1 }] })
       .expect(403);
   });
+
+  it('separates a read program from its write program on the price-list editor (403/200)', async () => {
+    // The sales price-list editor: the controller default (sales.priceLists)
+    // grants browsing, but every write needs the stricter sales.priceListEditor.
+    await seedUserWithPrograms(prisma, { email: 'pl-read@test.local', passwordHash, programs: ['sales.priceLists'] });
+    const agent = await loginAgent(app, 'pl-read@test.local', PASSWORD);
+    await agent.get('/api/price-lists').expect(200);
+    await agent.post('/api/price-lists').send({ name: 'X' }).expect(403);
+  });
 });
 
 describe('Global ValidationPipe', () => {

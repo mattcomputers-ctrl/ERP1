@@ -10,6 +10,7 @@ import type { PrismaService } from '../../src/prisma/prisma.service';
 import { PriceVersionService } from '../../src/purchasing/price-version.service';
 import { PurchasingService } from '../../src/purchasing/purchasing.service';
 import { PartyService } from '../../src/sales/party.service';
+import { SalesPricingService } from '../../src/sales/sales-pricing.service';
 import { ShippingService } from '../../src/sales/shipping.service';
 import { SettingsService } from '../../src/settings/settings.service';
 
@@ -77,6 +78,7 @@ export function services(prisma: PrismaClient) {
     orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation),
     purchasing: new PurchasingService(p, settings, audit, party, valuation, priceVersions),
     shipping: new ShippingService(p, audit, party),
+    salesPricing: new SalesPricingService(p, audit, party),
   };
 }
 
@@ -178,7 +180,7 @@ export async function onHandForLot(prisma: PrismaClient, lot: string): Promise<n
 
 export async function addEntity(
   prisma: PrismaClient,
-  data: { id?: number; code?: string; isSupplier?: boolean; isBillTo?: boolean; isShipTo?: boolean; isShipVia?: boolean; isSalesman?: boolean },
+  data: { id?: number; code?: string; isSupplier?: boolean; isBillTo?: boolean; isShipTo?: boolean; isShipVia?: boolean; isSalesman?: boolean; isPriceList?: boolean; priceListId?: number | null },
 ): Promise<number> {
   const row = await prisma.entity.create({
     data: {
@@ -189,6 +191,8 @@ export async function addEntity(
       isShipTo: data.isShipTo ?? false,
       isShipVia: data.isShipVia ?? false,
       isSalesman: data.isSalesman ?? false,
+      isPriceList: data.isPriceList ?? false,
+      priceListId: data.priceListId ?? null,
     },
     select: { id: true },
   });
@@ -246,14 +250,14 @@ export async function addPriceVersion(
 export async function addPriceDetail(
   prisma: PrismaClient,
   data: {
-    id: number; priceVersionId: number; itemId: number; pkgTypeId?: number | null; entityQuantity?: number | null;
+    id: number; priceVersionId: number; itemId: number; invItemId?: number | null; pkgTypeId?: number | null; entityQuantity?: number | null;
     entityUnit?: string | null; priceByPackage?: boolean; entityItemCode?: string | null;
     minOrder1?: number | null; price1?: number | null; minOrder2?: number | null; price2?: number | null;
   },
 ): Promise<number> {
   await prisma.priceDetail.create({
     data: {
-      id: data.id, priceVersionId: data.priceVersionId, itemId: data.itemId, pkgTypeId: data.pkgTypeId ?? null,
+      id: data.id, priceVersionId: data.priceVersionId, itemId: data.itemId, invItemId: data.invItemId ?? null, pkgTypeId: data.pkgTypeId ?? null,
       entityQuantity: data.entityQuantity ?? null, entityUnit: data.entityUnit ?? null,
       priceByPackage: data.priceByPackage ?? false, entityItemCode: data.entityItemCode ?? null,
       minOrder1: data.minOrder1 ?? 1, price1: data.price1 ?? null,

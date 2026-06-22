@@ -854,9 +854,15 @@ model PriceDetail {
   leadTime       Int?     @map("LeadTime")
   manufacturerId Int?     @map("Manufacturer")
   version        Int?     @map("Version")
+  // The real stock item being priced. `Item` (above) is a NAME alias; `InvItem`
+  // is the stockable item (== Item in 15,733/15,745 legacy rows). Sales price
+  // resolution keys the stock item off InvItem.
+  invItemId      Int?      @map("InvItem")
+  verifiedDate   DateTime? @map("VerifiedDate")
 
   @@index([priceVersionId])
   @@index([itemId])
+  @@index([invItemId])
   @@map("PriceDetail")
 }
 

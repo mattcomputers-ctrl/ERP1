@@ -118,7 +118,7 @@ const TABLES: TableSpec[] = [
       minOrder1: r.MinOrder1, price1: r.Price1, minOrder2: r.MinOrder2, price2: r.Price2,
       minOrder3: r.MinOrder3, price3: r.Price3, minOrder4: r.MinOrder4, price4: r.Price4,
       minOrder5: r.MinOrder5, price5: r.Price5, leadTime: r.LeadTime, manufacturerId: r.Manufacturer,
-      version: r.Version,
+      version: r.Version, invItemId: r.InvItem, verifiedDate: r.VerifiedDate,
     }),
   },
   {

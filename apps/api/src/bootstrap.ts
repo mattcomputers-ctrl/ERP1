@@ -3,6 +3,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import session from 'express-session';
 import helmet from 'helmet';
+import { PrismaExceptionFilter } from './common/prisma-exception.filter';
 
 // BigInt (used by audit-log / e-signature ids) is not JSON-serializable by
 // default. Patch once at module load so every app (the real server AND the
@@ -59,4 +60,8 @@ export function configureApp(app: NestExpressApplication, opts: ConfigureAppOpti
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
   );
+
+  // Translate Prisma known-request errors (e.g. a unique-constraint race) into
+  // clean HTTP statuses instead of a raw 500. Shared by the server and the tests.
+  app.useGlobalFilters(new PrismaExceptionFilter());
 }
