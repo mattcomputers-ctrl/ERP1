@@ -60,6 +60,7 @@ interface Line {
   qtyReqd: number | null;
   qtyCommitted: number | null;
   qtyUsed: number | null;
+  price: number | null;
   entityUnit: string | null;
   phase: string | null;
   execOrder: number | null;
@@ -279,6 +280,9 @@ export function Orders() {
               <ConsumeLots orderId={detail.data.id} onDone={refresh} />
               <ConsumeByQty orderId={detail.data.id} onDone={refresh} />
             </>
+          )}
+          {detail.data.context === 'SH' && lifeState(detail.data.status) === 'NST' && (
+            <EditShLines order={detail.data} onDone={refresh} />
           )}
           {detail.data.context === 'SH' && <ShipLots orderId={detail.data.id} onDone={refresh} />}
 
@@ -682,6 +686,122 @@ function EditOrder({ order, onDone }: { order: OrderFull; onDone: () => void }) 
         </div>
       </form>
     </Card>
+  );
+}
+
+// Edit the lines of a not-started shipping order in place (mirrors the PO line
+// editor): change qty / unit / price, remove a line, or add an item (the
+// customer's list price is sourced automatically on add).
+function EditShLines({ order, onDone }: { order: OrderFull; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const shLines = order.lines.filter((l) => l.context === 'SH');
+  const [edits, setEdits] = useState<Record<number, { qty: string; price: string; unit: string }>>({});
+  const draftFor = (l: Line) =>
+    edits[l.id] ?? { qty: l.qtyReqd != null ? String(l.qtyReqd) : '', price: l.price != null ? String(l.price) : '', unit: l.entityUnit ?? '' };
+  const setDraft = (lineId: number, patch: Partial<{ qty: string; price: string; unit: string }>) =>
+    setEdits((p) => ({ ...p, [lineId]: { ...(p[lineId] ?? { qty: '', price: '', unit: '' }), ...patch } }));
+
+  const save = useMutation({
+    mutationFn: ({ lineId, body }: { lineId: number; body: Record<string, unknown> }) =>
+      api.patch(`/shipping-orders/${order.id}/lines/${lineId}`, body),
+    onSuccess: (_r, v) => { setEdits((p) => { const n = { ...p }; delete n[v.lineId]; return n; }); onDone(); },
+  });
+  const remove = useMutation({
+    mutationFn: (lineId: number) => api.del(`/shipping-orders/${order.id}/lines/${lineId}`),
+    onSuccess: onDone,
+  });
+
+  const onSave = (l: Line) => {
+    const d = draftFor(l);
+    const body: Record<string, unknown> = {};
+    if (d.qty !== '' && Number(d.qty) !== Number(l.qtyReqd)) body.qtyReqd = Number(d.qty);
+    if (d.price !== '' && Number(d.price) !== Number(l.price ?? NaN)) body.price = Number(d.price);
+    if (d.unit !== (l.entityUnit ?? '')) body.unit = d.unit;
+    if (Object.keys(body).length) save.mutate({ lineId: l.id, body });
+  };
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mb-4 text-sm font-medium text-indigo-600 hover:underline">
+        Edit lines
+      </button>
+    );
+  }
+  return (
+    <Card className="mb-4">
+      <div className="mb-3 flex items-start justify-between">
+        <h2 className="text-base font-medium">Edit lines</h2>
+        <button onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+      </div>
+      <table className="w-full text-sm">
+        <thead className="border-b border-slate-200 text-left text-slate-500">
+          <tr>
+            <th className="py-1 pr-2 font-medium">Item</th>
+            <th className="py-1 pr-2 text-right font-medium">Qty</th>
+            <th className="py-1 pr-2 font-medium">Unit</th>
+            <th className="py-1 pr-2 text-right font-medium">Unit price</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {shLines.map((l) => {
+            const d = draftFor(l);
+            return (
+              <tr key={l.id} className="border-b border-slate-100">
+                <td className="py-1 pr-2"><span className="font-medium">{l.itemCode}</span> <span className="text-slate-500">{l.itemDescription}</span></td>
+                <td className="py-1 pr-2 text-right"><input type="number" min="0" step="any" value={d.qty} onChange={(e) => setDraft(l.id, { qty: e.target.value })} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
+                <td className="py-1 pr-2"><input value={d.unit} onChange={(e) => setDraft(l.id, { unit: e.target.value })} maxLength={6} className="w-16 rounded border border-slate-300 px-1.5 py-1" /></td>
+                <td className="py-1 pr-2 text-right"><input type="number" min="0" step="any" value={d.price} onChange={(e) => setDraft(l.id, { price: e.target.value })} className="w-24 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
+                <td className="py-1 text-right">
+                  <button onClick={() => onSave(l)} disabled={save.isPending} className="mr-2 text-indigo-600 hover:underline">Save</button>
+                  <button onClick={() => remove.mutate(l.id)} disabled={remove.isPending} className="text-slate-400 hover:text-red-600">remove</button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {(save.isError || remove.isError) && <p className="mt-2 text-sm text-red-600">{((save.error || remove.error) as Error).message}</p>}
+      <AddShLine orderId={order.id} onAdded={onDone} />
+    </Card>
+  );
+}
+
+function AddShLine({ orderId, onAdded }: { orderId: number; onAdded: () => void }) {
+  const [itemSearch, setItemSearch] = useState('');
+  const [qty, setQty] = useState('1');
+  const items = useQuery({
+    queryKey: ['sh-edit-item-options', itemSearch],
+    queryFn: () => api.get<{ rows: ShItemOption[] }>(`/shipping-orders/item-options?q=${encodeURIComponent(itemSearch)}`),
+    enabled: itemSearch.trim().length >= 1,
+  });
+  const add = useMutation({
+    mutationFn: (itemId: number) => api.post(`/shipping-orders/${orderId}/lines`, { itemId, qtyReqd: Number(qty) > 0 ? Number(qty) : 1 }),
+    onSuccess: () => { setItemSearch(''); onAdded(); },
+  });
+  return (
+    <div className="mt-3 rounded-md border border-slate-200 p-3">
+      <div className="mb-2 text-sm font-medium text-slate-700">Add a line</div>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-slate-500">Qty</span>
+        <input type="number" min="0" step="any" value={qty} onChange={(e) => setQty(e.target.value)} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" />
+        <Input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)} placeholder="Search item by code or description…" />
+      </div>
+      {itemSearch.trim().length >= 1 && (
+        <div className="mt-1 max-h-44 overflow-y-auto rounded-md border border-slate-200">
+          {items.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
+          {!items.isLoading && items.data?.rows.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">No items match.</div>}
+          {items.data?.rows.map((it) => (
+            <button type="button" key={it.id} onClick={() => add.mutate(it.id)} disabled={add.isPending} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
+              <span><span className="font-medium">{it.itemCode}</span> <span className="text-slate-500">{it.description}</span></span>
+              <span className="text-xs text-slate-400">{it.price != null ? money(it.price) : ''}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {add.isError && <p className="mt-1 text-sm text-red-600">{(add.error as Error).message}</p>}
+      <p className="mt-1 text-xs text-slate-400">The customer&apos;s list price is sourced automatically.</p>
+    </div>
   );
 }
 

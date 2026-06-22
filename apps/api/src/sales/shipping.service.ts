@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
 import { AuditService } from '../audit/audit.service';
 import type { Actor } from '../auth/current-user.decorator';
@@ -6,7 +6,8 @@ import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from './party.service';
 import { SalesPricingService } from './sales-pricing.service';
-import type { CreateShippingOrderDto } from './dto/create-shipping-order.dto';
+import type { CreateShippingOrderDto, ShippingLineDto } from './dto/create-shipping-order.dto';
+import type { UpdateShippingOrderLineDto } from './dto/edit-sh-line.dto';
 
 // Shipping orders are Ordr rows with Context='SH'. Unlike PO orders (Entity =
 // supplier), an SH order has Entity = NULL and the customer is BillTo/ShipTo
@@ -160,6 +161,133 @@ export class ShippingService {
       );
 
       return { id: orderId, status: 'NST', lines: lineData.length, sourcedLines: sourced.filter((s) => s?.price != null).length };
+    });
+  }
+
+  // --- line-level edits on a not-yet-released SH order ---------------------
+
+  /** An order that exists, is an SH order, and is still editable (Not-started).
+   * Returns billToId so addLine can re-source the customer's list price. */
+  private async requireNstSh(id: number) {
+    const order = await this.prisma.ordr.findUnique({
+      where: { id },
+      select: { id: true, context: true, status: true, billToId: true },
+    });
+    if (!order || order.context !== SH_CONTEXT) throw new NotFoundException('Shipping order not found');
+    if ((order.status?.trim() || 'NST') !== 'NST') {
+      throw new BadRequestException('Lines can only be edited on a not-started shipping order.');
+    }
+    return order;
+  }
+
+  /**
+   * Add a line to an NST shipping order, sourcing the customer's sale price from
+   * their price list's effective version (exactly like create) unless an explicit
+   * price is given. Native id under the alloc lock; atomic audit. (SH lines carry
+   * no packaging snapshot — OrdDetailPricing is purchasing-only.)
+   */
+  async addLine(id: number, dto: ShippingLineDto, actor: Actor) {
+    const order = await this.requireNstSh(id);
+    const item = await this.prisma.item.findUnique({
+      where: { id: dto.itemId },
+      select: { id: true, itemCode: true, description: true, unit: true },
+    });
+    if (!item) throw new BadRequestException(`Unknown item id ${dto.itemId}`);
+    const sourced =
+      order.billToId != null ? await this.salesPricing.priceForCustomer(order.billToId, dto.itemId, dto.qtyReqd) : null;
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const odId = ((await tx.ordDetail.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+      const sort = ((await tx.ordDetail.aggregate({ _max: { sortOrder: true }, where: { ordrId: id, context: SH_CONTEXT } }))._max.sortOrder ?? 0) + 1;
+      await tx.ordDetail.create({
+        data: {
+          id: odId,
+          ordrId: id,
+          context: SH_CONTEXT,
+          itemId: dto.itemId,
+          qtyReqd: dto.qtyReqd,
+          // Operator override wins; else the customer's price-list tier price.
+          price: dto.price ?? sourced?.price ?? null,
+          entityUnit: dto.unit ?? item.unit ?? null,
+          description: dto.description ?? item.description ?? null,
+          sortOrder: sort,
+          execOrder: sort,
+          isOpen: true,
+        },
+      });
+      await this.audit.record(
+        {
+          action: 'shippingorder.line.add',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'shipping.create',
+          summary: `Line added to shipping order #${id}: ${item.itemCode} qty ${dto.qtyReqd}`,
+          changes: [{ tableName: 'OrdDetail', recordId: String(odId), fieldName: 'Item', oldValue: null, newValue: String(dto.itemId) }],
+        },
+        tx,
+      );
+      return { id, lineId: odId, sourced: sourced?.price != null };
+    });
+  }
+
+  /** Update qty / price / unit / description on a line of an NST SH order
+   * (IDOR-safe). SH lines have no receipts (shipping is captured at close and
+   * moves the order out of NST), so a qty reduction is unguarded. */
+  async updateLine(id: number, lineId: number, dto: UpdateShippingOrderLineDto, actor: Actor) {
+    await this.requireNstSh(id);
+    const line = await this.prisma.ordDetail.findUnique({
+      where: { id: lineId },
+      select: { id: true, ordrId: true, qtyReqd: true, price: true, entityUnit: true, description: true },
+    });
+    if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${lineId} is not on shipping order #${id}.`);
+
+    const data: Record<string, unknown> = {};
+    const changes: { tableName: string; recordId: string; fieldName: string; oldValue: string | null; newValue: string | null }[] = [];
+    if (dto.qtyReqd !== undefined) {
+      data.qtyReqd = dto.qtyReqd;
+      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'QtyReqd', oldValue: line.qtyReqd != null ? String(line.qtyReqd) : null, newValue: String(dto.qtyReqd) });
+    }
+    if (dto.price !== undefined) {
+      data.price = dto.price;
+      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Price', oldValue: line.price != null ? String(line.price) : null, newValue: String(dto.price) });
+    }
+    if (dto.unit !== undefined) {
+      data.entityUnit = dto.unit || null;
+      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'EntityUnit', oldValue: line.entityUnit, newValue: dto.unit || null });
+    }
+    if (dto.description !== undefined) {
+      data.description = dto.description || null;
+      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Description', oldValue: line.description, newValue: dto.description || null });
+    }
+    if (!Object.keys(data).length) return { id, lineId, unchanged: true };
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.ordDetail.update({ where: { id: lineId }, data });
+      await this.audit.record(
+        { action: 'shippingorder.line.update', actorUserId: actor.id, actorLabel: actor.label, program: 'shipping.create', summary: `Line ${lineId} on shipping order #${id} updated`, changes },
+        tx,
+      );
+      return { id, lineId };
+    });
+  }
+
+  /** Remove a line from an NST SH order. Rejects removing the last line (an order
+   * needs at least one). SH lines have no receipts/packaging to clean up. */
+  async removeLine(id: number, lineId: number, actor: Actor) {
+    await this.requireNstSh(id);
+    const line = await this.prisma.ordDetail.findUnique({ where: { id: lineId }, select: { id: true, ordrId: true } });
+    if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${lineId} is not on shipping order #${id}.`);
+    const lineCount = await this.prisma.ordDetail.count({ where: { ordrId: id, context: SH_CONTEXT } });
+    if (lineCount <= 1) throw new BadRequestException('A shipping order must have at least one line.');
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.ordDetail.delete({ where: { id: lineId } });
+      await this.audit.record(
+        { action: 'shippingorder.line.remove', actorUserId: actor.id, actorLabel: actor.label, program: 'shipping.create', summary: `Line ${lineId} removed from shipping order #${id}`, changes: [{ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'removed', oldValue: 'line', newValue: null }] },
+        tx,
+      );
+      return { id, lineId, removed: true };
     });
   }
 

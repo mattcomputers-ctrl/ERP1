@@ -121,7 +121,7 @@ export class OrdersService {
       orderBy: [{ execOrder: 'asc' }, { sortOrder: 'asc' }, { id: 'asc' }],
       select: {
         id: true, context: true, itemId: true, description: true, status: true, execStatus: true,
-        qtyReqd: true, qtyCommitted: true, qtyUsed: true, entityUnit: true, phase: true,
+        qtyReqd: true, qtyCommitted: true, qtyUsed: true, entityUnit: true, phase: true, price: true,
         execOrder: true, batchType: true, parentId: true, lot: true, sublotId: true,
         yieldPercent: true, qtyYield: true,
       },
@@ -149,6 +149,8 @@ export class OrdersService {
       recipeNumber: recipe?.recipeNumber ?? null,
       lines: lines.map((l) => ({
         ...l,
+        // Decimal -> number so the web (SH line editor) gets a plain numeric price.
+        price: l.price != null ? Number(l.price) : null,
         itemCode: l.itemId != null ? (itemById.get(l.itemId)?.itemCode ?? null) : null,
         itemDescription:
           l.itemId != null ? (itemById.get(l.itemId)?.description ?? null) : l.description,

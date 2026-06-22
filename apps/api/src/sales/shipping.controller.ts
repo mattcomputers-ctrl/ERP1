@@ -1,8 +1,9 @@
-import { Body, Controller, Get, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { CurrentUser, type Actor } from '../auth/current-user.decorator';
 import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
-import { CreateShippingOrderDto } from './dto/create-shipping-order.dto';
+import { CreateShippingOrderDto, ShippingLineDto } from './dto/create-shipping-order.dto';
+import { UpdateShippingOrderLineDto } from './dto/edit-sh-line.dto';
 import { ShippingService } from './shipping.service';
 
 @UseGuards(SessionAuthGuard, ProgramGuard)
@@ -44,5 +45,27 @@ export class ShippingController {
     @Query('qty') qty?: string,
   ) {
     return this.shipping.salePrice(customerId, itemId, qty ? Number(qty) : 1);
+  }
+
+  // Line-level edits on a not-started SH order. Inherit the controller's
+  // shipping.create gate (the same right that creates the order's lines).
+  @Post(':id/lines')
+  addLine(@Param('id', ParseIntPipe) id: number, @Body() dto: ShippingLineDto, @CurrentUser() actor: Actor) {
+    return this.shipping.addLine(id, dto, actor);
+  }
+
+  @Patch(':id/lines/:lineId')
+  updateLine(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('lineId', ParseIntPipe) lineId: number,
+    @Body() dto: UpdateShippingOrderLineDto,
+    @CurrentUser() actor: Actor,
+  ) {
+    return this.shipping.updateLine(id, lineId, dto, actor);
+  }
+
+  @Delete(':id/lines/:lineId')
+  removeLine(@Param('id', ParseIntPipe) id: number, @Param('lineId', ParseIntPipe) lineId: number, @CurrentUser() actor: Actor) {
+    return this.shipping.removeLine(id, lineId, actor);
   }
 }
