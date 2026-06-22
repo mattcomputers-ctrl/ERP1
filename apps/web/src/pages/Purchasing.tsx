@@ -35,6 +35,7 @@ export function Purchasing() {
   const [showCreate, setShowCreate] = useState(false);
   const [showRecall, setShowRecall] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
+  const [editing, setEditing] = useState<number | null>(null);
   const qc = useQueryClient();
 
   const params = new URLSearchParams({ page: String(page), pageSize: '25', sort });
@@ -57,8 +58,15 @@ export function Purchasing() {
     { key: 'dateOrdered', header: 'Ordered', sortable: true, value: (r) => fmtDate(r.dateOrdered), render: (r) => fmtDate(r.dateOrdered) },
     { key: 'total', header: 'Total', value: (r) => r.total, render: (r) => <span className="tabular-nums">{money(r.total)}</span> },
     {
+      key: 'edit', header: '',
+      render: (r) =>
+        statusLabel(r.status) === 'Not started'
+          ? <button onClick={() => { setEditing(r.id); setSelected(null); }} className="text-indigo-600 hover:underline">Edit lines</button>
+          : null,
+    },
+    {
       key: 'receiving', header: '',
-      render: (r) => <button onClick={() => setSelected(r.id)} className="text-indigo-600 hover:underline">Receiving</button>,
+      render: (r) => <button onClick={() => { setSelected(r.id); setEditing(null); }} className="text-indigo-600 hover:underline">Receiving</button>,
     },
     {
       key: 'view', header: '',
@@ -122,6 +130,140 @@ export function Purchasing() {
           onClose={() => setSelected(null)}
         />
       )}
+
+      {editing != null && <LineEditPanel key={editing} poId={editing} onClose={() => setEditing(null)} />}
+    </div>
+  );
+}
+
+// --- line-edit panel (NST POs) -------------------------------------------
+
+function LineEditPanel({ poId, onClose }: { poId: number; onClose: () => void }) {
+  const qc = useQueryClient();
+  const detail = useQuery({
+    queryKey: ['purchase-order', poId],
+    queryFn: () => api.get<PurchaseOrderDetail>(`/purchase-orders/${poId}`),
+  });
+  const data = detail.data;
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['purchase-order', poId] });
+    qc.invalidateQueries({ queryKey: ['purchase-orders'] });
+  };
+  // Per-line draft edits (qty/price/unit), keyed by lineId.
+  const [edits, setEdits] = useState<Record<number, { qty: string; price: string; unit: string }>>({});
+  const draftFor = (l: DetailLine) =>
+    edits[l.lineId] ?? { qty: num3(l.qty), price: l.price != null ? String(l.price) : '', unit: l.unit ?? '' };
+  const setDraft = (lineId: number, patch: Partial<{ qty: string; price: string; unit: string }>) =>
+    setEdits((p) => ({ ...p, [lineId]: { ...(p[lineId] ?? { qty: '', price: '', unit: '' }), ...patch } }));
+
+  const save = useMutation({
+    mutationFn: ({ lineId, body }: { lineId: number; body: Record<string, unknown> }) =>
+      api.patch(`/purchase-orders/${poId}/lines/${lineId}`, body),
+    onSuccess: (_r, v) => { setEdits((p) => { const n = { ...p }; delete n[v.lineId]; return n; }); refresh(); },
+  });
+  const remove = useMutation({
+    mutationFn: (lineId: number) => api.del(`/purchase-orders/${poId}/lines/${lineId}`),
+    onSuccess: refresh,
+  });
+
+  const onSave = (l: DetailLine) => {
+    const d = draftFor(l);
+    const body: Record<string, unknown> = {};
+    if (d.qty !== '' && Number(d.qty) !== Number(l.qty)) body.qtyReqd = Number(d.qty);
+    if (d.price !== '' && Number(d.price) !== Number(l.price ?? NaN)) body.price = Number(d.price);
+    if (d.unit !== (l.unit ?? '')) body.unit = d.unit;
+    if (Object.keys(body).length) save.mutate({ lineId: l.lineId, body });
+  };
+
+  return (
+    <Card>
+      <div className="mb-3 flex items-start justify-between">
+        <h2 className="text-lg font-medium">Edit lines — PO #{data?.header.poNumber ?? poId}</h2>
+        <button onClick={onClose} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+      </div>
+      {detail.isLoading && <p className="text-sm text-slate-400">Loading…</p>}
+      {data && (data.header.status?.trim() || 'NST') !== 'NST' && (
+        <p className="text-sm text-amber-600">This purchase order is no longer Not-started; lines can&apos;t be edited.</p>
+      )}
+      {data && (
+        <>
+          <div className="mb-1 text-sm text-slate-500">{data.supplier?.name}</div>
+          <table className="w-full text-sm">
+            <thead className="border-b border-slate-200 text-left text-slate-500">
+              <tr>
+                <th className="py-1 pr-2 font-medium">Item</th>
+                <th className="py-1 pr-2 text-right font-medium">Qty</th>
+                <th className="py-1 pr-2 font-medium">Unit</th>
+                <th className="py-1 pr-2 text-right font-medium">Unit price</th>
+                <th className="py-1 pr-2 text-right font-medium">Received</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {data.lines.map((l) => {
+                const d = draftFor(l);
+                return (
+                  <tr key={l.lineId} className="border-b border-slate-100">
+                    <td className="py-1 pr-2"><span className="font-medium">{l.itemCode}</span> <span className="text-slate-500">{l.description}</span></td>
+                    <td className="py-1 pr-2 text-right">
+                      <input type="number" min="0" step="any" value={d.qty} onChange={(e) => setDraft(l.lineId, { qty: e.target.value })} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" />
+                    </td>
+                    <td className="py-1 pr-2"><input value={d.unit} onChange={(e) => setDraft(l.lineId, { unit: e.target.value })} maxLength={6} className="w-16 rounded border border-slate-300 px-1.5 py-1" /></td>
+                    <td className="py-1 pr-2 text-right"><input type="number" min="0" step="any" value={d.price} onChange={(e) => setDraft(l.lineId, { price: e.target.value })} className="w-24 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
+                    <td className="py-1 pr-2 text-right tabular-nums">{num3(l.received)}</td>
+                    <td className="py-1 text-right">
+                      <button onClick={() => onSave(l)} disabled={save.isPending} className="mr-2 text-indigo-600 hover:underline">Save</button>
+                      <button onClick={() => remove.mutate(l.lineId)} disabled={remove.isPending} className="text-slate-400 hover:text-red-600">remove</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {(save.isError || remove.isError) && (
+            <p className="mt-2 text-sm text-red-600">{((save.error || remove.error) as Error).message}</p>
+          )}
+          <AddPoLine poId={poId} onAdded={refresh} />
+        </>
+      )}
+    </Card>
+  );
+}
+
+function AddPoLine({ poId, onAdded }: { poId: number; onAdded: () => void }) {
+  const [itemSearch, setItemSearch] = useState('');
+  const [qty, setQty] = useState('1');
+  const items = useQuery({
+    queryKey: ['po-edit-item-options', itemSearch],
+    queryFn: () => api.get<{ rows: ItemOption[] }>(`/purchase-orders/item-options?q=${encodeURIComponent(itemSearch)}`),
+    enabled: itemSearch.trim().length >= 1,
+  });
+  const add = useMutation({
+    mutationFn: (itemId: number) => api.post(`/purchase-orders/${poId}/lines`, { itemId, qtyReqd: Number(qty) > 0 ? Number(qty) : 1 }),
+    onSuccess: () => { setItemSearch(''); onAdded(); },
+  });
+  return (
+    <div className="mt-3 rounded-md border border-slate-200 p-3">
+      <div className="mb-2 text-sm font-medium text-slate-700">Add a line</div>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-slate-500">Qty</span>
+        <input type="number" min="0" step="any" value={qty} onChange={(e) => setQty(e.target.value)} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" />
+        <Input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)} placeholder="Search item by code or description…" />
+      </div>
+      {itemSearch.trim().length >= 1 && (
+        <div className="mt-1 max-h-44 overflow-y-auto rounded-md border border-slate-200">
+          {items.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
+          {!items.isLoading && items.data?.rows.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">No items match.</div>}
+          {items.data?.rows.map((it) => (
+            <button type="button" key={it.id} onClick={() => add.mutate(it.id)} disabled={add.isPending} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
+              <span><span className="font-medium">{it.itemCode}</span> <span className="text-slate-500">{it.description}</span></span>
+              <span className="text-xs text-slate-400">{it.price != null ? money(it.price) : ''}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {add.isError && <p className="mt-1 text-sm text-red-600">{(add.error as Error).message}</p>}
+      <p className="mt-1 text-xs text-slate-400">The supplier&apos;s price &amp; packaging are sourced automatically from the effective price version.</p>
     </div>
   );
 }
@@ -130,7 +272,7 @@ export function Purchasing() {
 
 interface DetailLine {
   lineId: number; itemCode: string | null; description: string | null;
-  qty: number | null; unit: string | null; received: number; backordered: number;
+  qty: number | null; unit: string | null; price: number | null; received: number; backordered: number;
 }
 interface Receipt {
   changeSetId: number; date: string | null; ordDetailId: number | null;
