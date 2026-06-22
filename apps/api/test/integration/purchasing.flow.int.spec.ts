@@ -223,3 +223,87 @@ describe('PurchasingService.receive', () => {
     ).rejects.toThrow(/not a line/);
   });
 });
+
+describe('PurchasingService line edits (NST PO)', () => {
+  it('adds a line sourcing supplier packaging + tier price from the effective version, appended', async () => {
+    const supplier = await addEntity(prisma, { id: 200, isSupplier: true });
+    await addItem(prisma, { id: 1, code: 'A', unit: 'lb' });
+    await addItem(prisma, { id: 2, code: 'B', unit: 'lb' });
+    await addItem(prisma, { id: 9, code: 'DRUM' });
+    await addPriceVersion(prisma, { id: 50, entityId: supplier, effectiveDate: new Date('2025-01-01'), version: 1 });
+    await addPriceDetail(prisma, { id: 800, priceVersionId: 50, itemId: 2, pkgTypeId: 9, entityQuantity: 100, entityUnit: 'lb', price1: 3.5 });
+    const { purchasing } = services(prisma);
+    const po = await purchasing.create({ supplierId: supplier, lines: [{ itemId: 1, qtyReqd: 10, price: 1 }] }, actor);
+
+    const res = await purchasing.addLine(po.id, { itemId: 2, qtyReqd: 50 }, actor);
+    expect(res.packaged).toBe(true);
+    const line = (await prisma.ordDetail.findUnique({ where: { id: res.lineId } }))!;
+    expect(line.ordrId).toBe(po.id);
+    expect(line.itemId).toBe(2);
+    expect(Number(line.price)).toBe(3.5); // sourced tier price (operator gave none)
+    expect(line.sortOrder).toBe(2); // appended after the create line
+    const pricing = (await prisma.ordDetailPricing.findFirst({ where: { ordDetailId: res.lineId } }))!;
+    expect(pricing.pkgTypeId).toBe(9);
+    expect(pricing.entityQuantity).toBe(100);
+  });
+
+  it('updates a line and removes a line (deleting its packaging snapshot)', async () => {
+    const supplier = await addEntity(prisma, { id: 200, isSupplier: true });
+    await addItem(prisma, { id: 1, unit: 'lb' });
+    await addItem(prisma, { id: 2, unit: 'lb' });
+    const { purchasing } = services(prisma);
+    const po = await purchasing.create({ supplierId: supplier, lines: [{ itemId: 1, qtyReqd: 10, price: 1 }] }, actor);
+    const added = await purchasing.addLine(po.id, { itemId: 2, qtyReqd: 5, price: 2 }, actor);
+
+    await purchasing.updateLine(po.id, added.lineId, { qtyReqd: 8, price: 2.5 }, actor);
+    let line = (await prisma.ordDetail.findUnique({ where: { id: added.lineId } }))!;
+    expect(line.qtyReqd).toBe(8);
+    expect(Number(line.price)).toBe(2.5);
+
+    await purchasing.removeLine(po.id, added.lineId, actor);
+    line = (await prisma.ordDetail.findUnique({ where: { id: added.lineId } }))!;
+    expect(line).toBeNull();
+    expect(await prisma.ordDetail.count({ where: { ordrId: po.id } })).toBe(1); // back to the create line
+  });
+
+  it('rejects removing the last line and any edit on a non-NST PO', async () => {
+    const supplier = await addEntity(prisma, { id: 200, isSupplier: true });
+    await addItem(prisma, { id: 1, unit: 'lb' });
+    const { purchasing } = services(prisma);
+    const po = await purchasing.create({ supplierId: supplier, lines: [{ itemId: 1, qtyReqd: 10, price: 1 }] }, actor);
+    const onlyLine = (await prisma.ordDetail.findFirst({ where: { ordrId: po.id } }))!;
+
+    await expect(purchasing.removeLine(po.id, onlyLine.id, actor)).rejects.toThrow(/at least one line/);
+
+    await prisma.ordr.update({ where: { id: po.id }, data: { status: 'RLS' } });
+    await expect(purchasing.addLine(po.id, { itemId: 1, qtyReqd: 1 }, actor)).rejects.toThrow(/not-started/);
+    await expect(purchasing.updateLine(po.id, onlyLine.id, { qtyReqd: 5 }, actor)).rejects.toThrow(/not-started/);
+  });
+
+  it('rejects removing a line that already has receipts, and editing a line not on the PO (IDOR)', async () => {
+    const supplier = await addEntity(prisma, { id: 200, isSupplier: true });
+    await addItem(prisma, { id: 1, unit: 'lb' });
+    await addItem(prisma, { id: 2, unit: 'lb' });
+    await addLocation(prisma, { code: 'WH', context: 'WHS' });
+    const { purchasing } = services(prisma);
+    const po = await purchasing.create({ supplierId: supplier, lines: [{ itemId: 1, qtyReqd: 10, price: 1 }] }, actor);
+    const added = await purchasing.addLine(po.id, { itemId: 2, qtyReqd: 5, price: 2 }, actor);
+    const createLine = (await prisma.ordDetail.findFirst({ where: { ordrId: po.id, itemId: 1 } }))!;
+
+    // Receive against the create line, then it can't be removed.
+    await purchasing.receive(po.id, { lines: [{ ordDetailId: createLine.id, lots: [{ qty: 4, manufacturerLot: 'M1' }] }] }, actor);
+    await expect(purchasing.removeLine(po.id, createLine.id, actor)).rejects.toThrow(/has receipts/);
+    // Nor can its ordered qty drop below the received quantity (masks an over-receipt).
+    await expect(purchasing.updateLine(po.id, createLine.id, { qtyReqd: 2 }, actor)).rejects.toThrow(/already received/);
+    // Raising the qty (above received) is fine.
+    await purchasing.updateLine(po.id, createLine.id, { qtyReqd: 20 }, actor);
+    expect((await prisma.ordDetail.findUnique({ where: { id: createLine.id } }))!.qtyReqd).toBe(20);
+    // The other (un-received) line still removes.
+    await purchasing.removeLine(po.id, added.lineId, actor);
+
+    // IDOR: a line on a different PO can't be touched via this one.
+    const other = await purchasing.create({ supplierId: supplier, lines: [{ itemId: 1, qtyReqd: 1, price: 1 }] }, actor);
+    const otherLine = (await prisma.ordDetail.findFirst({ where: { ordrId: other.id } }))!;
+    await expect(purchasing.updateLine(po.id, otherLine.id, { qtyReqd: 2 }, actor)).rejects.toThrow(/not on purchase order/);
+  });
+});

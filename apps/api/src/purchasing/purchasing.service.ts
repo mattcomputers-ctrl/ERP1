@@ -13,7 +13,8 @@ import { SettingsService } from '../settings/settings.service';
 // Operator setting: the location received stock lands in (a LocationCode). Empty
 // -> the engine auto-resolves the install's default stock location.
 const RECEIVING_LOCATION_SETTING = 'inventory.receivingLocation';
-import type { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
+import type { CreatePurchaseOrderDto, CreatePurchaseOrderLineDto } from './dto/create-purchase-order.dto';
+import type { UpdatePurchaseOrderLineDto } from './dto/edit-po-line.dto';
 import type { ReceivePurchaseOrderDto } from './dto/receive-purchase-order.dto';
 import { poLineMath, round3 } from './po-math';
 import { PriceVersionService } from './price-version.service';
@@ -454,6 +455,154 @@ export class PurchasingService {
       );
 
       return { id: orderId, status: 'NST', lines: lineData.length, packagedLines: pricingData.length };
+    });
+  }
+
+  // --- line-level edits on a not-yet-released PO ----------------------------
+
+  /** A PO that exists, is a PO, and is still editable (Not-started). */
+  private async requireNstPo(id: number) {
+    const po = await this.prisma.ordr.findUnique({
+      where: { id },
+      select: { id: true, context: true, status: true, entityId: true },
+    });
+    if (!po || po.context !== PO_CONTEXT) throw new NotFoundException('Purchase order not found');
+    if ((po.status?.trim() || 'NST') !== 'NST') {
+      throw new BadRequestException('Lines can only be edited on a not-started purchase order.');
+    }
+    return po;
+  }
+
+  /**
+   * Add a line to an NST purchase order, sourcing the supplier's packaging +
+   * tiered price from the effective price version (exactly like create), so the
+   * added line renders the same packaging detail. Native id under the alloc lock.
+   */
+  async addLine(id: number, dto: CreatePurchaseOrderLineDto, actor: Actor) {
+    const po = await this.requireNstPo(id);
+    const item = await this.prisma.item.findUnique({
+      where: { id: dto.itemId },
+      select: { id: true, itemCode: true, description: true, unit: true },
+    });
+    if (!item) throw new BadRequestException(`Unknown item id ${dto.itemId}`);
+    const sourcing = po.entityId != null ? await this.priceVersions.lineSourcing(po.entityId, dto.itemId, dto.qtyReqd) : null;
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const odId = ((await tx.ordDetail.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+      const sort = ((await tx.ordDetail.aggregate({ _max: { sortOrder: true }, where: { ordrId: id, context: PO_CONTEXT } }))._max.sortOrder ?? 0) + 1;
+      await tx.ordDetail.create({
+        data: {
+          id: odId,
+          ordrId: id,
+          context: PO_CONTEXT,
+          itemId: dto.itemId,
+          qtyReqd: dto.qtyReqd,
+          price: dto.price ?? sourcing?.price ?? null,
+          entityUnit: dto.unit ?? item.unit ?? null,
+          description: dto.description ?? item.description ?? null,
+          sortOrder: sort,
+          execOrder: sort,
+          isOpen: true,
+        },
+      });
+      if (sourcing) {
+        const pricingId = ((await tx.ordDetailPricing.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+        await tx.ordDetailPricing.create({
+          data: {
+            id: pricingId,
+            ordDetailId: odId,
+            pkgTypeId: sourcing.pkgTypeId,
+            entityItemCode: sourcing.entityItemCode,
+            entityQuantity: sourcing.entityQuantity,
+            entityUnit: sourcing.entityUnit,
+            priceByPackage: sourcing.priceByPackage,
+          },
+        });
+      }
+      await this.audit.record(
+        {
+          action: 'purchaseorder.line.add',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'purchasing.create',
+          summary: `Line added to purchase order #${id}: ${item.itemCode} qty ${dto.qtyReqd}`,
+          changes: [{ tableName: 'OrdDetail', recordId: String(odId), fieldName: 'Item', oldValue: null, newValue: String(dto.itemId) }],
+        },
+        tx,
+      );
+      return { id, lineId: odId, packaged: sourcing != null };
+    });
+  }
+
+  /** Update qty / price / unit / description on a line of an NST PO (IDOR-safe).
+   * A qty edit intentionally does NOT re-source the tier price / packaging
+   * snapshot — the operator sets the price explicitly here. */
+  async updateLine(id: number, lineId: number, dto: UpdatePurchaseOrderLineDto, actor: Actor) {
+    await this.requireNstPo(id);
+    const line = await this.prisma.ordDetail.findUnique({
+      where: { id: lineId },
+      select: { id: true, ordrId: true, qtyReqd: true, qtyUsed: true, price: true, entityUnit: true, description: true },
+    });
+    if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${lineId} is not on purchase order #${id}.`);
+    // An NST PO can already carry receipts (receiving doesn't change status), so a
+    // qty reduction must not drop below what's been received — that would make
+    // backordered (clamped at 0) silently mask an over-receipt.
+    if (dto.qtyReqd !== undefined && dto.qtyReqd < (line.qtyUsed ?? 0)) {
+      throw new BadRequestException(`Cannot set the ordered qty below the ${line.qtyUsed} already received.`);
+    }
+
+    const data: Record<string, unknown> = {};
+    const changes: { tableName: string; recordId: string; fieldName: string; oldValue: string | null; newValue: string | null }[] = [];
+    if (dto.qtyReqd !== undefined) {
+      data.qtyReqd = dto.qtyReqd;
+      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'QtyReqd', oldValue: line.qtyReqd != null ? String(line.qtyReqd) : null, newValue: String(dto.qtyReqd) });
+    }
+    if (dto.price !== undefined) {
+      data.price = dto.price;
+      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Price', oldValue: line.price != null ? String(line.price) : null, newValue: String(dto.price) });
+    }
+    if (dto.unit !== undefined) {
+      data.entityUnit = dto.unit || null;
+      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'EntityUnit', oldValue: line.entityUnit, newValue: dto.unit || null });
+    }
+    if (dto.description !== undefined) {
+      data.description = dto.description || null;
+      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Description', oldValue: line.description, newValue: dto.description || null });
+    }
+    if (!Object.keys(data).length) return { id, lineId, unchanged: true };
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.ordDetail.update({ where: { id: lineId }, data });
+      await this.audit.record(
+        { action: 'purchaseorder.line.update', actorUserId: actor.id, actorLabel: actor.label, program: 'purchasing.create', summary: `Line ${lineId} on purchase order #${id} updated`, changes },
+        tx,
+      );
+      return { id, lineId };
+    });
+  }
+
+  /** Remove a line from an NST PO (and its packaging snapshot). Rejects removing
+   * the last line (a PO needs at least one) or a line that already has receipts. */
+  async removeLine(id: number, lineId: number, actor: Actor) {
+    await this.requireNstPo(id);
+    const line = await this.prisma.ordDetail.findUnique({
+      where: { id: lineId },
+      select: { id: true, ordrId: true, qtyUsed: true },
+    });
+    if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${lineId} is not on purchase order #${id}.`);
+    if ((line.qtyUsed ?? 0) > 0) throw new BadRequestException('Cannot remove a line that already has receipts.');
+    const lineCount = await this.prisma.ordDetail.count({ where: { ordrId: id, context: PO_CONTEXT } });
+    if (lineCount <= 1) throw new BadRequestException('A purchase order must have at least one line.');
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.ordDetailPricing.deleteMany({ where: { ordDetailId: lineId } });
+      await tx.ordDetail.delete({ where: { id: lineId } });
+      await this.audit.record(
+        { action: 'purchaseorder.line.remove', actorUserId: actor.id, actorLabel: actor.label, program: 'purchasing.create', summary: `Line ${lineId} removed from purchase order #${id}`, changes: [{ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'removed', oldValue: 'line', newValue: null }] },
+        tx,
+      );
+      return { id, lineId, removed: true };
     });
   }
 

@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { CurrentUser, type Actor } from '../auth/current-user.decorator';
 import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
 import type { ListQuery } from '../common/list';
-import { CreatePurchaseOrderDto } from './dto/create-purchase-order.dto';
+import { CreatePurchaseOrderDto, CreatePurchaseOrderLineDto } from './dto/create-purchase-order.dto';
+import { UpdatePurchaseOrderLineDto } from './dto/edit-po-line.dto';
 import { ReceivePurchaseOrderDto } from './dto/receive-purchase-order.dto';
 import { PurchasingService } from './purchasing.service';
 
@@ -76,5 +77,30 @@ export class PurchasingController {
   @RequireProgram('purchasing.receive')
   receive(@Param('id', ParseIntPipe) id: number, @Body() dto: ReceivePurchaseOrderDto, @CurrentUser() actor: Actor) {
     return this.purchasing.receive(id, dto, actor);
+  }
+
+  // Line-level edits on a not-started PO. Gated by purchasing.create (the same
+  // right that creates the order's lines).
+  @Post(':id/lines')
+  @RequireProgram('purchasing.create')
+  addLine(@Param('id', ParseIntPipe) id: number, @Body() dto: CreatePurchaseOrderLineDto, @CurrentUser() actor: Actor) {
+    return this.purchasing.addLine(id, dto, actor);
+  }
+
+  @Patch(':id/lines/:lineId')
+  @RequireProgram('purchasing.create')
+  updateLine(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('lineId', ParseIntPipe) lineId: number,
+    @Body() dto: UpdatePurchaseOrderLineDto,
+    @CurrentUser() actor: Actor,
+  ) {
+    return this.purchasing.updateLine(id, lineId, dto, actor);
+  }
+
+  @Delete(':id/lines/:lineId')
+  @RequireProgram('purchasing.create')
+  removeLine(@Param('id', ParseIntPipe) id: number, @Param('lineId', ParseIntPipe) lineId: number, @CurrentUser() actor: Actor) {
+    return this.purchasing.removeLine(id, lineId, actor);
   }
 }
