@@ -20,6 +20,7 @@ import { LotTracking } from './pages/LotTracking';
 import { Orders } from './pages/Orders';
 import { PackingSlipDoc } from './pages/PackingSlipDoc';
 import { PackingSlips } from './pages/PackingSlips';
+import { PriceLists } from './pages/PriceLists';
 import { PurchaseOrderDoc } from './pages/PurchaseOrderDoc';
 import { Purchasing } from './pages/Purchasing';
 import { Recall } from './pages/Recall';
@@ -71,6 +72,7 @@ export function App() {
         <Route path="/cofa/:id/print" element={<CofADoc />} />
         <Route path="/bills" element={<Bills />} />
         <Route path="/bills/:id/print" element={<BillDoc />} />
+        <Route path="/price-lists" element={<PriceLists />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/lot-tracking" element={<LotTracking />} />
         <Route path="/recall" element={<Recall />} />
@@ -98,6 +100,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/invoices', label: 'Invoices' },
     { to: '/packing-slips', label: 'Packing Slips' },
     { to: '/bills', label: 'Supplier Bills' },
+    { to: '/price-lists', label: 'Price Lists' },
     { to: '/certificates', label: 'Certificates' },
     { to: '/inventory', label: 'Inventory' },
     { to: '/lot-tracking', label: 'Lot Tracking' },

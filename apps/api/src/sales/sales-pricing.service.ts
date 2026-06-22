@@ -294,6 +294,19 @@ export class SalesPricingService {
   async addPriceDetail(priceListId: number, priceVersionId: number, dto: CreatePriceDetailDto, actor: Actor) {
     await this.assertVersionOnList(priceListId, priceVersionId);
     await this.assertDetailRefs(dto);
+    // Packaging fields are meaningless without a package type — reject the
+    // inconsistent combination rather than persist a stray unit/qty that the
+    // editor hides but price resolution would still surface.
+    if (dto.pkgTypeId == null && (dto.entityQuantity != null || dto.entityUnit != null || dto.priceByPackage)) {
+      throw new BadRequestException('Packaging fields (qty / unit / price-by-package) require a package type.');
+    }
+    // One priced detail per item per version: a duplicate is a dead, shadowed
+    // row (resolution takes the lowest id), so reject it with a clear message.
+    const dup = await this.prisma.priceDetail.findFirst({
+      where: { priceVersionId, OR: [{ invItemId: dto.invItemId }, { invItemId: null, itemId: dto.invItemId }] },
+      select: { id: true },
+    });
+    if (dup) throw new BadRequestException('That item is already priced in this version.');
 
     return this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;

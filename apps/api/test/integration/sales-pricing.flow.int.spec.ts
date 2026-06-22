@@ -106,6 +106,25 @@ describe('SalesPricingService — editor writes', () => {
     await expect(salesPricing.updatePriceDetail(list.id, d.id, { pkgTypeId: 999_999 }, actor)).rejects.toThrow(/package-type/);
   });
 
+  it('rejects pricing the same item twice in one version', async () => {
+    const { salesPricing } = services(prisma);
+    await addItem(prisma, { id: 1 });
+    const list = await salesPricing.createPriceList({ name: 'L' }, actor);
+    const v = await salesPricing.createPriceVersion(list.id, { effectiveDate: '2025-01-01' }, actor);
+    await salesPricing.addPriceDetail(list.id, v.id, { invItemId: 1, price1: 5 }, actor);
+    await expect(salesPricing.addPriceDetail(list.id, v.id, { invItemId: 1, price1: 6 }, actor)).rejects.toThrow(/already priced/);
+  });
+
+  it('rejects packaging fields without a package type', async () => {
+    const { salesPricing } = services(prisma);
+    await addItem(prisma, { id: 1 });
+    const list = await salesPricing.createPriceList({ name: 'L' }, actor);
+    const v = await salesPricing.createPriceVersion(list.id, { effectiveDate: '2025-01-01' }, actor);
+    await expect(
+      salesPricing.addPriceDetail(list.id, v.id, { invItemId: 1, price1: 5, entityUnit: 'KG' }, actor),
+    ).rejects.toThrow(/require a package type/);
+  });
+
   it('treats an empty update as a no-op (returns unchanged, writes no audit row)', async () => {
     const { salesPricing } = services(prisma);
     await addItem(prisma, { id: 1 });
