@@ -4,6 +4,7 @@ import { ESignatureService } from '../../src/audit/esignature.service';
 import { AuthService } from '../../src/auth/auth.service';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import { PermissionService } from '../../src/auth/permission.service';
+import { GenealogyService } from '../../src/genealogy/genealogy.service';
 import { ValuationService } from '../../src/inventory/valuation.service';
 import { OrdersService } from '../../src/orders/orders.service';
 import type { PrismaService } from '../../src/prisma/prisma.service';
@@ -80,6 +81,7 @@ export function services(prisma: PrismaClient) {
     orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation),
     purchasing: new PurchasingService(p, settings, audit, party, valuation, priceVersions),
     shipping: new ShippingService(p, audit, party, salesPricing),
+    genealogy: new GenealogyService(p, party),
   };
 }
 
@@ -123,7 +125,7 @@ export async function addItem(
 
 export async function addLot(
   prisma: PrismaClient,
-  data: { lot: string; itemId?: number | null; ordDetailId?: number | null; unitCost?: number | null; receivedDate?: Date | null; manfDate?: Date | null; supLot?: string | null },
+  data: { lot: string; itemId?: number | null; ordDetailId?: number | null; unitCost?: number | null; receivedDate?: Date | null; manfDate?: Date | null; supLot?: string | null; manfLot?: string | null },
 ): Promise<string> {
   await prisma.lot.create({
     data: {
@@ -135,6 +137,7 @@ export async function addLot(
       receivedDate: data.receivedDate ?? null,
       manfDate: data.manfDate ?? null,
       supLot: data.supLot ?? null,
+      manfLot: data.manfLot ?? null,
     },
   });
   return data.lot;
@@ -266,6 +269,38 @@ export async function addPriceDetail(
     },
   });
   return data.id;
+}
+
+export async function addShipmentLot(
+  prisma: PrismaClient,
+  data: { lot: string; ordrId: number; itemId?: number | null; qty?: number | null; unit?: string | null; shippedAt?: Date | null },
+): Promise<void> {
+  await prisma.shipmentLot.create({
+    data: {
+      lot: data.lot,
+      ordrId: data.ordrId,
+      itemId: data.itemId ?? null,
+      qty: data.qty ?? null,
+      unit: data.unit ?? null,
+      shippedAt: data.shippedAt ?? new Date('2026-01-01T00:00:00Z'),
+    },
+  });
+}
+
+export async function addOrdDetailCommit(
+  prisma: PrismaClient,
+  data: { ordDetailId: number; srcOrdDetailId: number; qty?: number | null },
+): Promise<void> {
+  await prisma.ordDetailCommit.create({
+    data: { ordDetailId: data.ordDetailId, srcOrdDetailId: data.srcOrdDetailId, qty: data.qty ?? null },
+  });
+}
+
+export async function addLotIngredient(
+  prisma: PrismaClient,
+  data: { lot: string; itemId: number; percent?: number | null },
+): Promise<void> {
+  await prisma.lotIngredient.create({ data: { lot: data.lot, itemId: data.itemId, percent: data.percent ?? null } });
 }
 
 export async function addOrdDetailPricing(
