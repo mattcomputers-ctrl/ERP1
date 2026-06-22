@@ -82,6 +82,26 @@ describe('ShippingService.create (native SH order)', () => {
     expect(audit.summary).toContain('35.00');
   });
 
+  it('sources a line price from the customer price list (tiered) when no explicit price is given; an override wins', async () => {
+    const { shipping, salesPricing } = services(prisma);
+    const customer = await addEntity(prisma, { id: 100, code: 'CUST', isBillTo: true });
+    await addItem(prisma, { id: 1, code: 'WIDGET', unit: 'ea' });
+    // A price list with a quantity-break tier, with the customer assigned to it.
+    const list = await salesPricing.createPriceList({ name: 'Retail' }, actor);
+    const v = await salesPricing.createPriceVersion(list.id, { effectiveDate: '2020-01-01' }, actor);
+    await salesPricing.addPriceDetail(list.id, v.id, { invItemId: 1, minOrder1: 1, price1: 10, minOrder2: 100, price2: 7 }, actor);
+    await salesPricing.assignCustomer(list.id, { customerId: customer }, actor);
+
+    // No explicit price; qty 250 → the $7 tier from the customer's effective list.
+    const res = await shipping.create({ billToId: customer, lines: [{ itemId: 1, qtyReqd: 250 }] }, actor);
+    expect(res.sourcedLines).toBe(1);
+    expect(Number((await prisma.ordDetail.findFirst({ where: { ordrId: res.id } }))!.price)).toBe(7);
+
+    // An explicit operator price overrides the list price.
+    const res2 = await shipping.create({ billToId: customer, lines: [{ itemId: 1, qtyReqd: 250, price: 5 }] }, actor);
+    expect(Number((await prisma.ordDetail.findFirst({ where: { ordrId: res2.id } }))!.price)).toBe(5);
+  });
+
   it('honors a separate ship-to and validates its flag', async () => {
     const customer = await addEntity(prisma, { id: 100, isBillTo: true });
     const shipTo = await addEntity(prisma, { id: 101, isShipTo: true });

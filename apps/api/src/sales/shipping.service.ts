@@ -5,6 +5,7 @@ import type { Actor } from '../auth/current-user.decorator';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from './party.service';
+import { SalesPricingService } from './sales-pricing.service';
 import type { CreateShippingOrderDto } from './dto/create-shipping-order.dto';
 
 // Shipping orders are Ordr rows with Context='SH'. Unlike PO orders (Entity =
@@ -18,6 +19,7 @@ export class ShippingService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly party: PartyService,
+    private readonly salesPricing: SalesPricingService,
   ) {}
 
   /**
@@ -79,6 +81,14 @@ export class ShippingService {
     }
 
     const ownerEntityId = await this.resolveOwnerEntityId();
+
+    // Source each line's sale price from the customer's price list (effective
+    // version), unless the operator supplied an explicit price. Read-only lookups
+    // before the transaction; null when the customer has no list / no detail.
+    const sourced = await Promise.all(
+      dto.lines.map((l) => this.salesPricing.priceForCustomer(billTo.id, l.itemId, l.qtyReqd)),
+    );
+
     const at = new Date();
 
     return this.prisma.$transaction(async (tx) => {
@@ -119,7 +129,8 @@ export class ShippingService {
           context: SH_CONTEXT,
           itemId: l.itemId,
           qtyReqd: l.qtyReqd,
-          price: l.price ?? null,
+          // Operator override wins; else the customer's price-list tier price.
+          price: l.price ?? sourced[i]?.price ?? null,
           entityUnit: l.unit ?? item.unit ?? null,
           description: l.description ?? item.description ?? null,
           sortOrder: i + 1,
@@ -129,7 +140,7 @@ export class ShippingService {
       });
       await tx.ordDetail.createMany({ data: lineData });
 
-      const subtotal = dto.lines.reduce((s, l) => s + l.qtyReqd * (l.price ?? 0), 0);
+      const subtotal = dto.lines.reduce((s, l, i) => s + l.qtyReqd * (l.price ?? sourced[i]?.price ?? 0), 0);
       await this.audit.record(
         {
           action: 'shippingorder.create',
@@ -148,8 +159,16 @@ export class ShippingService {
         tx,
       );
 
-      return { id: orderId, status: 'NST', lines: lineData.length };
+      return { id: orderId, status: 'NST', lines: lineData.length, sourcedLines: sourced.filter((s) => s?.price != null).length };
     });
+  }
+
+  /** The customer's sale price for an item, from their price list's effective
+   * version — drives the create form's price pre-fill. Null when none applies. */
+  async salePrice(customerId: number, itemId: number, qty: number) {
+    const s = await this.salesPricing.priceForCustomer(customerId, itemId, qty);
+    if (!s) return null;
+    return { price: s.price, priceByPackage: s.priceByPackage, entityQuantity: s.entityQuantity, entityUnit: s.entityUnit, pkgTypeCode: s.pkgTypeCode };
   }
 
   // Our own org "Owner" entity — stamped on every order (carries our address).

@@ -69,16 +69,17 @@ export function services(prisma: PrismaClient) {
   const esign = new ESignatureService(p);
   const valuation = new ValuationService(p, settings);
   const priceVersions = new PriceVersionService(p);
+  const salesPricing = new SalesPricingService(p, audit, party);
   return {
     settings,
     audit,
     party,
     valuation,
     priceVersions,
+    salesPricing,
     orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation),
     purchasing: new PurchasingService(p, settings, audit, party, valuation, priceVersions),
-    shipping: new ShippingService(p, audit, party),
-    salesPricing: new SalesPricingService(p, audit, party),
+    shipping: new ShippingService(p, audit, party, salesPricing),
   };
 }
 

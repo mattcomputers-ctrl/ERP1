@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useRef, useState } from 'react';
 import { DataGrid, type GridColumn } from '../components/DataGrid';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
@@ -470,9 +470,32 @@ function CreateShippingOrder({ onDone }: { onDone: (id: number) => void }) {
     enabled: itemSearch.trim().length >= 1,
   });
 
-  const addItem = (it: ShItemOption) => {
-    setLines((p) => (p.some((l) => l.itemId === it.id) ? p : [...p, { itemId: it.id, itemCode: it.itemCode, description: it.description, qty: '1', price: it.price != null ? String(it.price) : '', unit: it.unit ?? '' }]));
+  // Changing the customer drops lines — sourced prices are customer-specific
+  // (else customer A's list price persists on customer B's order). The ref guards
+  // the in-flight price fetch against a stale customer.
+  const customerRef = useRef<number | null>(null);
+  const selectCustomer = (c: ShParty | null) => { customerRef.current = c?.id ?? null; setCustomer(c); setLines([]); setCustSearch(''); };
+
+  const addItem = async (it: ShItemOption) => {
     setItemSearch('');
+    if (lines.some((l) => l.itemId === it.id)) return;
+    const custId = customer?.id ?? null;
+    // Prefer the customer's price-list price; fall back to the item's sale price.
+    let price = it.price != null ? String(it.price) : '';
+    if (custId != null) {
+      try {
+        const s = await api.get<{ price: number | null } | null>(`/shipping-orders/price?customerId=${custId}&itemId=${it.id}&qty=1`);
+        if (s && s.price != null) price = String(s.price);
+      } catch {
+        /* no price list for this customer/item — keep the sale-price fallback */
+      }
+    }
+    if (customerRef.current !== custId) return; // customer changed mid-fetch
+    setLines((prev) =>
+      prev.some((l) => l.itemId === it.id)
+        ? prev
+        : [...prev, { itemId: it.id, itemCode: it.itemCode, description: it.description, qty: '1', price, unit: it.unit ?? '' }],
+    );
   };
   const updateLine = (i: number, patch: Partial<ShLine>) => setLines((p) => p.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
   const removeLine = (i: number) => setLines((p) => p.filter((_, idx) => idx !== i));
@@ -502,7 +525,7 @@ function CreateShippingOrder({ onDone }: { onDone: (id: number) => void }) {
             {customer ? (
               <div className="flex items-center gap-2">
                 <span className="rounded-md bg-indigo-50 px-2 py-1 text-sm font-medium text-indigo-700">{customer.name ?? customer.entityCode}</span>
-                <button type="button" onClick={() => { setCustomer(null); setCustSearch(''); }} className="text-sm text-slate-500 hover:underline">change</button>
+                <button type="button" onClick={() => selectCustomer(null)} className="text-sm text-slate-500 hover:underline">change</button>
               </div>
             ) : (
               <Input value={custSearch} onChange={(e) => setCustSearch(e.target.value)} placeholder="Search customer by name or code…" />
@@ -539,7 +562,7 @@ function CreateShippingOrder({ onDone }: { onDone: (id: number) => void }) {
             {customers.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
             {!customers.isLoading && customers.data?.rows.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">No customers match.</div>}
             {customers.data?.rows.map((c) => (
-              <button type="button" key={c.id} onClick={() => { setCustomer(c); setCustSearch(''); }} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
+              <button type="button" key={c.id} onClick={() => selectCustomer(c)} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
                 <span>{c.name ?? c.entityCode}</span>
                 <span className="text-xs text-slate-400">{c.entityCode}</span>
               </button>

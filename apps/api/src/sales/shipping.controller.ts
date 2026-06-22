@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
 import { CurrentUser, type Actor } from '../auth/current-user.decorator';
 import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
@@ -34,5 +34,15 @@ export class ShippingController {
   @Get('item-options')
   itemOptions(@Query('q') q?: string) {
     return this.shipping.itemOptions(q);
+  }
+
+  // Sale price for a line from the customer's price list (drives the form pre-fill).
+  @Get('price')
+  salePrice(
+    @Query('customerId', ParseIntPipe) customerId: number,
+    @Query('itemId', ParseIntPipe) itemId: number,
+    @Query('qty') qty?: string,
+  ) {
+    return this.shipping.salePrice(customerId, itemId, qty ? Number(qty) : 1);
   }
 }
