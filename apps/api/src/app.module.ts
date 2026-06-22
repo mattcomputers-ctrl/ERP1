@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ApprovalModule } from './approval/approval.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { GenealogyModule } from './genealogy/genealogy.module';
@@ -23,6 +24,7 @@ import { UsersModule } from './users/users.module';
     AuditModule,
     AuthModule,
     UsersModule,
+    ApprovalModule,
     HealthModule,
     MasterDataModule,
     ImportModule,

@@ -15,6 +15,7 @@ const BASELINE_PROGRAMS = [
   { key: 'dashboard', name: 'Dashboard', folder: 'File' },
   { key: 'admin.users', name: 'User Administration', folder: 'Administration' },
   { key: 'admin.roles', name: 'Role Administration', folder: 'Administration' },
+  { key: 'admin.approvalPolicies', name: 'Approval Policies', folder: 'Administration' },
   { key: 'admin.securedItems', name: 'Secured Items', folder: 'Administration' },
   { key: 'admin.audit', name: 'Audit Log', folder: 'Administration' },
   { key: 'admin.sessions', name: 'Active Sessions', folder: 'Administration' },
@@ -72,6 +73,31 @@ const SECURED_ITEMS = [
     requireWitness: false,
   },
 ];
+
+// Starter user groups (non-system roles) so the approval-policy editor has real
+// groups to configure out of the box. Created if absent; never reset on re-seed.
+// The operator can rename, re-scope (programs), or remove these later. ADMIN is
+// seeded separately (system role).
+const STARTER_ROLES = [
+  { code: 'QA_MANAGER', name: 'QA Manager', description: 'Quality approvals (dispositions, releases).' },
+  { code: 'SUPERVISOR', name: 'Supervisor', description: 'Production supervisor — approves orders & edits.' },
+  { code: 'OPERATOR', name: 'Operator', description: 'Shop-floor operator — requests approval, does not approve.' },
+];
+
+// Default per-group approval policy (the six capabilities of the approval engine).
+// Seeded create-only (operator tuning survives re-seed). A role WITHOUT a row
+// falls back to the service default (request-only). Not yet enforced on any
+// specific action — that trigger is wired separately.
+const APPROVAL_POLICIES: Record<
+  string,
+  { canRequestApproval: boolean; canApprove: boolean; canApproveUpdate: boolean; canApproveChange: boolean; canOverride: boolean; noApprovalRequired: boolean }
+> = {
+  // Administrator is never blocked by an approval gate.
+  ADMIN: { canRequestApproval: true, canApprove: true, canApproveUpdate: true, canApproveChange: true, canOverride: true, noApprovalRequired: true },
+  QA_MANAGER: { canRequestApproval: true, canApprove: true, canApproveUpdate: true, canApproveChange: true, canOverride: true, noApprovalRequired: false },
+  SUPERVISOR: { canRequestApproval: true, canApprove: true, canApproveUpdate: true, canApproveChange: true, canOverride: false, noApprovalRequired: false },
+  OPERATOR: { canRequestApproval: true, canApprove: false, canApproveUpdate: false, canApproveChange: false, canOverride: false, noApprovalRequired: false },
+};
 
 // Default application settings (seeded only if absent — never overwrite an
 // operator-changed value). Foundation for the Configuration module.
@@ -138,6 +164,28 @@ async function main() {
       where: { key: s.key },
       update: { description: s.description },
       create: { key: s.key, value: s.value, description: s.description },
+    });
+  }
+
+  // Starter user groups — create if absent; never reset name/description on
+  // re-seed (operator may have re-purposed them). Non-system so they're editable.
+  for (const r of STARTER_ROLES) {
+    await prisma.role.upsert({
+      where: { code: r.code },
+      update: {},
+      create: { code: r.code, name: r.name, description: r.description, isSystem: false },
+    });
+  }
+
+  // Per-group approval policies — create-only so operator tuning survives upgrades.
+  // (ADMIN was upserted above; the starter roles just above.)
+  for (const [code, policy] of Object.entries(APPROVAL_POLICIES)) {
+    const role = await prisma.role.findUnique({ where: { code }, select: { id: true } });
+    if (!role) continue;
+    await prisma.roleApprovalPolicy.upsert({
+      where: { roleId: role.id },
+      update: {},
+      create: { roleId: role.id, ...policy },
     });
   }
 

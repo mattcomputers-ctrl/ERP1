@@ -67,6 +67,7 @@ model Role {
   securedItems       RoleSecuredItem[]
   assignableParents  AssignableRole[]  @relation("ParentRole")
   assignableChildren AssignableRole[]  @relation("ChildRole")
+  approvalPolicy     RoleApprovalPolicy?
 
   @@map("roles")
 }
@@ -114,6 +115,28 @@ model RoleProgram {
 
   @@id([roleId, programId])
   @@map("role_programs")
+}
+
+// Per-user-group (Role) approval policy — which approval capabilities a group
+// has. Foundation for the approval / workflow engine: policies are configured
+// per group here; enforcement on a specific action (the chosen workflow trigger)
+// is wired separately. 1:1 with Role (a role without a row uses the defaults in
+// approval-policy.service). The six capabilities mirror the legacy approval model
+// (Approval / ApprovalDetail / RoleApprovalDetail) collapsed onto the role.
+model RoleApprovalPolicy {
+  id                 String   @id @default(uuid())
+  roleId             String   @unique
+  canRequestApproval Boolean  @default(true) // may submit an action for approval
+  canApprove         Boolean  @default(false) // may approve a pending request
+  canApproveUpdate   Boolean  @default(false) // may approve an update / edit
+  canApproveChange   Boolean  @default(false) // may approve a change (status / disposition)
+  canOverride        Boolean  @default(false) // supervisor override / approve-on-behalf
+  noApprovalRequired Boolean  @default(false) // this group's own actions are exempt
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  role               Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@map("role_approval_policy")
 }
 
 // Secured items = granular field/table/action/event controls with response

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { type Me, useLogout, useMe } from './lib/auth';
+import { ApprovalPolicies } from './pages/ApprovalPolicies';
 import { Audit } from './pages/Audit';
 import { BatchSheet } from './pages/BatchSheet';
 import { BillDoc } from './pages/BillDoc';
@@ -79,6 +80,7 @@ export function App() {
         <Route path="/lot-tracking" element={<LotTracking />} />
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
+        <Route path="/approval-policies" element={<ApprovalPolicies />} />
         <Route path="/audit" element={<Audit />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/change-password" element={<ChangePassword />} />
@@ -109,6 +111,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/lot-tracking', label: 'Lot Tracking' },
     { to: '/recall', label: 'Lot Trace' },
     { to: '/users', label: 'Users' },
+    { to: '/approval-policies', label: 'Approvals' },
     { to: '/audit', label: 'Audit' },
     { to: '/import', label: 'Import' },
   ];
