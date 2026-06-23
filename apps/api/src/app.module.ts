@@ -13,6 +13,7 @@ import { OrdersModule } from './orders/orders.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { PurchasingModule } from './purchasing/purchasing.module';
 import { RolesModule } from './roles/roles.module';
+import { SecuredItemsModule } from './secured-items/secured-items.module';
 import { QaModule } from './qa/qa.module';
 import { SalesModule } from './sales/sales.module';
 import { SettingsModule } from './settings/settings.module';
@@ -26,6 +27,7 @@ import { UsersModule } from './users/users.module';
     AuthModule,
     UsersModule,
     RolesModule,
+    SecuredItemsModule,
     ApprovalModule,
     HealthModule,
     MasterDataModule,

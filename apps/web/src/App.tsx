@@ -29,6 +29,7 @@ import { Purchasing } from './pages/Purchasing';
 import { Recall } from './pages/Recall';
 import { Recipes } from './pages/Recipes';
 import { Roles } from './pages/Roles';
+import { SecuredItems } from './pages/SecuredItems';
 import { Units } from './pages/Units';
 import { Users } from './pages/Users';
 
@@ -83,6 +84,7 @@ export function App() {
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
         <Route path="/roles" element={<Roles />} />
+        <Route path="/secured-items" element={<SecuredItems />} />
         <Route path="/approval-policies" element={<ApprovalPolicies />} />
         <Route path="/disposition-approvals" element={<DispositionApprovals />} />
         <Route path="/audit" element={<Audit />} />
@@ -117,6 +119,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/disposition-approvals', label: 'QA Approvals' },
     { to: '/users', label: 'Users' },
     { to: '/roles', label: 'Roles' },
+    { to: '/secured-items', label: 'Secured Items' },
     { to: '/approval-policies', label: 'Approval Policies' },
     { to: '/audit', label: 'Audit' },
     { to: '/import', label: 'Import' },
