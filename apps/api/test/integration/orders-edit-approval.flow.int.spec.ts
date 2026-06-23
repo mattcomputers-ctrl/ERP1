@@ -78,6 +78,20 @@ describe('Order-edit approval workflow', () => {
     expect((await prisma.approvalRequest.findFirst({ where: { kind: 'order.edit' } }))!.state).toBe('REJECTED');
   });
 
+  it('refuses to approve an edit once the order has left Not-started (NST re-asserted at enact time)', async () => {
+    const { orders } = services(prisma);
+    const requester = await userWithPolicy('req@test.local', { canRequestApproval: true });
+    const approver = await userWithPolicy('upd@test.local', { canApproveUpdate: true });
+    await addOrder(prisma, { id: 502, context: 'MFBA', status: 'NST' });
+    const r = (await orders.edit(502, { batchSize: 7 }, requester)) as { requestId: number };
+
+    // The order is released after the request is raised but before it's approved.
+    await prisma.ordr.update({ where: { id: 502 }, data: { status: 'RLS' } });
+    await expect(orders.approveEdit(r.requestId, approver)).rejects.toThrow(/Not started/i);
+    // The request stays PENDING (the CAS-decide rolls back with the refused enact).
+    expect((await prisma.approvalRequest.findFirst({ where: { kind: 'order.edit' } }))!.state).toBe('PENDING');
+  });
+
   it('forbids approving your own request (separation of duties)', async () => {
     const { orders } = services(prisma);
     const lead = await userWithPolicy('lead@test.local', { canRequestApproval: true, canApproveUpdate: true });

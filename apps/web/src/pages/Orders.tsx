@@ -658,12 +658,14 @@ function EditOrder({ order, onDone }: { order: OrderFull; onDone: () => void }) 
   const [reference, setReference] = useState(order.reference ?? '');
   const m = useMutation({
     mutationFn: () =>
-      api.post(`/orders/${order.id}/edit`, {
+      api.post<{ id: number; pending?: boolean; requestId?: number }>(`/orders/${order.id}/edit`, {
         batchSize: batchSize ? Number(batchSize) : undefined,
         dateRequired: dateRequired || undefined,
         reference: reference !== (order.reference ?? '') ? reference : undefined,
       }),
-    onSuccess: () => { setOpen(false); onDone(); },
+    // A request-only group's edit comes back pending (awaiting approval) — keep
+    // the form open to show that banner; an enacted edit closes it.
+    onSuccess: (res) => { if (!res.pending) setOpen(false); onDone(); },
   });
 
   if (!open) {
@@ -684,6 +686,11 @@ function EditOrder({ order, onDone }: { order: OrderFull; onDone: () => void }) 
           <button type="button" onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
           {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
         </div>
+        {m.data?.pending && (
+          <p className="sm:col-span-3 text-sm text-amber-700">
+            Submitted for approval (request #{m.data.requestId}) — your group may request an edit; it takes effect once a qualified approver approves it.
+          </p>
+        )}
       </form>
     </Card>
   );

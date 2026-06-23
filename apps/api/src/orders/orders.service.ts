@@ -543,7 +543,9 @@ export class OrdersService {
    * fields. Only NST orders are editable; atomic + audited.
    */
   async edit(id: number, dto: EditOrderDto, actor: Actor) {
-    const order = await this.requireTransition(id, 'NST', 'edit');
+    // Fast-fail if the order isn't editable; applyEditTx re-asserts NST under a
+    // row lock at enact time (the authoritative, atomic check).
+    await this.requireTransition(id, 'NST', 'edit');
     // Approval policy: a group that can approve updates enacts the edit directly;
     // a request-only group submits a blocking request for a qualified approver.
     const caps = await this.approvalPolicy.effectiveForUser(actor.id);
@@ -560,7 +562,7 @@ export class OrdersService {
     }
 
     if (canEnact) {
-      return this.prisma.$transaction((tx) => this.applyEditTx(tx, order, dto, actor));
+      return this.prisma.$transaction((tx) => this.applyEditTx(tx, id, dto, actor));
     }
 
     // Request path: capture the requested edit; the order is left unchanged until approved.
@@ -595,14 +597,32 @@ export class OrdersService {
   }
 
   /** Apply an order edit (rescale lines from their StdQty base + header fields)
-   * within a transaction; audited. Shared by direct-enact and approve. */
+   * within a transaction; audited. Shared by direct-enact and approve.
+   *
+   * Re-reads and LOCKS the order row inside the transaction (SELECT ... FOR
+   * UPDATE) and re-asserts Not-started before writing, so the NST precondition
+   * and the writes are atomic. The callers' out-of-tx requireTransition is only a
+   * fast-fail; without this lock a concurrent release/complete could slip the
+   * order out of NST between that check and the rescale, corrupting quantities
+   * that release/consume have already acted on. A concurrent release()'s
+   * tx.ordr.update blocks on this same row lock until we commit or roll back. */
   private async applyEditTx(
     tx: Prisma.TransactionClient,
-    order: { id: number; context: string | null; actualBatchSize: number | null; dateRequired: Date | null; reference: string | null },
+    orderId: number,
     dto: EditOrderDto,
     actor: Actor,
   ) {
-    const id = order.id;
+    const id = orderId;
+    // The Ordr PK column is itself named "Ordr" (legacy schema); lock that row.
+    await tx.$queryRaw`SELECT "Ordr" FROM "Ordr" WHERE "Ordr" = ${orderId} FOR UPDATE`;
+    const order = await tx.ordr.findUnique({
+      where: { id: orderId },
+      select: { id: true, context: true, status: true, actualBatchSize: true, dateRequired: true, reference: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (curStatus(order.status) !== 'NST') {
+      throw new BadRequestException(`Cannot edit order #${orderId}: it is ${label(order.status)} (must be Not started).`);
+    }
     const isBatch = order.context === 'MFBA';
     let dateRequired: Date | null | undefined;
     if (dto.dateRequired !== undefined) {
@@ -650,11 +670,12 @@ export class OrdersService {
       throw new ForbiddenException('Your group is not permitted to approve order edits.');
     }
     if (req.requestedById === actor.id) throw new BadRequestException('You cannot approve your own edit request.');
-    const order = await this.requireTransition(Number(req.targetId), 'NST', 'edit');
+    // Fast-fail; applyEditTx re-asserts NST under a row lock inside the tx.
+    await this.requireTransition(Number(req.targetId), 'NST', 'edit');
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
       await this.approvalRequests.decide(tx, req.id, 'APPROVED', actor, at);
-      const res = await this.applyEditTx(tx, order, { batchSize: req.payload.batchSize, dateRequired: req.payload.dateRequired, reference: req.payload.reference, reason: `approved request #${requestId}` }, actor);
+      const res = await this.applyEditTx(tx, Number(req.targetId), { batchSize: req.payload.batchSize, dateRequired: req.payload.dateRequired, reference: req.payload.reference, reason: `approved request #${requestId}` }, actor);
       return { ...res, requestId, enacted: true };
     });
   }
