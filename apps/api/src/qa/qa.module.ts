@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ApprovalModule } from '../approval/approval.module';
 import { AuthModule } from '../auth/auth.module';
 import { SettingsModule } from '../settings/settings.module';
 import { CofaController } from './cofa.controller';
@@ -7,7 +8,7 @@ import { ReleasesController } from './releases.controller';
 import { ReleasesService } from './releases.service';
 
 @Module({
-  imports: [AuthModule, SettingsModule],
+  imports: [AuthModule, SettingsModule, ApprovalModule],
   controllers: [CofaController, ReleasesController],
   providers: [CofaService, ReleasesService],
 })

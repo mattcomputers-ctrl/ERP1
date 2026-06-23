@@ -1000,6 +1000,36 @@ model ShipmentLot {
   @@map("shipment_lot")
 }
 
+// Pending QA-disposition approval request (ERP1, not a legacy mirror — clean
+// snake_case; the legacy Workflow/WorkflowDetail tables are 0-row/unused). The
+// approval engine's first enforcement: when a user whose group may only REQUEST
+// approval dispositions a lot, the change is captured here as PENDING (the Release
+// is NOT changed) until a qualified approver (a group with Approve / Approve change
+// / Override) approves it (enacting the Release change) or rejects it. Holds the
+// requested disposition snapshot + the request/decision actors. Never imported.
+model DispositionApproval {
+  id               BigInt    @id @default(autoincrement())
+  releaseId        Int       @map("release")
+  state            String    @default("PENDING") @map("state") @db.VarChar(12) // PENDING / APPROVED / REJECTED
+  reqStatus        String    @map("req_status") @db.VarChar(8)
+  reqGrade         String?   @map("req_grade") @db.VarChar(6)
+  reqPurity        Float?    @map("req_purity")
+  reqExpiry        DateTime? @map("req_expiry")
+  reqReason        String?   @map("req_reason")
+  requestedById    String    @map("requested_by")
+  requestedByLabel String?   @map("requested_by_label")
+  requestedAt      DateTime  @map("requested_at")
+  decidedById      String?   @map("decided_by")
+  decidedByLabel   String?   @map("decided_by_label")
+  decidedAt        DateTime? @map("decided_at")
+  decisionReason   String?   @map("decision_reason")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@index([state])
+  @@index([releaseId])
+  @@map("disposition_approval")
+}
+
 // QA disposition of a sublot (mirrors legacy). The release gate: Status
 // (Approved/Hold/Rejected), Grade, Purity, ExpiryDate, ReleasedBy. Linked from
 // Sublot.releaseId; surfaced as the QA status on the Lot Trace.

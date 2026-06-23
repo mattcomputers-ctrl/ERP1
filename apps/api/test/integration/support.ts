@@ -1,6 +1,7 @@
 import { PrismaClient } from '@erp1/db';
 import { ApprovalPolicyService } from '../../src/approval/approval-policy.service';
 import { AuditService } from '../../src/audit/audit.service';
+import { ReleasesService } from '../../src/qa/releases.service';
 import { ESignatureService } from '../../src/audit/esignature.service';
 import { AuthService } from '../../src/auth/auth.service';
 import type { Actor } from '../../src/auth/current-user.decorator';
@@ -73,6 +74,7 @@ export function services(prisma: PrismaClient) {
   const valuation = new ValuationService(p, settings);
   const priceVersions = new PriceVersionService(p);
   const salesPricing = new SalesPricingService(p, audit, party);
+  const approvalPolicy = new ApprovalPolicyService(p, audit);
   return {
     settings,
     audit,
@@ -85,7 +87,8 @@ export function services(prisma: PrismaClient) {
     shipping: new ShippingService(p, audit, party, salesPricing),
     genealogy: new GenealogyService(p, party),
     miscReceipt: new MiscReceiptService(p, audit, valuation),
-    approvalPolicy: new ApprovalPolicyService(p, audit),
+    approvalPolicy,
+    releases: new ReleasesService(p, audit, esign, auth, permissions, approvalPolicy),
   };
 }
 

@@ -105,6 +105,33 @@ export class ApprovalPolicyService {
     });
   }
 
+  /**
+   * A user's effective approval capabilities = the OR-combination of their roles'
+   * effective policies (a role with no stored row contributes the request-only
+   * default). A user with no roles holds no capabilities. This is the bridge the
+   * enforcement points consult to decide whether an actor may enact, must request,
+   * or may approve a gated action.
+   */
+  async effectiveForUser(userId: string): Promise<ApprovalPolicy> {
+    const roles = await this.prisma.role.findMany({
+      where: { users: { some: { userId } } },
+      include: { approvalPolicy: true },
+    });
+    const out: ApprovalPolicy = {
+      canRequestApproval: false,
+      canApprove: false,
+      canApproveUpdate: false,
+      canApproveChange: false,
+      canOverride: false,
+      noApprovalRequired: false,
+    };
+    for (const r of roles) {
+      const p = this.effective(r.approvalPolicy);
+      for (const cap of APPROVAL_CAPABILITIES) if (p[cap]) out[cap] = true;
+    }
+    return out;
+  }
+
   /** Resolve a stored row (or its absence) to the full effective policy. */
   private effective(stored: Partial<ApprovalPolicy> | null): ApprovalPolicy {
     if (!stored) return { ...DEFAULT_POLICY };

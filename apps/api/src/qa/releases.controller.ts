@@ -1,7 +1,8 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
 import { CurrentUser, type Actor } from '../auth/current-user.decorator';
 import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
+import { ApproveDispositionDto, RejectDispositionDto } from './dto/approve-disposition.dto';
 import { DispositionDto } from './dto/disposition.dto';
 import { EnterResultsDto } from './dto/enter-results.dto';
 import { ReleasesService } from './releases.service';
@@ -16,6 +17,25 @@ export class ReleasesController {
   @Get('disposition-requirement')
   requirement(@CurrentUser() actor: Actor) {
     return this.releases.dispositionRequirement(actor.id);
+  }
+
+  // --- disposition approval workflow (static paths declared before :id) ---
+
+  // The pending-approvals queue (or APPROVED/REJECTED history via ?state=).
+  @Get('approvals')
+  approvals(@Query('state') state?: string) {
+    return this.releases.listApprovals(state ? state.toUpperCase() : 'PENDING');
+  }
+
+  // Approve / reject a pending disposition request (capability-gated in the service).
+  @Post('approvals/:approvalId/approve')
+  approve(@Param('approvalId', ParseIntPipe) approvalId: number, @Body() dto: ApproveDispositionDto, @CurrentUser() actor: Actor) {
+    return this.releases.approveDisposition(approvalId, dto, actor);
+  }
+
+  @Post('approvals/:approvalId/reject')
+  reject(@Param('approvalId', ParseIntPipe) approvalId: number, @Body() dto: RejectDispositionDto, @CurrentUser() actor: Actor) {
+    return this.releases.rejectDisposition(approvalId, dto, actor);
   }
 
   @Post(':id/disposition')
