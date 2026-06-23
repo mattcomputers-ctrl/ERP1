@@ -14,6 +14,7 @@ import type { PrismaService } from '../../src/prisma/prisma.service';
 import { PriceVersionService } from '../../src/purchasing/price-version.service';
 import { PurchasingService } from '../../src/purchasing/purchasing.service';
 import { RolesService } from '../../src/roles/roles.service';
+import { UsersService } from '../../src/users/users.service';
 import { PartyService } from '../../src/sales/party.service';
 import { SalesPricingService } from '../../src/sales/sales-pricing.service';
 import { ShippingService } from '../../src/sales/shipping.service';
@@ -91,6 +92,7 @@ export function services(prisma: PrismaClient) {
     approvalPolicy,
     releases: new ReleasesService(p, audit, esign, auth, permissions, approvalPolicy),
     roles: new RolesService(p, audit),
+    users: new UsersService(p, auth, audit),
   };
 }
 

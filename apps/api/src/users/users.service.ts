@@ -4,6 +4,7 @@ import type { Actor } from '../auth/current-user.decorator';
 import { AuthService } from '../auth/auth.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateUserDto } from './dto/create-user.dto';
+import type { SetUserRolesDto } from './dto/set-roles.dto';
 import type { UserStatusValue } from './dto/set-status.dto';
 
 @Injectable()
@@ -75,6 +76,70 @@ export class UsersService {
     });
 
     return { id: user.id, email: user.email };
+  }
+
+  /** The roles (groups) a user may be assigned to, for the role picker. */
+  async roleOptions() {
+    const rows = await this.prisma.role.findMany({
+      orderBy: [{ isSystem: 'desc' }, { name: 'asc' }],
+      select: { code: true, name: true, isSystem: true },
+    });
+    return { rows };
+  }
+
+  /**
+   * Replace a user's role (group) membership with the given set of role codes.
+   * Unknown codes are rejected. Guards against lockout: removing a system role
+   * (e.g. ADMIN) that no other user holds is refused. Atomic + audited.
+   */
+  async setRoles(id: string, dto: SetUserRolesDto, actor: Actor) {
+    const user = await this.prisma.user.findUnique({
+      where: { id },
+      include: { roles: { include: { role: true } } },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const codes = [...new Set(dto.roleCodes.map((c) => c.trim()).filter(Boolean))];
+    const roles = codes.length
+      ? await this.prisma.role.findMany({ where: { code: { in: codes } }, select: { id: true, code: true } })
+      : [];
+    const foundCodes = new Set(roles.map((r) => r.code));
+    const missing = codes.filter((c) => !foundCodes.has(c));
+    if (missing.length) throw new BadRequestException(`Unknown role code(s): ${missing.join(', ')}`);
+
+    // System roles (e.g. ADMIN) being removed need the lockout check below.
+    const newRoleIds = new Set(roles.map((r) => r.id));
+    const removedSystem = user.roles.filter((ur) => ur.role.isSystem && !newRoleIds.has(ur.roleId));
+
+    const before = user.roles.map((ur) => ur.role.code).sort().join(', ') || '(none)';
+    const after = roles.map((r) => r.code).sort().join(', ') || '(none)';
+    if (before === after) return { id, roles: roles.map((r) => r.code), unchanged: true };
+
+    return this.prisma.$transaction(async (tx) => {
+      // Lockout guard, inside the tx so the check + write share a snapshot: don't
+      // remove the last ACTIVE holder of a system role. A DISABLED holder can't
+      // log in, so it must NOT count toward "someone can still administer".
+      for (const ur of removedSystem) {
+        const others = await tx.userRole.count({ where: { roleId: ur.roleId, userId: { not: id }, user: { status: 'ACTIVE' } } });
+        if (others === 0) {
+          throw new BadRequestException(`Cannot remove the last active administrator from the system role ${ur.role.code}.`);
+        }
+      }
+      await tx.userRole.deleteMany({ where: { userId: id } });
+      if (roles.length) await tx.userRole.createMany({ data: roles.map((r) => ({ userId: id, roleId: r.id })) });
+      await this.audit.record(
+        {
+          action: 'user.set_roles',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'admin.users',
+          summary: `Set roles for ${user.email}: ${after}`,
+          changes: [{ tableName: 'user_roles', recordId: id, fieldName: 'roles', oldValue: before, newValue: after }],
+        },
+        tx,
+      );
+      return { id, roles: roles.map((r) => r.code) };
+    });
   }
 
   async setStatus(id: string, status: UserStatusValue, actor: Actor) {
