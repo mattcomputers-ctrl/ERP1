@@ -17,6 +17,7 @@ import { Inventory } from './pages/Inventory';
 import { InvoiceDoc } from './pages/InvoiceDoc';
 import { Invoices } from './pages/Invoices';
 import { Items } from './pages/Items';
+import { ItemTests } from './pages/ItemTests';
 import { Login } from './pages/Login';
 import { LotTracking } from './pages/LotTracking';
 import { MiscReceipts } from './pages/MiscReceipts';
@@ -74,6 +75,7 @@ export function App() {
         <Route path="/packing-slips" element={<PackingSlips />} />
         <Route path="/packing-slips/:id/print" element={<PackingSlipDoc />} />
         <Route path="/certificates" element={<Certificates />} />
+        <Route path="/item-tests" element={<ItemTests />} />
         <Route path="/cofa/:id/print" element={<CofADoc />} />
         <Route path="/bills" element={<Bills />} />
         <Route path="/bills/:id/print" element={<BillDoc />} />
@@ -112,6 +114,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/bills', label: 'Supplier Bills' },
     { to: '/price-lists', label: 'Price Lists' },
     { to: '/certificates', label: 'Certificates' },
+    { to: '/item-tests', label: 'Item Tests' },
     { to: '/inventory', label: 'Inventory' },
     { to: '/inventory-receipts', label: 'Inv. Receipts' },
     { to: '/lot-tracking', label: 'Lot Tracking' },

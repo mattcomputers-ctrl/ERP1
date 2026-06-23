@@ -7,6 +7,7 @@ import { AuthService } from '../../src/auth/auth.service';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import { PermissionService } from '../../src/auth/permission.service';
 import { GenealogyService } from '../../src/genealogy/genealogy.service';
+import { ItemTestsService } from '../../src/qa/item-tests.service';
 import { MiscReceiptService } from '../../src/inventory/misc-receipt.service';
 import { ValuationService } from '../../src/inventory/valuation.service';
 import { OrdersService } from '../../src/orders/orders.service';
@@ -95,6 +96,7 @@ export function services(prisma: PrismaClient) {
     roles: new RolesService(p, audit),
     users: new UsersService(p, auth, audit),
     securedItems: new SecuredItemsService(p, audit),
+    itemTests: new ItemTestsService(p),
   };
 }
 
