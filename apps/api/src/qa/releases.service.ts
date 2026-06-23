@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
 import { ApprovalPolicyService } from '../approval/approval-policy.service';
+import { ApprovalRequestService } from '../approval/approval-request.service';
 import { AuditService, type FieldChange } from '../audit/audit.service';
 import { ESignatureService } from '../audit/esignature.service';
 import { AuthService } from '../auth/auth.service';
@@ -15,6 +16,11 @@ import type { EnterResultsDto } from './dto/enter-results.dto';
 // signature / witness) is seeded and operator-configurable.
 const DISPOSITION_SECURED_ITEM = 'release.disposition';
 
+// ApprovalRequest.kind for the QA-disposition blocking workflow. Disposition now
+// rides the shared ApprovalRequest engine (like order/PO/SH edits) instead of its
+// own table; the requested change travels in the request payload.
+const DISPOSITION_KIND = 'release.disposition';
+
 // A requested disposition snapshot. `undefined` for an optional field means
 // "leave it unchanged" (matches the direct-disposition DTO semantics).
 type DispositionSnap = {
@@ -23,6 +29,27 @@ type DispositionSnap = {
   purity?: number | undefined;
   expiry?: Date | undefined;
 };
+
+// The disposition request payload stored on the ApprovalRequest (JSON). `null`
+// for grade/purity/expiry means "not part of this request" (→ leave unchanged on
+// enact, the same as `undefined` in the snapshot). Expiry is an ISO string.
+type DispositionPayload = {
+  status: string;
+  grade?: string | null;
+  purity?: number | null;
+  expiry?: string | null;
+};
+
+/** Reconstruct the disposition snapshot from a stored request payload (null →
+ * undefined = leave the field unchanged on enact). */
+function snapFromPayload(p: DispositionPayload): DispositionSnap {
+  return {
+    status: p.status,
+    grade: p.grade ?? undefined,
+    purity: p.purity ?? undefined,
+    expiry: p.expiry ? new Date(p.expiry) : undefined,
+  };
+}
 
 @Injectable()
 export class ReleasesService {
@@ -33,6 +60,7 @@ export class ReleasesService {
     private readonly auth: AuthService,
     private readonly permissions: PermissionService,
     private readonly approvalPolicy: ApprovalPolicyService,
+    private readonly approvalRequests: ApprovalRequestService,
   ) {}
 
   /** The effective e-signature/reason requirements for a QA disposition. */
@@ -96,33 +124,32 @@ export class ReleasesService {
     const witness = await this.verifyDispositionSignature(req, dto, actor);
     const at = new Date();
 
-    // Request path: capture the request as PENDING and leave the Release untouched.
+    // Request path: capture the request as PENDING (on the shared ApprovalRequest
+    // engine) and leave the Release untouched.
     if (!canEnactDirectly) {
+      const payload: DispositionPayload = {
+        status: snap.status,
+        grade: snap.grade ?? null,
+        purity: snap.purity ?? null,
+        expiry: snap.expiry?.toISOString() ?? null,
+      };
       return this.prisma.$transaction(async (tx) => {
-        const appr = await tx.dispositionApproval.create({
-          data: {
-            releaseId: id,
-            state: 'PENDING',
-            reqStatus: snap.status,
-            reqGrade: snap.grade ?? null,
-            reqPurity: snap.purity ?? null,
-            reqExpiry: snap.expiry ?? null,
-            reqReason: dto.reason ?? null,
-            requestedById: actor.id,
-            requestedByLabel: actor.label ?? null,
-            requestedAt: at,
-          },
-        });
+        const appr = await this.approvalRequests.create(
+          tx,
+          { kind: DISPOSITION_KIND, targetTable: 'Release', targetId: String(id), payload, requiredCapability: 'approveChange', reason: dto.reason ?? null },
+          actor,
+          at,
+        );
         // Capture WHAT was requested as structured (hash-chained) field changes,
         // not just the state flip — so the request event is fully audited even if
         // it is later rejected (and never reaches the enacting audit row).
         const reqChanges: FieldChange[] = [
-          { tableName: 'disposition_approval', recordId: String(appr.id), fieldName: 'state', oldValue: null, newValue: 'PENDING' },
-          { tableName: 'disposition_approval', recordId: String(appr.id), fieldName: 'req_status', oldValue: null, newValue: snap.status },
+          { tableName: 'approval_request', recordId: String(appr.id), fieldName: 'state', oldValue: null, newValue: 'PENDING' },
+          { tableName: 'approval_request', recordId: String(appr.id), fieldName: 'req_status', oldValue: null, newValue: snap.status },
         ];
-        if (snap.grade !== undefined) reqChanges.push({ tableName: 'disposition_approval', recordId: String(appr.id), fieldName: 'req_grade', oldValue: null, newValue: snap.grade ?? null });
-        if (snap.purity !== undefined) reqChanges.push({ tableName: 'disposition_approval', recordId: String(appr.id), fieldName: 'req_purity', oldValue: null, newValue: snap.purity != null ? String(snap.purity) : null });
-        if (snap.expiry !== undefined) reqChanges.push({ tableName: 'disposition_approval', recordId: String(appr.id), fieldName: 'req_expiry', oldValue: null, newValue: snap.expiry?.toISOString() ?? null });
+        if (snap.grade !== undefined) reqChanges.push({ tableName: 'approval_request', recordId: String(appr.id), fieldName: 'req_grade', oldValue: null, newValue: snap.grade ?? null });
+        if (snap.purity !== undefined) reqChanges.push({ tableName: 'approval_request', recordId: String(appr.id), fieldName: 'req_purity', oldValue: null, newValue: snap.purity != null ? String(snap.purity) : null });
+        if (snap.expiry !== undefined) reqChanges.push({ tableName: 'approval_request', recordId: String(appr.id), fieldName: 'req_expiry', oldValue: null, newValue: snap.expiry?.toISOString() ?? null });
         const auditLog = await this.audit.record(
           {
             action: 'release.disposition.request',
@@ -173,8 +200,8 @@ export class ReleasesService {
    * e-signature commit atomically.
    */
   async approveDisposition(approvalId: number, dto: ApproveDispositionDto, actor: Actor) {
-    const appr = await this.prisma.dispositionApproval.findUnique({ where: { id: BigInt(approvalId) } });
-    if (!appr) throw new NotFoundException('Approval request not found');
+    const appr = await this.approvalRequests.get<DispositionPayload>(BigInt(approvalId));
+    if (!appr || appr.kind !== DISPOSITION_KIND) throw new NotFoundException('Approval request not found');
     if (appr.state !== 'PENDING') throw new BadRequestException(`This request is already ${appr.state.toLowerCase()}.`);
 
     const caps = await this.approvalPolicy.effectiveForUser(actor.id);
@@ -185,8 +212,9 @@ export class ReleasesService {
       throw new BadRequestException('You cannot approve your own disposition request.');
     }
 
+    const releaseId = Number(appr.targetId);
     const release = await this.prisma.release.findUnique({
-      where: { id: appr.releaseId },
+      where: { id: releaseId },
       select: { id: true, status: true, grade: true, purity: true, expiryDate: true },
     });
     if (!release) throw new NotFoundException('Release not found');
@@ -195,22 +223,14 @@ export class ReleasesService {
     const witness = await this.verifyDispositionSignature(req, dto, actor);
     const at = new Date();
     const releasedBy = actor.label ?? actor.id;
-    const snap: DispositionSnap = {
-      status: appr.reqStatus,
-      grade: appr.reqGrade ?? undefined,
-      purity: appr.reqPurity ?? undefined,
-      expiry: appr.reqExpiry ?? undefined,
-    };
+    const snap = snapFromPayload(appr.payload);
 
     return this.prisma.$transaction(async (tx) => {
-      // Atomic state transition (compare-and-swap): only the tx that flips the row
-      // out of PENDING proceeds to enact — guards a concurrent approve/reject from
-      // double-enacting (the findUnique check above is advisory; this is the gate).
-      const cas = await tx.dispositionApproval.updateMany({
-        where: { id: appr.id, state: 'PENDING' },
-        data: { state: 'APPROVED', decidedById: actor.id, decidedByLabel: actor.label ?? null, decidedAt: at, decisionReason: dto.reason ?? null },
-      });
-      if (cas.count === 0) throw new BadRequestException('This request is no longer pending.');
+      // Atomic state transition (compare-and-swap): only the tx that flips the
+      // request out of PENDING proceeds to enact — guards a concurrent
+      // approve/reject from double-enacting (the get() check above is advisory;
+      // this is the gate). Throws if no longer pending.
+      await this.approvalRequests.decide(tx, appr.id, 'APPROVED', actor, at, dto.reason ?? null);
 
       const { u, changes } = await this.applyDispositionToRelease(tx, release, snap, releasedBy, at);
       const auditLog = await this.audit.record(
@@ -220,17 +240,17 @@ export class ReleasesService {
           actorLabel: actor.label,
           program: 'qa.disposition',
           summary:
-            `Disposition approved (release #${appr.releaseId}) → ${snap.status}, requested by ${appr.requestedByLabel ?? appr.requestedById}` +
-            (appr.reqReason ? ` — requested reason: ${appr.reqReason}` : '') +
+            `Disposition approved (release #${releaseId}) → ${snap.status}, requested by ${appr.requestedByLabel ?? appr.requestedById}` +
+            (appr.requestReason ? ` — requested reason: ${appr.requestReason}` : '') +
             (witness ? ` (witnessed by ${witness.label})` : ''),
           changes,
         },
         tx,
       );
       if (req.requireSignature) {
-        await this.signDisposition(tx, 'QA disposition approval', appr.releaseId, actor, witness, dto.reason ?? null, dto.witnessExplanation ?? null, auditLog.id);
+        await this.signDisposition(tx, 'QA disposition approval', releaseId, actor, witness, dto.reason ?? null, dto.witnessExplanation ?? null, auditLog.id);
       }
-      return { approvalId, releaseId: appr.releaseId, status: u.status, enacted: true };
+      return { approvalId, releaseId, status: u.status, enacted: true };
     });
   }
 
@@ -240,8 +260,8 @@ export class ReleasesService {
    */
   async rejectDisposition(approvalId: number, dto: RejectDispositionDto, actor: Actor) {
     if (!dto.reason?.trim()) throw new BadRequestException('A reason is required to reject a disposition request.');
-    const appr = await this.prisma.dispositionApproval.findUnique({ where: { id: BigInt(approvalId) } });
-    if (!appr) throw new NotFoundException('Approval request not found');
+    const appr = await this.approvalRequests.get<DispositionPayload>(BigInt(approvalId));
+    if (!appr || appr.kind !== DISPOSITION_KIND) throw new NotFoundException('Approval request not found');
     if (appr.state !== 'PENDING') throw new BadRequestException(`This request is already ${appr.state.toLowerCase()}.`);
 
     const caps = await this.approvalPolicy.effectiveForUser(actor.id);
@@ -251,22 +271,19 @@ export class ReleasesService {
 
     const at = new Date();
     const reason = dto.reason.trim();
+    const p = appr.payload;
     return this.prisma.$transaction(async (tx) => {
       // Atomic compare-and-swap (see approveDisposition): only the tx that flips the
-      // row out of PENDING records the rejection — guards a concurrent approve/reject.
-      const cas = await tx.dispositionApproval.updateMany({
-        where: { id: appr.id, state: 'PENDING' },
-        data: { state: 'REJECTED', decidedById: actor.id, decidedByLabel: actor.label ?? null, decidedAt: at, decisionReason: reason },
-      });
-      if (cas.count === 0) throw new BadRequestException('This request is no longer pending.');
+      // request out of PENDING records the rejection — guards a concurrent approve/reject.
+      await this.approvalRequests.decide(tx, appr.id, 'REJECTED', actor, at, reason);
       await this.audit.record(
         {
           action: 'release.disposition.reject',
           actorUserId: actor.id,
           actorLabel: actor.label,
           program: 'qa.disposition',
-          summary: `Disposition request rejected (release #${appr.releaseId}) → ${describeDisposition({ status: appr.reqStatus, grade: appr.reqGrade, purity: appr.reqPurity, expiry: appr.reqExpiry })} — ${reason}`,
-          changes: [{ tableName: 'disposition_approval', recordId: String(appr.id), fieldName: 'state', oldValue: 'PENDING', newValue: 'REJECTED' }],
+          summary: `Disposition request rejected (release #${appr.targetId}) → ${describeDisposition({ status: p.status, grade: p.grade, purity: p.purity, expiry: p.expiry ? new Date(p.expiry) : null })} — ${reason}`,
+          changes: [{ tableName: 'approval_request', recordId: String(appr.id), fieldName: 'state', oldValue: 'PENDING', newValue: 'REJECTED' }],
         },
         tx,
       );
@@ -277,15 +294,11 @@ export class ReleasesService {
   /** Disposition approval requests, newest-requested first, decorated with the
    * lot / item the release is for (the pending-approvals queue). */
   async listApprovals(state = 'PENDING') {
-    const rows = await this.prisma.dispositionApproval.findMany({
-      where: { state },
-      orderBy: { requestedAt: 'desc' },
-      take: 200,
-    });
+    const rows = await this.approvalRequests.listByKind<DispositionPayload>(DISPOSITION_KIND, state);
     if (!rows.length) return { rows: [] };
 
     // Release -> Sublot -> Lot -> Item for context (one query per hop).
-    const releaseIds = [...new Set(rows.map((r) => r.releaseId))];
+    const releaseIds = [...new Set(rows.map((r) => Number(r.targetId)))];
     const releases = await this.prisma.release.findMany({ where: { id: { in: releaseIds } }, select: { id: true, sublotId: true } });
     const subIds = [...new Set(releases.map((r) => r.sublotId).filter((v): v is number => v != null))];
     const sublots = subIds.length ? await this.prisma.sublot.findMany({ where: { id: { in: subIds } }, select: { id: true, lot: true } }) : [];
@@ -300,18 +313,19 @@ export class ReleasesService {
 
     return {
       rows: rows.map((r) => {
-        const sublotId = subByRelease.get(r.releaseId) ?? null;
+        const releaseId = Number(r.targetId);
+        const sublotId = subByRelease.get(releaseId) ?? null;
         const lot = sublotId != null ? (lotBySub.get(sublotId) ?? null) : null;
         const itemId = lot != null ? (itemByLot.get(lot) ?? null) : null;
         const item = itemId != null ? itemById.get(itemId) : undefined;
         return {
           approvalId: Number(r.id),
-          releaseId: r.releaseId,
+          releaseId,
           state: r.state,
-          requestedStatus: r.reqStatus,
-          requestedGrade: r.reqGrade,
-          requestedPurity: r.reqPurity,
-          requestedReason: r.reqReason,
+          requestedStatus: r.payload.status,
+          requestedGrade: r.payload.grade ?? null,
+          requestedPurity: r.payload.purity ?? null,
+          requestedReason: r.requestReason,
           requestedBy: r.requestedByLabel ?? r.requestedById,
           requestedAt: r.requestedAt,
           lot,

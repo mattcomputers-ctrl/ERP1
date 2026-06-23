@@ -1031,13 +1031,12 @@ model ApprovalRequest {
   @@map("approval_request")
 }
 
-// Pending QA-disposition approval request (ERP1, not a legacy mirror — clean
-// snake_case; the legacy Workflow/WorkflowDetail tables are 0-row/unused). The
-// approval engine's first enforcement: when a user whose group may only REQUEST
-// approval dispositions a lot, the change is captured here as PENDING (the Release
-// is NOT changed) until a qualified approver (a group with Approve / Approve change
-// / Override) approves it (enacting the Release change) or rejects it. Holds the
-// requested disposition snapshot + the request/decision actors. Never imported.
+// DEPRECATED (2026-06-23): QA disposition now rides the shared ApprovalRequest
+// engine (kind='release.disposition'; the requested snapshot lives in the request
+// payload), exactly like order/PO/SH edits — ReleasesService no longer reads or
+// writes this table. Retained in the schema only to avoid a destructive `prisma db
+// push` (scripts/migrate.sh runs it WITHOUT --accept-data-loss) on existing installs
+// that already have the table; drop it in a future coordinated migration. Never imported.
 model DispositionApproval {
   id               BigInt    @id @default(autoincrement())
   releaseId        Int       @map("release")

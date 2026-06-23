@@ -91,7 +91,7 @@ describe('QA disposition approval workflow (blocking)', () => {
     expect(rel.status).toBe('Approved');
     expect(rel.grade).toBe('A');
     expect(rel.releasedBy).toBe(actor.label);
-    expect(await prisma.dispositionApproval.count()).toBe(0); // direct enact, no request
+    expect(await prisma.approvalRequest.count({ where: { kind: 'release.disposition' } })).toBe(0); // direct enact, no request
     expect(await prisma.auditLog.count({ where: { action: 'release.disposition' } })).toBe(1);
   });
 
@@ -110,10 +110,11 @@ describe('QA disposition approval workflow (blocking)', () => {
     expect(rel.status).toBe('Hold');
     expect(rel.grade).toBeNull();
 
-    const appr = (await prisma.dispositionApproval.findFirst())!;
+    const appr = (await prisma.approvalRequest.findFirst({ where: { kind: 'release.disposition' } }))!;
     expect(appr.state).toBe('PENDING');
-    expect(appr.reqStatus).toBe('Approved');
-    expect(appr.reqGrade).toBe('B');
+    const payload = JSON.parse(appr.payload) as { status: string; grade?: string | null };
+    expect(payload.status).toBe('Approved');
+    expect(payload.grade).toBe('B');
     expect(appr.requestedById).toBe(actor.id);
     expect(await prisma.auditLog.count({ where: { action: 'release.disposition.request' } })).toBe(1);
   });
@@ -145,7 +146,7 @@ describe('QA disposition approval workflow (blocking)', () => {
     expect(rel.purity).toBe(99.5);
     expect(rel.expiryDate?.toISOString().startsWith('2027-01-01')).toBe(true);
     expect(rel.releasedBy).toBe(approver.label); // enacted by the approver
-    const appr = (await prisma.dispositionApproval.findUnique({ where: { id: BigInt(req.approvalId) } }))!;
+    const appr = (await prisma.approvalRequest.findUnique({ where: { id: BigInt(req.approvalId) } }))!;
     expect(appr.state).toBe('APPROVED');
     expect(appr.decidedById).toBe(approver.id);
     expect(await prisma.auditLog.count({ where: { action: 'release.disposition.approve' } })).toBe(1);
@@ -176,8 +177,8 @@ describe('QA disposition approval workflow (blocking)', () => {
     const role = await makeRole('LEAD', { canRequestApproval: true, canApproveChange: true });
     const actor = await makeUser('lead@test.local', [role]);
     const releaseId = await makeRelease('Hold');
-    const appr = await prisma.dispositionApproval.create({
-      data: { releaseId, state: 'PENDING', reqStatus: 'Approved', requestedById: actor.id, requestedByLabel: actor.label, requestedAt: new Date('2026-01-01T00:00:00Z') },
+    const appr = await prisma.approvalRequest.create({
+      data: { kind: 'release.disposition', targetTable: 'Release', targetId: String(releaseId), payload: JSON.stringify({ status: 'Approved' }), requiredCapability: 'approveChange', state: 'PENDING', requestedById: actor.id, requestedByLabel: actor.label, requestedAt: new Date('2026-01-01T00:00:00Z') },
       select: { id: true },
     });
     await expect(releases.approveDisposition(Number(appr.id), {}, actor)).rejects.toThrow(/your own/i);
@@ -195,7 +196,7 @@ describe('QA disposition approval workflow (blocking)', () => {
     expect(res.state).toBe('REJECTED');
     const rel = (await prisma.release.findUnique({ where: { id: releaseId } }))!;
     expect(rel.status).toBe('Hold'); // unchanged
-    const appr = (await prisma.dispositionApproval.findUnique({ where: { id: BigInt(req.approvalId) } }))!;
+    const appr = (await prisma.approvalRequest.findUnique({ where: { id: BigInt(req.approvalId) } }))!;
     expect(appr.state).toBe('REJECTED');
     expect(appr.decisionReason).toBe('Out of spec');
   });
@@ -210,7 +211,7 @@ describe('QA disposition approval workflow (blocking)', () => {
     expect(res.pending).toBeUndefined();
     expect(res.status).toBe('Approved');
     expect((await prisma.release.findUnique({ where: { id: releaseId } }))!.status).toBe('Approved');
-    expect(await prisma.dispositionApproval.count()).toBe(0);
+    expect(await prisma.approvalRequest.count({ where: { kind: 'release.disposition' } })).toBe(0);
 
     // But exemption does NOT confer approver authority over someone else's request.
     const requester = await makeUser('ops@test.local', [await makeRole('OPS', { canRequestApproval: true })]);
@@ -235,7 +236,7 @@ describe('QA disposition approval workflow (blocking)', () => {
     expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
     // Enacted exactly once: a single approve audit row, one APPROVED terminal state.
     expect(await prisma.auditLog.count({ where: { action: 'release.disposition.approve' } })).toBe(1);
-    expect((await prisma.dispositionApproval.findUnique({ where: { id: BigInt(req.approvalId) } }))!.state).toBe('APPROVED');
+    expect((await prisma.approvalRequest.findUnique({ where: { id: BigInt(req.approvalId) } }))!.state).toBe('APPROVED');
   });
 
   it('signs the request (requester) and the approval (approver) when the secured item requires it', async () => {

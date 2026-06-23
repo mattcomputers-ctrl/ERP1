@@ -95,7 +95,7 @@ export function services(prisma: PrismaClient) {
     genealogy: new GenealogyService(p, party),
     miscReceipt: new MiscReceiptService(p, audit, valuation),
     approvalPolicy,
-    releases: new ReleasesService(p, audit, esign, auth, permissions, approvalPolicy),
+    releases: new ReleasesService(p, audit, esign, auth, permissions, approvalPolicy, approvalRequests),
     roles: new RolesService(p, audit),
     users: new UsersService(p, auth, audit),
     securedItems: new SecuredItemsService(p, audit),

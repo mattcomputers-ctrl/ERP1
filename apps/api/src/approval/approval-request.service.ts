@@ -60,8 +60,14 @@ export class ApprovalRequestService {
   /** Pending requests of a kind (newest first) — the queue feed; the domain
    * controller decorates each with target context. Payloads parsed. */
   async listPending<P = unknown>(kind: string): Promise<ApprovalRequestRow<P>[]> {
+    return this.listByKind<P>(kind, 'PENDING');
+  }
+
+  /** Requests of a kind in a given state (newest first; defaults to PENDING).
+   * Supports a history view (APPROVED / REJECTED) beyond the pending queue. */
+  async listByKind<P = unknown>(kind: string, state = 'PENDING'): Promise<ApprovalRequestRow<P>[]> {
     const rows = await this.prisma.approvalRequest.findMany({
-      where: { kind, state: 'PENDING' },
+      where: { kind, state },
       orderBy: { requestedAt: 'desc' },
       take: 200,
     });
