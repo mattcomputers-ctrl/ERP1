@@ -10,6 +10,7 @@ import { Certificates } from './pages/Certificates';
 import { ChangePassword } from './pages/ChangePassword';
 import { CofADoc } from './pages/CofADoc';
 import { Dashboard } from './pages/Dashboard';
+import { DispositionApprovals } from './pages/DispositionApprovals';
 import { Entities } from './pages/Entities';
 import { ImportPage } from './pages/ImportPage';
 import { Inventory } from './pages/Inventory';
@@ -81,6 +82,7 @@ export function App() {
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
         <Route path="/approval-policies" element={<ApprovalPolicies />} />
+        <Route path="/disposition-approvals" element={<DispositionApprovals />} />
         <Route path="/audit" element={<Audit />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/change-password" element={<ChangePassword />} />
@@ -110,8 +112,9 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/inventory-receipts', label: 'Inv. Receipts' },
     { to: '/lot-tracking', label: 'Lot Tracking' },
     { to: '/recall', label: 'Lot Trace' },
+    { to: '/disposition-approvals', label: 'QA Approvals' },
     { to: '/users', label: 'Users' },
-    { to: '/approval-policies', label: 'Approvals' },
+    { to: '/approval-policies', label: 'Approval Policies' },
     { to: '/audit', label: 'Audit' },
     { to: '/import', label: 'Import' },
   ];

@@ -422,7 +422,7 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
 
   const m = useMutation({
     mutationFn: () =>
-      api.post(`/releases/${releaseId}/disposition`, {
+      api.post<{ pending?: boolean; approvalId?: number; status: string }>(`/releases/${releaseId}/disposition`, {
         status,
         grade: grade || undefined,
         expiryDate: expiryDate || undefined,
@@ -432,7 +432,9 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
         witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
         witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
       }),
-    onSuccess: () => { setOpen(false); setPassword(''); setWitnessPassword(''); onDone(); },
+    // A request-only group's disposition comes back pending (awaiting approval) —
+    // keep the panel open to show that; an enacted one closes.
+    onSuccess: (res) => { setPassword(''); setWitnessPassword(''); if (!res.pending) setOpen(false); onDone(); },
   });
 
   const canSubmit =
@@ -477,6 +479,11 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
         <button type="button" onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
         {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
       </div>
+      {m.data?.pending && (
+        <p className="mt-2 text-sm text-amber-700">
+          Submitted for approval (request #{m.data.approvalId}) — your group may request a disposition; it takes effect once a qualified approver approves it.
+        </p>
+      )}
     </div>
   );
 }
