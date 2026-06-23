@@ -8,6 +8,7 @@ import { ConsumeLotsDto } from './dto/consume-lots.dto';
 import { ConsumeQtyDto } from './dto/consume-qty.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { EditOrderDto } from './dto/edit-order.dto';
+import { RejectEditApprovalDto } from './dto/edit-approval.dto';
 import { ShipLotsDto } from './dto/ship-lots.dto';
 import { OrdersService, type OrdersListQuery } from './orders.service';
 
@@ -51,6 +52,13 @@ export class OrdersController {
     return this.orders.completeRequirement(actor.id);
   }
 
+  // Pending order-edit approval requests (static path before :id).
+  @Get('edit-approvals')
+  @RequireProgram('orders.edit')
+  editApprovals() {
+    return this.orders.listEditApprovals();
+  }
+
   @Get(':id')
   get(@Param('id', ParseIntPipe) id: number) {
     return this.orders.get(id);
@@ -62,10 +70,25 @@ export class OrdersController {
   }
 
   // Edit a not-yet-released order (rescale to a new batch size / header fields).
+  // A group that can approve updates enacts directly; a request-only group
+  // submits a blocking approval request (see the edit-approvals routes).
   @Post(':id/edit')
   @RequireProgram('orders.edit')
   edit(@Param('id', ParseIntPipe) id: number, @Body() dto: EditOrderDto, @CurrentUser() actor: Actor) {
     return this.orders.edit(id, dto, actor);
+  }
+
+  // Approve / reject a pending order-edit request.
+  @Post('edit-approvals/:requestId/approve')
+  @RequireProgram('orders.edit')
+  approveEdit(@Param('requestId', ParseIntPipe) requestId: number, @CurrentUser() actor: Actor) {
+    return this.orders.approveEdit(requestId, actor);
+  }
+
+  @Post('edit-approvals/:requestId/reject')
+  @RequireProgram('orders.edit')
+  rejectEdit(@Param('requestId', ParseIntPipe) requestId: number, @Body() dto: RejectEditApprovalDto, @CurrentUser() actor: Actor) {
+    return this.orders.rejectEdit(requestId, dto, actor);
   }
 
   // --- lifecycle transitions (each gated by its own program) ---------------

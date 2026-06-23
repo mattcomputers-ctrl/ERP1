@@ -1000,6 +1000,37 @@ model ShipmentLot {
   @@map("shipment_lot")
 }
 
+// Generic blocking approval request (ERP1, not a legacy mirror). The reusable
+// engine for "a request-only group submits an action; a qualified approver
+// approves (the domain service then enacts it from the payload) or rejects it."
+// `kind` discriminates the action (e.g. order.edit); `payload` is the requested
+// change as JSON; `requiredCapability` names the approval policy capability that
+// may approve it. Domain services own the enact logic; this table + service own
+// the request lifecycle (PENDING -> APPROVED/REJECTED, compare-and-swap). The
+// QA-disposition workflow predates this and uses its own table (DispositionApproval);
+// it can adopt this engine later. Never imported.
+model ApprovalRequest {
+  id                 BigInt    @id @default(autoincrement())
+  kind               String    @map("kind") @db.VarChar(40)
+  targetTable        String    @map("target_table") @db.VarChar(40)
+  targetId           String    @map("target_id") @db.VarChar(64)
+  payload            String    @map("payload") @db.Text // JSON of the requested change
+  requiredCapability String    @map("required_capability") @db.VarChar(40)
+  state              String    @default("PENDING") @map("state") @db.VarChar(12)
+  requestReason      String?   @map("request_reason")
+  requestedById      String    @map("requested_by")
+  requestedByLabel   String?   @map("requested_by_label")
+  requestedAt        DateTime  @map("requested_at")
+  decidedById        String?   @map("decided_by")
+  decidedByLabel     String?   @map("decided_by_label")
+  decidedAt          DateTime? @map("decided_at")
+  decisionReason     String?   @map("decision_reason")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  @@index([state, kind])
+  @@map("approval_request")
+}
+
 // Pending QA-disposition approval request (ERP1, not a legacy mirror — clean
 // snake_case; the legacy Workflow/WorkflowDetail tables are 0-row/unused). The
 // approval engine's first enforcement: when a user whose group may only REQUEST

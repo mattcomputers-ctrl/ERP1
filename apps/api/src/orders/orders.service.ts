@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
 import { ApprovalPolicyService } from '../approval/approval-policy.service';
+import { ApprovalRequestService } from '../approval/approval-request.service';
 import { AuditService, type FieldChange } from '../audit/audit.service';
 import { ESignatureService } from '../audit/esignature.service';
 import { AuthService } from '../auth/auth.service';
@@ -40,6 +41,9 @@ const COMPLETE_SECURED_ITEM = 'order.complete';
 // Empty -> the valuation engine auto-resolves the install's default stock location.
 const PRODUCTION_LOCATION_SETTING = 'inventory.productionLocation';
 
+// ApprovalRequest.kind discriminator for the order-edit blocking workflow.
+const ORDER_EDIT_KIND = 'order.edit';
+
 // Order lifecycle: Not started -> Released -> Completed -> Closed (legacy
 // Ordr.Status NST/RLS/CMP/CLS). A null/empty status is treated as Not started.
 const STATUS_LABEL: Record<string, string> = {
@@ -71,6 +75,7 @@ export class OrdersService {
     private readonly esign: ESignatureService,
     private readonly valuation: ValuationService,
     private readonly approvalPolicy: ApprovalPolicyService,
+    private readonly approvalRequests: ApprovalRequestService,
   ) {}
 
   async list(query: OrdersListQuery) {
@@ -538,68 +543,169 @@ export class OrdersService {
    * fields. Only NST orders are editable; atomic + audited.
    */
   async edit(id: number, dto: EditOrderDto, actor: Actor) {
-    // Approval policy: the actor's group must be permitted to edit (canApproveUpdate).
-    await this.approvalPolicy.assertMayUpdate(actor.id, 'orders');
     const order = await this.requireTransition(id, 'NST', 'edit');
-    const isBatch = order.context === 'MFBA';
-
-    let dateRequired: Date | null | undefined;
-    if (dto.dateRequired !== undefined) {
-      if (dto.dateRequired) {
-        dateRequired = new Date(dto.dateRequired);
-        if (Number.isNaN(dateRequired.getTime())) throw new BadRequestException('dateRequired is not a valid date');
-      } else {
-        dateRequired = null;
-      }
+    // Approval policy: a group that can approve updates enacts the edit directly;
+    // a request-only group submits a blocking request for a qualified approver.
+    const caps = await this.approvalPolicy.effectiveForUser(actor.id);
+    const canEnact = this.approvalPolicy.mayUpdate(caps);
+    if (!canEnact && !caps.canRequestApproval) {
+      throw new ForbiddenException('Your group is not permitted to edit orders or request an edit approval.');
+    }
+    if (dto.dateRequired) {
+      const d = new Date(dto.dateRequired);
+      if (Number.isNaN(d.getTime())) throw new BadRequestException('dateRequired is not a valid date');
+    }
+    if (dto.batchSize === undefined && dto.dateRequired === undefined && dto.reference === undefined) {
+      throw new BadRequestException('Nothing to change.');
     }
 
-    // Lines to rescale carry a per-unit base (StdQty); leave any without it.
-    const lines = dto.batchSize != null
-      ? await this.prisma.ordDetail.findMany({
-          where: { ordrId: id, stdQty: { not: null } },
-          select: { id: true, stdQty: true },
-        })
-      : [];
+    if (canEnact) {
+      return this.prisma.$transaction((tx) => this.applyEditTx(tx, order, dto, actor));
+    }
 
+    // Request path: capture the requested edit; the order is left unchanged until approved.
+    const at = new Date();
     return this.prisma.$transaction(async (tx) => {
-      const changes: FieldChange[] = [];
-      const data: Record<string, unknown> = {};
-
-      if (dto.batchSize != null) {
-        for (const l of lines) {
-          await tx.ordDetail.update({ where: { id: l.id }, data: { qtyReqd: (l.stdQty as number) * dto.batchSize } });
-        }
-        changes.push({ tableName: 'OrdDetail', recordId: String(id), fieldName: 'rescaled', oldValue: null, newValue: `${lines.length} lines × ${dto.batchSize}` });
-        if (isBatch) {
-          data.actualBatchSize = dto.batchSize;
-          changes.push({ tableName: 'Ordr', recordId: String(id), fieldName: 'ActualBatchSize', oldValue: order.actualBatchSize != null ? String(order.actualBatchSize) : null, newValue: String(dto.batchSize) });
-        }
-      }
-      if (dto.dateRequired !== undefined) {
-        data.dateRequired = dateRequired ?? null;
-        changes.push({ tableName: 'Ordr', recordId: String(id), fieldName: 'DateRequired', oldValue: order.dateRequired?.toISOString() ?? null, newValue: dateRequired?.toISOString() ?? null });
-      }
-      if (dto.reference !== undefined) {
-        data.reference = dto.reference || null;
-        changes.push({ tableName: 'Ordr', recordId: String(id), fieldName: 'Reference', oldValue: order.reference, newValue: dto.reference || null });
-      }
-
-      if (!changes.length) throw new BadRequestException('Nothing to change.');
-      if (Object.keys(data).length) await tx.ordr.update({ where: { id }, data });
-
+      const req = await this.approvalRequests.create(
+        tx,
+        {
+          kind: ORDER_EDIT_KIND,
+          targetTable: 'Ordr',
+          targetId: String(id),
+          payload: { batchSize: dto.batchSize, dateRequired: dto.dateRequired, reference: dto.reference },
+          requiredCapability: 'approveUpdate',
+          reason: dto.reason ?? null,
+        },
+        actor,
+        at,
+      );
       await this.audit.record(
         {
-          action: 'order.edit',
+          action: 'order.edit.request',
           actorUserId: actor.id,
           actorLabel: actor.label,
           program: 'orders.edit',
-          summary: `Order #${id} edited${dto.batchSize != null ? ` (batch size ${dto.batchSize})` : ''}${dto.reason ? ` — ${dto.reason}` : ''}`,
-          changes,
+          summary: `Order #${id} edit requested${dto.batchSize != null ? ` (batch size ${dto.batchSize})` : ''}${dto.reason ? ` — ${dto.reason}` : ''} — awaiting approval`,
+          changes: [{ tableName: 'approval_request', recordId: String(req.id), fieldName: 'state', oldValue: null, newValue: 'PENDING' }],
         },
         tx,
       );
-      return { id, batchSize: dto.batchSize ?? order.actualBatchSize, rescaledLines: lines.length };
+      return { id, pending: true, requestId: Number(req.id) };
     });
+  }
+
+  /** Apply an order edit (rescale lines from their StdQty base + header fields)
+   * within a transaction; audited. Shared by direct-enact and approve. */
+  private async applyEditTx(
+    tx: Prisma.TransactionClient,
+    order: { id: number; context: string | null; actualBatchSize: number | null; dateRequired: Date | null; reference: string | null },
+    dto: EditOrderDto,
+    actor: Actor,
+  ) {
+    const id = order.id;
+    const isBatch = order.context === 'MFBA';
+    let dateRequired: Date | null | undefined;
+    if (dto.dateRequired !== undefined) {
+      dateRequired = dto.dateRequired ? new Date(dto.dateRequired) : null;
+      if (dateRequired && Number.isNaN(dateRequired.getTime())) throw new BadRequestException('dateRequired is not a valid date');
+    }
+    const lines = dto.batchSize != null
+      ? await tx.ordDetail.findMany({ where: { ordrId: id, stdQty: { not: null } }, select: { id: true, stdQty: true } })
+      : [];
+    const changes: FieldChange[] = [];
+    const data: Record<string, unknown> = {};
+    if (dto.batchSize != null) {
+      for (const l of lines) await tx.ordDetail.update({ where: { id: l.id }, data: { qtyReqd: (l.stdQty as number) * dto.batchSize } });
+      changes.push({ tableName: 'OrdDetail', recordId: String(id), fieldName: 'rescaled', oldValue: null, newValue: `${lines.length} lines × ${dto.batchSize}` });
+      if (isBatch) {
+        data.actualBatchSize = dto.batchSize;
+        changes.push({ tableName: 'Ordr', recordId: String(id), fieldName: 'ActualBatchSize', oldValue: order.actualBatchSize != null ? String(order.actualBatchSize) : null, newValue: String(dto.batchSize) });
+      }
+    }
+    if (dto.dateRequired !== undefined) {
+      data.dateRequired = dateRequired ?? null;
+      changes.push({ tableName: 'Ordr', recordId: String(id), fieldName: 'DateRequired', oldValue: order.dateRequired?.toISOString() ?? null, newValue: dateRequired?.toISOString() ?? null });
+    }
+    if (dto.reference !== undefined) {
+      data.reference = dto.reference || null;
+      changes.push({ tableName: 'Ordr', recordId: String(id), fieldName: 'Reference', oldValue: order.reference, newValue: dto.reference || null });
+    }
+    if (!changes.length) throw new BadRequestException('Nothing to change.');
+    if (Object.keys(data).length) await tx.ordr.update({ where: { id }, data });
+    await this.audit.record(
+      { action: 'order.edit', actorUserId: actor.id, actorLabel: actor.label, program: 'orders.edit', summary: `Order #${id} edited${dto.batchSize != null ? ` (batch size ${dto.batchSize})` : ''}${dto.reason ? ` — ${dto.reason}` : ''}`, changes },
+      tx,
+    );
+    return { id, batchSize: dto.batchSize ?? order.actualBatchSize, rescaledLines: lines.length };
+  }
+
+  /** Approve a pending order-edit request — enacts the requested edit (re-validating
+   * NST at approval time). Compare-and-swap on the request; separation of duties. */
+  async approveEdit(requestId: number, actor: Actor) {
+    const req = await this.approvalRequests.get<{ batchSize?: number; dateRequired?: string; reference?: string }>(BigInt(requestId));
+    if (!req || req.kind !== ORDER_EDIT_KIND) throw new NotFoundException('Order-edit request not found');
+    if (req.state !== 'PENDING') throw new BadRequestException(`This request is already ${req.state.toLowerCase()}.`);
+    const caps = await this.approvalPolicy.effectiveForUser(actor.id);
+    if (!(caps.canApproveUpdate || caps.canApprove || caps.canOverride)) {
+      throw new ForbiddenException('Your group is not permitted to approve order edits.');
+    }
+    if (req.requestedById === actor.id) throw new BadRequestException('You cannot approve your own edit request.');
+    const order = await this.requireTransition(Number(req.targetId), 'NST', 'edit');
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      await this.approvalRequests.decide(tx, req.id, 'APPROVED', actor, at);
+      const res = await this.applyEditTx(tx, order, { batchSize: req.payload.batchSize, dateRequired: req.payload.dateRequired, reference: req.payload.reference, reason: `approved request #${requestId}` }, actor);
+      return { ...res, requestId, enacted: true };
+    });
+  }
+
+  /** Reject a pending order-edit request (order unchanged; reason required). */
+  async rejectEdit(requestId: number, dto: { reason?: string }, actor: Actor) {
+    if (!dto.reason?.trim()) throw new BadRequestException('A reason is required to reject an edit request.');
+    const req = await this.approvalRequests.get(BigInt(requestId));
+    if (!req || req.kind !== ORDER_EDIT_KIND) throw new NotFoundException('Order-edit request not found');
+    if (req.state !== 'PENDING') throw new BadRequestException(`This request is already ${req.state.toLowerCase()}.`);
+    const caps = await this.approvalPolicy.effectiveForUser(actor.id);
+    if (!(caps.canApproveUpdate || caps.canApprove || caps.canOverride)) {
+      throw new ForbiddenException('Your group is not permitted to reject order edits.');
+    }
+    const reason = dto.reason.trim();
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      await this.approvalRequests.decide(tx, req.id, 'REJECTED', actor, at, reason);
+      await this.audit.record(
+        { action: 'order.edit.reject', actorUserId: actor.id, actorLabel: actor.label, program: 'orders.edit', summary: `Order #${req.targetId} edit request rejected — ${reason}`, changes: [{ tableName: 'approval_request', recordId: String(req.id), fieldName: 'state', oldValue: 'PENDING', newValue: 'REJECTED' }] },
+        tx,
+      );
+      return { requestId, state: 'REJECTED' as const };
+    });
+  }
+
+  /** Pending order-edit requests decorated with order context (the approvals queue). */
+  async listEditApprovals() {
+    const reqs = await this.approvalRequests.listPending<{ batchSize?: number; dateRequired?: string; reference?: string }>(ORDER_EDIT_KIND);
+    if (!reqs.length) return { rows: [] };
+    const orderIds = [...new Set(reqs.map((r) => Number(r.targetId)))];
+    const orders = await this.prisma.ordr.findMany({ where: { id: { in: orderIds } }, select: { id: true, context: true, reference: true, status: true } });
+    const byId = new Map(orders.map((o) => [o.id, o]));
+    return {
+      rows: reqs.map((r) => {
+        const o = byId.get(Number(r.targetId));
+        return {
+          requestId: Number(r.id),
+          orderId: Number(r.targetId),
+          context: o?.context ?? null,
+          orderReference: o?.reference ?? null,
+          orderStatus: o?.status ?? null,
+          batchSize: r.payload.batchSize ?? null,
+          dateRequired: r.payload.dateRequired ?? null,
+          reference: r.payload.reference ?? null,
+          requestReason: r.requestReason,
+          requestedBy: r.requestedByLabel ?? r.requestedById,
+          requestedAt: r.requestedAt,
+        };
+      }),
+    };
   }
 
   /**

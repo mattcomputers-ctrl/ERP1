@@ -39,31 +39,27 @@ async function userWithPolicy(email: string, caps: Caps): Promise<Actor> {
   return { id: u.id, label: u.displayName };
 }
 
-describe('Approval policy gate on edits (canApproveUpdate)', () => {
-  it('blocks order edit / PO line add / SH line add for a request-only group', async () => {
-    const { orders, purchasing, shipping } = services(prisma);
+// PO + SH line edits use the capability GATE (a request-only group is blocked —
+// no pending-edit queue for those yet). Order edit uses the full blocking
+// workflow instead (see orders-edit-approval.flow.int.spec.ts).
+describe('Approval policy gate on PO/SH line edits (canApproveUpdate)', () => {
+  it('blocks PO + SH line edits for a request-only group', async () => {
+    const { purchasing, shipping } = services(prisma);
     const noCap = await userWithPolicy('req@test.local', { canRequestApproval: true });
-    await expect(orders.edit(123, { batchSize: 5 }, noCap)).rejects.toThrow(/not permitted to edit orders/i);
     await expect(purchasing.addLine(123, { itemId: 1, qtyReqd: 1 }, noCap)).rejects.toThrow(/not permitted to edit purchase order lines/i);
     await expect(shipping.addLine(123, { itemId: 1, qtyReqd: 1 }, noCap)).rejects.toThrow(/not permitted to edit shipping order lines/i);
   });
 
   it('lets a group with canApproveUpdate past the gate (then hits the normal not-found)', async () => {
-    const { orders, purchasing, shipping } = services(prisma);
+    const { purchasing, shipping } = services(prisma);
     const capable = await userWithPolicy('upd@test.local', { canApproveUpdate: true });
-    // Past the gate -> the normal "order not found" for a bogus id (proves the gate let it through).
-    await expect(orders.edit(123, { batchSize: 5 }, capable)).rejects.toThrow(/not found/i);
     await expect(purchasing.addLine(123, { itemId: 1, qtyReqd: 1 }, capable)).rejects.toThrow(/not found/i);
     await expect(shipping.addLine(123, { itemId: 1, qtyReqd: 1 }, capable)).rejects.toThrow(/not found/i);
   });
 
-  it('also lets override / exempt groups edit, but not a no-capability group', async () => {
-    const { orders } = services(prisma);
-    const override = await userWithPolicy('ovr@test.local', { canOverride: true });
-    const exempt = await userWithPolicy('exempt@test.local', { noApprovalRequired: true });
+  it('blocks a no-capability group entirely', async () => {
+    const { purchasing } = services(prisma);
     const none = await userWithPolicy('none@test.local', {}); // all false
-    await expect(orders.edit(123, { batchSize: 5 }, override)).rejects.toThrow(/not found/i);
-    await expect(orders.edit(123, { batchSize: 5 }, exempt)).rejects.toThrow(/not found/i);
-    await expect(orders.edit(123, { batchSize: 5 }, none)).rejects.toThrow(/not permitted to edit/i);
+    await expect(purchasing.addLine(123, { itemId: 1, qtyReqd: 1 }, none)).rejects.toThrow(/not permitted to edit/i);
   });
 });
