@@ -138,12 +138,25 @@ export class ApprovalPolicyService {
     return caps.canApproveUpdate || caps.canApprove || caps.canOverride || caps.noApprovalRequired;
   }
 
-  /** Guard an edit action by the actor's group approval policy (the `canApproveUpdate`
-   * capability). Throws 403 if the actor's group may not perform updates directly. */
-  async assertMayUpdate(userId: string, what: string): Promise<void> {
+  /**
+   * Gate an edit for the BLOCKING workflow: returns true if the actor's group may
+   * ENACT the edit directly (mayUpdate), false if it may only REQUEST it (a
+   * request-only group → a PENDING approval request). Throws 403 if the group can
+   * do neither. The shared entry point for submit-or-enact edit actions.
+   */
+  async gateUpdate(userId: string, what: string): Promise<boolean> {
     const caps = await this.effectiveForUser(userId);
-    if (!this.mayUpdate(caps)) {
-      throw new ForbiddenException(`Your group is not permitted to edit ${what} — it needs an "approve update" (or approve / override) capability.`);
+    if (this.mayUpdate(caps)) return true;
+    if (caps.canRequestApproval) return false;
+    throw new ForbiddenException(`Your group is not permitted to edit ${what} or request an edit approval.`);
+  }
+
+  /** Assert the actor may APPROVE an edit/update request (approve-update / approve /
+   * override) — the approver side of the blocking workflow. Throws 403 otherwise. */
+  async assertMayApproveUpdate(userId: string, what: string): Promise<void> {
+    const caps = await this.effectiveForUser(userId);
+    if (!(caps.canApproveUpdate || caps.canApprove || caps.canOverride)) {
+      throw new ForbiddenException(`Your group is not permitted to approve ${what}.`);
     }
   }
 

@@ -703,6 +703,10 @@ function EditShLines({ order, onDone }: { order: OrderFull; onDone: () => void }
   const [open, setOpen] = useState(false);
   const shLines = order.lines.filter((l) => l.context === 'SH');
   const [edits, setEdits] = useState<Record<number, { qty: string; price: string; unit: string }>>({});
+  // A request-only group's edit comes back pending (awaiting approval); show that.
+  const [notice, setNotice] = useState<string | null>(null);
+  const noteResult = (r: { pending?: boolean; requestId?: number }) =>
+    setNotice(r?.pending ? `Submitted for approval (request #${r.requestId}) — it takes effect once a qualified approver approves it.` : null);
   const draftFor = (l: Line) =>
     edits[l.id] ?? { qty: l.qtyReqd != null ? String(l.qtyReqd) : '', price: l.price != null ? String(l.price) : '', unit: l.entityUnit ?? '' };
   const setDraft = (lineId: number, patch: Partial<{ qty: string; price: string; unit: string }>) =>
@@ -710,12 +714,12 @@ function EditShLines({ order, onDone }: { order: OrderFull; onDone: () => void }
 
   const save = useMutation({
     mutationFn: ({ lineId, body }: { lineId: number; body: Record<string, unknown> }) =>
-      api.patch(`/shipping-orders/${order.id}/lines/${lineId}`, body),
-    onSuccess: (_r, v) => { setEdits((p) => { const n = { ...p }; delete n[v.lineId]; return n; }); onDone(); },
+      api.patch<{ pending?: boolean; requestId?: number }>(`/shipping-orders/${order.id}/lines/${lineId}`, body),
+    onSuccess: (r, v) => { setEdits((p) => { const n = { ...p }; delete n[v.lineId]; return n; }); noteResult(r); onDone(); },
   });
   const remove = useMutation({
-    mutationFn: (lineId: number) => api.del(`/shipping-orders/${order.id}/lines/${lineId}`),
-    onSuccess: onDone,
+    mutationFn: (lineId: number) => api.del<{ pending?: boolean; requestId?: number }>(`/shipping-orders/${order.id}/lines/${lineId}`),
+    onSuccess: (r) => { noteResult(r); onDone(); },
   });
 
   const onSave = (l: Line) => {
@@ -769,12 +773,13 @@ function EditShLines({ order, onDone }: { order: OrderFull; onDone: () => void }
         </tbody>
       </table>
       {(save.isError || remove.isError) && <p className="mt-2 text-sm text-red-600">{((save.error || remove.error) as Error).message}</p>}
-      <AddShLine orderId={order.id} onAdded={onDone} />
+      {notice && <p className="mt-2 text-sm text-amber-700">{notice}</p>}
+      <AddShLine orderId={order.id} onAdded={onDone} onPending={(requestId) => setNotice(`Submitted for approval (request #${requestId}) — it takes effect once a qualified approver approves it.`)} />
     </Card>
   );
 }
 
-function AddShLine({ orderId, onAdded }: { orderId: number; onAdded: () => void }) {
+function AddShLine({ orderId, onAdded, onPending }: { orderId: number; onAdded: () => void; onPending: (requestId?: number) => void }) {
   const [itemSearch, setItemSearch] = useState('');
   const [qty, setQty] = useState('1');
   const items = useQuery({
@@ -783,8 +788,8 @@ function AddShLine({ orderId, onAdded }: { orderId: number; onAdded: () => void 
     enabled: itemSearch.trim().length >= 1,
   });
   const add = useMutation({
-    mutationFn: (itemId: number) => api.post(`/shipping-orders/${orderId}/lines`, { itemId, qtyReqd: Number(qty) > 0 ? Number(qty) : 1 }),
-    onSuccess: () => { setItemSearch(''); onAdded(); },
+    mutationFn: (itemId: number) => api.post<{ pending?: boolean; requestId?: number }>(`/shipping-orders/${orderId}/lines`, { itemId, qtyReqd: Number(qty) > 0 ? Number(qty) : 1 }),
+    onSuccess: (r) => { setItemSearch(''); if (r?.pending) onPending(r.requestId); onAdded(); },
   });
   return (
     <div className="mt-3 rounded-md border border-slate-200 p-3">

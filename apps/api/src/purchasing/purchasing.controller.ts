@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query,
 import { CurrentUser, type Actor } from '../auth/current-user.decorator';
 import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
+import { RejectApprovalRequestDto } from '../approval/dto/reject-request.dto';
 import type { ListQuery } from '../common/list';
 import { CreatePurchaseOrderDto, CreatePurchaseOrderLineDto } from './dto/create-purchase-order.dto';
 import { UpdatePurchaseOrderLineDto } from './dto/edit-po-line.dto';
@@ -65,6 +66,26 @@ export class PurchasingController {
   @Get('recall')
   recall(@Query('q') q?: string) {
     return this.purchasing.recallByManufacturerLot(q);
+  }
+
+  // Pending PO line-edit approval requests + approve/reject (static paths before
+  // :id). Gated by purchasing.create (the same right that edits lines).
+  @Get('line-approvals')
+  @RequireProgram('purchasing.create')
+  lineApprovals() {
+    return this.purchasing.listPoLineApprovals();
+  }
+
+  @Post('line-approvals/:requestId/approve')
+  @RequireProgram('purchasing.create')
+  approveLineEdit(@Param('requestId', ParseIntPipe) requestId: number, @CurrentUser() actor: Actor) {
+    return this.purchasing.approvePoLineEdit(requestId, actor);
+  }
+
+  @Post('line-approvals/:requestId/reject')
+  @RequireProgram('purchasing.create')
+  rejectLineEdit(@Param('requestId', ParseIntPipe) requestId: number, @Body() dto: RejectApprovalRequestDto, @CurrentUser() actor: Actor) {
+    return this.purchasing.rejectPoLineEdit(requestId, dto, actor);
   }
 
   @Get(':id')

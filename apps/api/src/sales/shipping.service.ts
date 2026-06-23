@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
 import { ApprovalPolicyService } from '../approval/approval-policy.service';
+import { ApprovalRequestService } from '../approval/approval-request.service';
 import { AuditService } from '../audit/audit.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
@@ -15,6 +16,33 @@ import type { UpdateShippingOrderLineDto } from './dto/edit-sh-line.dto';
 // (verified against the live data); their lines are OrdDetail Context='SH'.
 const SH_CONTEXT = 'SH';
 
+// ApprovalRequest.kind discriminator for the SH line-edit blocking workflow. One
+// kind covers all three sub-actions; payload.op selects add / update / remove.
+const SH_LINE_EDIT_KIND = 'sh.line.edit';
+
+type ShLineEditPayload =
+  | { op: 'add'; dto: ShippingLineDto }
+  | { op: 'update'; lineId: number; dto: UpdateShippingOrderLineDto }
+  | { op: 'remove'; lineId: number };
+
+/** Human summary of a pending SH line-edit request for the approvals queue. */
+function summarizeShLinePayload(payload: ShLineEditPayload, codeById: Map<number, string | null>): string {
+  if (payload.op === 'add') {
+    const d = payload.dto;
+    return `Add ${codeById.get(d.itemId) ?? `item ${d.itemId}`} — qty ${d.qtyReqd}${d.price != null ? ` @ ${d.price}` : ''}`;
+  }
+  if (payload.op === 'update') {
+    const d = payload.dto;
+    const parts: string[] = [];
+    if (d.qtyReqd !== undefined) parts.push(`qty ${d.qtyReqd}`);
+    if (d.price !== undefined) parts.push(`price ${d.price}`);
+    if (d.unit !== undefined) parts.push(`unit ${d.unit || '—'}`);
+    if (d.description !== undefined) parts.push('description');
+    return `Update line ${payload.lineId}${parts.length ? ` — ${parts.join(', ')}` : ''}`;
+  }
+  return `Remove line ${payload.lineId}`;
+}
+
 @Injectable()
 export class ShippingService {
   constructor(
@@ -23,6 +51,7 @@ export class ShippingService {
     private readonly party: PartyService,
     private readonly salesPricing: SalesPricingService,
     private readonly approvalPolicy: ApprovalPolicyService,
+    private readonly approvalRequests: ApprovalRequestService,
   ) {}
 
   /**
@@ -183,23 +212,112 @@ export class ShippingService {
   }
 
   /**
-   * Add a line to an NST shipping order, sourcing the customer's sale price from
-   * their price list's effective version (exactly like create) unless an explicit
-   * price is given. Native id under the alloc lock; atomic audit. (SH lines carry
+   * Add a line to an NST shipping order. Blocking-approval workflow: a group that
+   * can approve updates enacts the add directly (sourcing the customer's sale
+   * price from their price list's effective version unless an explicit price is
+   * given); a request-only group submits a PENDING approval request (the order is
+   * left unchanged). Native id under the alloc lock; atomic audit. (SH lines carry
    * no packaging snapshot — OrdDetailPricing is purchasing-only.)
    */
   async addLine(id: number, dto: ShippingLineDto, actor: Actor) {
-    await this.approvalPolicy.assertMayUpdate(actor.id, 'shipping order lines');
-    const order = await this.requireNstSh(id);
-    const item = await this.prisma.item.findUnique({
-      where: { id: dto.itemId },
-      select: { id: true, itemCode: true, description: true, unit: true },
-    });
-    if (!item) throw new BadRequestException(`Unknown item id ${dto.itemId}`);
-    const sourced =
-      order.billToId != null ? await this.salesPricing.priceForCustomer(order.billToId, dto.itemId, dto.qtyReqd) : null;
+    const canEnact = await this.approvalPolicy.gateUpdate(actor.id, 'shipping order lines');
+    await this.requireNstSh(id); // fast-fail; applyShLineEditTx re-asserts NST under a row lock
+    const payload: ShLineEditPayload = { op: 'add', dto };
+    const { item } = await this.validateShLineEdit(this.prisma, id, payload);
+    if (canEnact) return this.prisma.$transaction((tx) => this.applyShLineEditTx(tx, id, payload, actor));
+    return this.submitShLineRequest(id, payload, `add ${item?.itemCode ?? `item ${dto.itemId}`} qty ${dto.qtyReqd}`, actor);
+  }
 
-    return this.prisma.$transaction(async (tx) => {
+  /** Update qty / price / unit / description on a line of an NST SH order
+   * (IDOR-safe). SH lines have no receipts (shipping is captured at close and
+   * moves the order out of NST), so a qty reduction is unguarded. Submit-or-enact. */
+  async updateLine(id: number, lineId: number, dto: UpdateShippingOrderLineDto, actor: Actor) {
+    const canEnact = await this.approvalPolicy.gateUpdate(actor.id, 'shipping order lines');
+    await this.requireNstSh(id); // fast-fail
+    const payload: ShLineEditPayload = { op: 'update', lineId, dto };
+    await this.validateShLineEdit(this.prisma, id, payload);
+    if (!this.hasLineUpdate(dto)) return { id, lineId, unchanged: true };
+    if (canEnact) return this.prisma.$transaction((tx) => this.applyShLineEditTx(tx, id, payload, actor));
+    return this.submitShLineRequest(id, payload, `update line ${lineId}`, actor);
+  }
+
+  /** Remove a line from an NST SH order. Rejects removing the last line (an order
+   * needs at least one). SH lines have no receipts/packaging to clean up.
+   * Submit-or-enact. */
+  async removeLine(id: number, lineId: number, actor: Actor) {
+    const canEnact = await this.approvalPolicy.gateUpdate(actor.id, 'shipping order lines');
+    await this.requireNstSh(id); // fast-fail
+    const payload: ShLineEditPayload = { op: 'remove', lineId };
+    await this.validateShLineEdit(this.prisma, id, payload);
+    if (canEnact) return this.prisma.$transaction((tx) => this.applyShLineEditTx(tx, id, payload, actor));
+    return this.submitShLineRequest(id, payload, `remove line ${lineId}`, actor);
+  }
+
+  private hasLineUpdate(dto: UpdateShippingOrderLineDto): boolean {
+    return dto.qtyReqd !== undefined || dto.price !== undefined || dto.unit !== undefined || dto.description !== undefined;
+  }
+
+  /**
+   * Lock the SH order's Ordr row (SELECT ... FOR UPDATE) and re-assert it is still
+   * an NST shipping order, INSIDE the transaction — so the NST precondition and
+   * the line writes are atomic. Returns billToId so an add can re-source the
+   * customer's list price.
+   */
+  private async lockAndRequireNstSh(tx: Prisma.TransactionClient, id: number): Promise<{ billToId: number | null }> {
+    // The Ordr PK column is itself named "Ordr" (legacy schema); lock that row.
+    await tx.$queryRaw`SELECT "Ordr" FROM "Ordr" WHERE "Ordr" = ${id} FOR UPDATE`;
+    const order = await tx.ordr.findUnique({ where: { id }, select: { context: true, status: true, billToId: true } });
+    if (!order || order.context !== SH_CONTEXT) throw new NotFoundException('Shipping order not found');
+    if ((order.status?.trim() || 'NST') !== 'NST') {
+      throw new BadRequestException('Lines can only be edited on a not-started shipping order.');
+    }
+    return { billToId: order.billToId };
+  }
+
+  /**
+   * Validate an SH line-edit op against the order; throws on any violation. Reads
+   * via the given client — this.prisma for the up-front UX check, the tx client
+   * for the authoritative in-transaction re-check (after the row lock). Returns
+   * the prefetched item (add) the applier needs.
+   */
+  private async validateShLineEdit(
+    db: Prisma.TransactionClient,
+    id: number,
+    payload: ShLineEditPayload,
+  ): Promise<{ item?: { id: number; itemCode: string | null; description: string | null; unit: string | null }; line?: { qtyReqd: number | null; price: Prisma.Decimal | null; entityUnit: string | null; description: string | null } }> {
+    if (payload.op === 'add') {
+      const item = await db.item.findUnique({
+        where: { id: payload.dto.itemId },
+        select: { id: true, itemCode: true, description: true, unit: true },
+      });
+      if (!item) throw new BadRequestException(`Unknown item id ${payload.dto.itemId}`);
+      return { item };
+    }
+    const line = await db.ordDetail.findUnique({
+      where: { id: payload.lineId },
+      select: { id: true, ordrId: true, qtyReqd: true, price: true, entityUnit: true, description: true },
+    });
+    if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${payload.lineId} is not on shipping order #${id}.`);
+    if (payload.op === 'remove') {
+      const lineCount = await db.ordDetail.count({ where: { ordrId: id, context: SH_CONTEXT } });
+      if (lineCount <= 1) throw new BadRequestException('A shipping order must have at least one line.');
+    }
+    return { line };
+  }
+
+  /**
+   * Apply an SH line edit inside a transaction: lock + re-assert NST, re-validate
+   * the op authoritatively, then enact it (add / update / remove) + atomic audit.
+   * The single shared enactment path for the direct-enact and approve flows.
+   */
+  private async applyShLineEditTx(tx: Prisma.TransactionClient, id: number, payload: ShLineEditPayload, actor: Actor) {
+    const order = await this.lockAndRequireNstSh(tx, id);
+    const v = await this.validateShLineEdit(tx, id, payload);
+
+    if (payload.op === 'add') {
+      const dto = payload.dto;
+      const item = v.item!;
+      const sourced = order.billToId != null ? await this.salesPricing.priceForCustomer(order.billToId, dto.itemId, dto.qtyReqd) : null;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       const odId = ((await tx.ordDetail.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
       const sort = ((await tx.ordDetail.aggregate({ _max: { sortOrder: true }, where: { ordrId: id, context: SH_CONTEXT } }))._max.sortOrder ?? 0) + 1;
@@ -231,69 +349,140 @@ export class ShippingService {
         tx,
       );
       return { id, lineId: odId, sourced: sourced?.price != null };
-    });
-  }
+    }
 
-  /** Update qty / price / unit / description on a line of an NST SH order
-   * (IDOR-safe). SH lines have no receipts (shipping is captured at close and
-   * moves the order out of NST), so a qty reduction is unguarded. */
-  async updateLine(id: number, lineId: number, dto: UpdateShippingOrderLineDto, actor: Actor) {
-    await this.approvalPolicy.assertMayUpdate(actor.id, 'shipping order lines');
-    await this.requireNstSh(id);
-    const line = await this.prisma.ordDetail.findUnique({
-      where: { id: lineId },
-      select: { id: true, ordrId: true, qtyReqd: true, price: true, entityUnit: true, description: true },
-    });
-    if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${lineId} is not on shipping order #${id}.`);
-
-    const data: Record<string, unknown> = {};
-    const changes: { tableName: string; recordId: string; fieldName: string; oldValue: string | null; newValue: string | null }[] = [];
-    if (dto.qtyReqd !== undefined) {
-      data.qtyReqd = dto.qtyReqd;
-      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'QtyReqd', oldValue: line.qtyReqd != null ? String(line.qtyReqd) : null, newValue: String(dto.qtyReqd) });
-    }
-    if (dto.price !== undefined) {
-      data.price = dto.price;
-      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Price', oldValue: line.price != null ? String(line.price) : null, newValue: String(dto.price) });
-    }
-    if (dto.unit !== undefined) {
-      data.entityUnit = dto.unit || null;
-      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'EntityUnit', oldValue: line.entityUnit, newValue: dto.unit || null });
-    }
-    if (dto.description !== undefined) {
-      data.description = dto.description || null;
-      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Description', oldValue: line.description, newValue: dto.description || null });
-    }
-    if (!Object.keys(data).length) return { id, lineId, unchanged: true };
-
-    return this.prisma.$transaction(async (tx) => {
+    if (payload.op === 'update') {
+      const { lineId, dto } = payload;
+      const line = v.line!;
+      const data: Record<string, unknown> = {};
+      const changes: { tableName: string; recordId: string; fieldName: string; oldValue: string | null; newValue: string | null }[] = [];
+      if (dto.qtyReqd !== undefined) {
+        data.qtyReqd = dto.qtyReqd;
+        changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'QtyReqd', oldValue: line.qtyReqd != null ? String(line.qtyReqd) : null, newValue: String(dto.qtyReqd) });
+      }
+      if (dto.price !== undefined) {
+        data.price = dto.price;
+        changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Price', oldValue: line.price != null ? String(line.price) : null, newValue: String(dto.price) });
+      }
+      if (dto.unit !== undefined) {
+        data.entityUnit = dto.unit || null;
+        changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'EntityUnit', oldValue: line.entityUnit, newValue: dto.unit || null });
+      }
+      if (dto.description !== undefined) {
+        data.description = dto.description || null;
+        changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Description', oldValue: line.description, newValue: dto.description || null });
+      }
+      if (!Object.keys(data).length) return { id, lineId, unchanged: true };
       await tx.ordDetail.update({ where: { id: lineId }, data });
       await this.audit.record(
         { action: 'shippingorder.line.update', actorUserId: actor.id, actorLabel: actor.label, program: 'shipping.create', summary: `Line ${lineId} on shipping order #${id} updated`, changes },
         tx,
       );
       return { id, lineId };
+    }
+
+    // remove
+    const { lineId } = payload;
+    await tx.ordDetail.delete({ where: { id: lineId } });
+    await this.audit.record(
+      { action: 'shippingorder.line.remove', actorUserId: actor.id, actorLabel: actor.label, program: 'shipping.create', summary: `Line ${lineId} removed from shipping order #${id}`, changes: [{ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'removed', oldValue: 'line', newValue: null }] },
+      tx,
+    );
+    return { id, lineId, removed: true };
+  }
+
+  /** Submit a PENDING SH line-edit request (the order is left unchanged until a
+   * qualified approver enacts it). Atomic audit. */
+  private async submitShLineRequest(id: number, payload: ShLineEditPayload, summary: string, actor: Actor) {
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const req = await this.approvalRequests.create(
+        tx,
+        { kind: SH_LINE_EDIT_KIND, targetTable: 'Ordr', targetId: String(id), payload, requiredCapability: 'approveUpdate' },
+        actor,
+        at,
+      );
+      await this.audit.record(
+        {
+          action: 'shippingorder.line.request',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'shipping.create',
+          summary: `Shipping order #${id} line edit requested (${summary}) — awaiting approval`,
+          changes: [{ tableName: 'approval_request', recordId: String(req.id), fieldName: 'state', oldValue: null, newValue: 'PENDING' }],
+        },
+        tx,
+      );
+      return { id, pending: true as const, requestId: Number(req.id) };
     });
   }
 
-  /** Remove a line from an NST SH order. Rejects removing the last line (an order
-   * needs at least one). SH lines have no receipts/packaging to clean up. */
-  async removeLine(id: number, lineId: number, actor: Actor) {
-    await this.approvalPolicy.assertMayUpdate(actor.id, 'shipping order lines');
-    await this.requireNstSh(id);
-    const line = await this.prisma.ordDetail.findUnique({ where: { id: lineId }, select: { id: true, ordrId: true } });
-    if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${lineId} is not on shipping order #${id}.`);
-    const lineCount = await this.prisma.ordDetail.count({ where: { ordrId: id, context: SH_CONTEXT } });
-    if (lineCount <= 1) throw new BadRequestException('A shipping order must have at least one line.');
-
+  /** Approve a pending SH line-edit request — enacts it (re-validating NST + the
+   * op under a row lock). CAS-decide; separation of duties. */
+  async approveShLineEdit(requestId: number, actor: Actor) {
+    const req = await this.approvalRequests.get<ShLineEditPayload>(BigInt(requestId));
+    if (!req || req.kind !== SH_LINE_EDIT_KIND) throw new NotFoundException('Shipping-order line-edit request not found');
+    if (req.state !== 'PENDING') throw new BadRequestException(`This request is already ${req.state.toLowerCase()}.`);
+    await this.approvalPolicy.assertMayApproveUpdate(actor.id, 'shipping order line edits');
+    if (req.requestedById === actor.id) throw new BadRequestException('You cannot approve your own line-edit request.');
+    const id = Number(req.targetId);
+    await this.requireNstSh(id); // fast-fail; re-asserted under lock in applyShLineEditTx
+    const at = new Date();
     return this.prisma.$transaction(async (tx) => {
-      await tx.ordDetail.delete({ where: { id: lineId } });
+      await this.approvalRequests.decide(tx, req.id, 'APPROVED', actor, at);
+      const res = await this.applyShLineEditTx(tx, id, req.payload, actor);
+      return { ...res, requestId, enacted: true };
+    });
+  }
+
+  /** Reject a pending SH line-edit request (order unchanged; reason required). */
+  async rejectShLineEdit(requestId: number, dto: { reason?: string }, actor: Actor) {
+    if (!dto.reason?.trim()) throw new BadRequestException('A reason is required to reject a line-edit request.');
+    const req = await this.approvalRequests.get(BigInt(requestId));
+    if (!req || req.kind !== SH_LINE_EDIT_KIND) throw new NotFoundException('Shipping-order line-edit request not found');
+    if (req.state !== 'PENDING') throw new BadRequestException(`This request is already ${req.state.toLowerCase()}.`);
+    await this.approvalPolicy.assertMayApproveUpdate(actor.id, 'shipping order line edits');
+    const reason = dto.reason.trim();
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      await this.approvalRequests.decide(tx, req.id, 'REJECTED', actor, at, reason);
       await this.audit.record(
-        { action: 'shippingorder.line.remove', actorUserId: actor.id, actorLabel: actor.label, program: 'shipping.create', summary: `Line ${lineId} removed from shipping order #${id}`, changes: [{ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'removed', oldValue: 'line', newValue: null }] },
+        { action: 'shippingorder.line.reject', actorUserId: actor.id, actorLabel: actor.label, program: 'shipping.create', summary: `Shipping order #${req.targetId} line-edit request rejected — ${reason}`, changes: [{ tableName: 'approval_request', recordId: String(req.id), fieldName: 'state', oldValue: 'PENDING', newValue: 'REJECTED' }] },
         tx,
       );
-      return { id, lineId, removed: true };
+      return { requestId, state: 'REJECTED' as const };
     });
+  }
+
+  /** Pending SH line-edit requests decorated with order + op context (the queue). */
+  async listShLineApprovals() {
+    const reqs = await this.approvalRequests.listPending<ShLineEditPayload>(SH_LINE_EDIT_KIND);
+    if (!reqs.length) return { rows: [] };
+    const orderIds = [...new Set(reqs.map((r) => Number(r.targetId)))];
+    const addItemIds = [...new Set(reqs.filter((r) => r.payload.op === 'add').map((r) => (r.payload as { dto: ShippingLineDto }).dto.itemId))];
+    const [orders, items] = await Promise.all([
+      this.prisma.ordr.findMany({ where: { id: { in: orderIds } }, select: { id: true, poNumber: true, status: true } }),
+      addItemIds.length ? this.prisma.item.findMany({ where: { id: { in: addItemIds } }, select: { id: true, itemCode: true } }) : Promise.resolve([]),
+    ]);
+    const orderById = new Map(orders.map((o) => [o.id, o]));
+    const codeById = new Map(items.map((i) => [i.id, i.itemCode]));
+    return {
+      rows: reqs.map((r) => {
+        const o = orderById.get(Number(r.targetId));
+        return {
+          requestId: Number(r.id),
+          orderId: Number(r.targetId),
+          poNumber: o?.poNumber ?? null,
+          orderStatus: o?.status ?? null,
+          op: r.payload.op,
+          lineId: r.payload.op !== 'add' ? r.payload.lineId : null,
+          summary: summarizeShLinePayload(r.payload, codeById),
+          requestReason: r.requestReason,
+          requestedBy: r.requestedByLabel ?? r.requestedById,
+          requestedAt: r.requestedAt,
+        };
+      }),
+    };
   }
 
   /** The customer's sale price for an item, from their price list's effective

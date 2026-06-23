@@ -18,6 +18,7 @@ import { InvoiceDoc } from './pages/InvoiceDoc';
 import { Invoices } from './pages/Invoices';
 import { Items } from './pages/Items';
 import { ItemTests } from './pages/ItemTests';
+import { LineEditApprovals } from './pages/LineEditApprovals';
 import { Login } from './pages/Login';
 import { LotTracking } from './pages/LotTracking';
 import { MiscReceipts } from './pages/MiscReceipts';
@@ -91,6 +92,7 @@ export function App() {
         <Route path="/approval-policies" element={<ApprovalPolicies />} />
         <Route path="/disposition-approvals" element={<DispositionApprovals />} />
         <Route path="/order-approvals" element={<OrderEditApprovals />} />
+        <Route path="/line-approvals" element={<LineEditApprovals />} />
         <Route path="/audit" element={<Audit />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/change-password" element={<ChangePassword />} />
@@ -123,6 +125,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/recall', label: 'Lot Trace' },
     { to: '/disposition-approvals', label: 'QA Approvals' },
     { to: '/order-approvals', label: 'Order Approvals' },
+    { to: '/line-approvals', label: 'Line Approvals' },
     { to: '/users', label: 'Users' },
     { to: '/roles', label: 'Roles' },
     { to: '/secured-items', label: 'Secured Items' },

@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
 import { ApprovalPolicyService } from '../approval/approval-policy.service';
+import { ApprovalRequestService } from '../approval/approval-request.service';
 import { AuditService } from '../audit/audit.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
@@ -27,6 +28,35 @@ const num = (v: unknown) => (v == null ? 0 : Number(v));
 // where Entity is null and the party is BillTo/ShipTo).
 const PO_CONTEXT = 'PO';
 
+// ApprovalRequest.kind discriminator for the PO line-edit blocking workflow. One
+// kind covers all three sub-actions; payload.op selects add / update / remove.
+const PO_LINE_EDIT_KIND = 'po.line.edit';
+
+// The line-edit payload the engine stores (parsed back on approve). A request is
+// enacted from this exactly as a direct edit would have applied it.
+type PoLineEditPayload =
+  | { op: 'add'; dto: CreatePurchaseOrderLineDto }
+  | { op: 'update'; lineId: number; dto: UpdatePurchaseOrderLineDto }
+  | { op: 'remove'; lineId: number };
+
+/** Human summary of a pending PO line-edit request for the approvals queue. */
+function summarizeLinePayload(payload: PoLineEditPayload, codeById: Map<number, string | null>): string {
+  if (payload.op === 'add') {
+    const d = payload.dto;
+    return `Add ${codeById.get(d.itemId) ?? `item ${d.itemId}`} — qty ${d.qtyReqd}${d.price != null ? ` @ ${d.price}` : ''}`;
+  }
+  if (payload.op === 'update') {
+    const d = payload.dto;
+    const parts: string[] = [];
+    if (d.qtyReqd !== undefined) parts.push(`qty ${d.qtyReqd}`);
+    if (d.price !== undefined) parts.push(`price ${d.price}`);
+    if (d.unit !== undefined) parts.push(`unit ${d.unit || '—'}`);
+    if (d.description !== undefined) parts.push('description');
+    return `Update line ${payload.lineId}${parts.length ? ` — ${parts.join(', ')}` : ''}`;
+  }
+  return `Remove line ${payload.lineId}`;
+}
+
 const SORTABLE = ['id', 'status', 'dateOrdered', 'dateRequired', 'dateCompleted'];
 
 @Injectable()
@@ -39,6 +69,7 @@ export class PurchasingService {
     private readonly valuation: ValuationService,
     private readonly priceVersions: PriceVersionService,
     private readonly approvalPolicy: ApprovalPolicyService,
+    private readonly approvalRequests: ApprovalRequestService,
   ) {}
 
   /** Browse purchase orders (Ordr Context='PO') with supplier name + line total. */
@@ -476,21 +507,122 @@ export class PurchasingService {
   }
 
   /**
-   * Add a line to an NST purchase order, sourcing the supplier's packaging +
-   * tiered price from the effective price version (exactly like create), so the
-   * added line renders the same packaging detail. Native id under the alloc lock.
+   * Add a line to an NST purchase order. Blocking-approval workflow: a group that
+   * can approve updates enacts the add directly (sourcing the supplier's packaging
+   * + tiered price from the effective price version, exactly like create); a
+   * request-only group submits a PENDING approval request (the PO is left
+   * unchanged) for a qualified approver to enact later. Native id under the alloc
+   * lock; atomic audit.
    */
   async addLine(id: number, dto: CreatePurchaseOrderLineDto, actor: Actor) {
-    await this.approvalPolicy.assertMayUpdate(actor.id, 'purchase order lines');
-    const po = await this.requireNstPo(id);
-    const item = await this.prisma.item.findUnique({
-      where: { id: dto.itemId },
-      select: { id: true, itemCode: true, description: true, unit: true },
-    });
-    if (!item) throw new BadRequestException(`Unknown item id ${dto.itemId}`);
-    const sourcing = po.entityId != null ? await this.priceVersions.lineSourcing(po.entityId, dto.itemId, dto.qtyReqd) : null;
+    const canEnact = await this.approvalPolicy.gateUpdate(actor.id, 'purchase order lines');
+    await this.requireNstPo(id); // fast-fail; applyPoLineEditTx re-asserts NST under a row lock
+    const payload: PoLineEditPayload = { op: 'add', dto };
+    const { item } = await this.validatePoLineEdit(this.prisma, id, payload);
+    if (canEnact) return this.prisma.$transaction((tx) => this.applyPoLineEditTx(tx, id, payload, actor));
+    return this.submitPoLineRequest(id, payload, `add ${item?.itemCode ?? `item ${dto.itemId}`} qty ${dto.qtyReqd}`, actor);
+  }
 
-    return this.prisma.$transaction(async (tx) => {
+  /** Update qty / price / unit / description on a line of an NST PO (IDOR-safe).
+   * A qty edit intentionally does NOT re-source the tier price / packaging
+   * snapshot — the operator sets the price explicitly here. Submit-or-enact. */
+  async updateLine(id: number, lineId: number, dto: UpdatePurchaseOrderLineDto, actor: Actor) {
+    const canEnact = await this.approvalPolicy.gateUpdate(actor.id, 'purchase order lines');
+    await this.requireNstPo(id); // fast-fail
+    const payload: PoLineEditPayload = { op: 'update', lineId, dto };
+    await this.validatePoLineEdit(this.prisma, id, payload);
+    // A PATCH that changes nothing is a no-op — don't open a request/transaction.
+    if (!this.hasLineUpdate(dto)) return { id, lineId, unchanged: true };
+    if (canEnact) return this.prisma.$transaction((tx) => this.applyPoLineEditTx(tx, id, payload, actor));
+    return this.submitPoLineRequest(id, payload, `update line ${lineId}`, actor);
+  }
+
+  /** Remove a line from an NST PO (and its packaging snapshot). Rejects removing
+   * the last line (a PO needs at least one) or a line that already has receipts.
+   * Submit-or-enact. */
+  async removeLine(id: number, lineId: number, actor: Actor) {
+    const canEnact = await this.approvalPolicy.gateUpdate(actor.id, 'purchase order lines');
+    await this.requireNstPo(id); // fast-fail
+    const payload: PoLineEditPayload = { op: 'remove', lineId };
+    await this.validatePoLineEdit(this.prisma, id, payload);
+    if (canEnact) return this.prisma.$transaction((tx) => this.applyPoLineEditTx(tx, id, payload, actor));
+    return this.submitPoLineRequest(id, payload, `remove line ${lineId}`, actor);
+  }
+
+  private hasLineUpdate(dto: UpdatePurchaseOrderLineDto): boolean {
+    return dto.qtyReqd !== undefined || dto.price !== undefined || dto.unit !== undefined || dto.description !== undefined;
+  }
+
+  /**
+   * Lock the PO's Ordr row (SELECT ... FOR UPDATE) and re-assert it is still an
+   * NST purchase order, INSIDE the transaction — so the NST precondition and the
+   * line writes are atomic. A concurrent release/complete blocks on this row lock,
+   * preventing a line edit from landing on a no-longer-editable PO.
+   */
+  private async lockAndRequireNstPo(tx: Prisma.TransactionClient, id: number): Promise<{ entityId: number | null }> {
+    // The Ordr PK column is itself named "Ordr" (legacy schema); lock that row.
+    await tx.$queryRaw`SELECT "Ordr" FROM "Ordr" WHERE "Ordr" = ${id} FOR UPDATE`;
+    const po = await tx.ordr.findUnique({ where: { id }, select: { context: true, status: true, entityId: true } });
+    if (!po || po.context !== PO_CONTEXT) throw new NotFoundException('Purchase order not found');
+    if ((po.status?.trim() || 'NST') !== 'NST') {
+      throw new BadRequestException('Lines can only be edited on a not-started purchase order.');
+    }
+    return { entityId: po.entityId };
+  }
+
+  /**
+   * Validate a PO line-edit op against the order; throws on any violation. Reads
+   * via the given client — this.prisma for the up-front UX check, the tx client
+   * for the authoritative in-transaction re-check (after the row lock). Returns
+   * the prefetched item (add) the applier needs.
+   */
+  private async validatePoLineEdit(
+    db: Prisma.TransactionClient,
+    id: number,
+    payload: PoLineEditPayload,
+  ): Promise<{ item?: { id: number; itemCode: string | null; description: string | null; unit: string | null }; line?: { qtyReqd: number | null; qtyUsed: number | null; price: Prisma.Decimal | null; entityUnit: string | null; description: string | null } }> {
+    if (payload.op === 'add') {
+      const item = await db.item.findUnique({
+        where: { id: payload.dto.itemId },
+        select: { id: true, itemCode: true, description: true, unit: true },
+      });
+      if (!item) throw new BadRequestException(`Unknown item id ${payload.dto.itemId}`);
+      return { item };
+    }
+    const line = await db.ordDetail.findUnique({
+      where: { id: payload.lineId },
+      select: { id: true, ordrId: true, qtyReqd: true, qtyUsed: true, price: true, entityUnit: true, description: true },
+    });
+    if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${payload.lineId} is not on purchase order #${id}.`);
+    if (payload.op === 'update') {
+      // An NST PO can already carry receipts (receiving doesn't change status), so a
+      // qty reduction must not drop below what's been received — that would make
+      // backordered (clamped at 0) silently mask an over-receipt.
+      if (payload.dto.qtyReqd !== undefined && payload.dto.qtyReqd < (line.qtyUsed ?? 0)) {
+        throw new BadRequestException(`Cannot set the ordered qty below the ${line.qtyUsed} already received.`);
+      }
+      return { line };
+    }
+    // remove
+    if ((line.qtyUsed ?? 0) > 0) throw new BadRequestException('Cannot remove a line that already has receipts.');
+    const lineCount = await db.ordDetail.count({ where: { ordrId: id, context: PO_CONTEXT } });
+    if (lineCount <= 1) throw new BadRequestException('A purchase order must have at least one line.');
+    return { line };
+  }
+
+  /**
+   * Apply a PO line edit inside a transaction: lock + re-assert NST, re-validate
+   * the op authoritatively, then enact it (add / update / remove) + atomic audit.
+   * The single shared enactment path for the direct-enact and approve flows.
+   */
+  private async applyPoLineEditTx(tx: Prisma.TransactionClient, id: number, payload: PoLineEditPayload, actor: Actor) {
+    const po = await this.lockAndRequireNstPo(tx, id);
+    const v = await this.validatePoLineEdit(tx, id, payload);
+
+    if (payload.op === 'add') {
+      const dto = payload.dto;
+      const item = v.item!;
+      const sourcing = po.entityId != null ? await this.priceVersions.lineSourcing(po.entityId, dto.itemId, dto.qtyReqd) : null;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       const odId = ((await tx.ordDetail.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
       const sort = ((await tx.ordDetail.aggregate({ _max: { sortOrder: true }, where: { ordrId: id, context: PO_CONTEXT } }))._max.sortOrder ?? 0) + 1;
@@ -535,80 +667,141 @@ export class PurchasingService {
         tx,
       );
       return { id, lineId: odId, packaged: sourcing != null };
-    });
-  }
-
-  /** Update qty / price / unit / description on a line of an NST PO (IDOR-safe).
-   * A qty edit intentionally does NOT re-source the tier price / packaging
-   * snapshot — the operator sets the price explicitly here. */
-  async updateLine(id: number, lineId: number, dto: UpdatePurchaseOrderLineDto, actor: Actor) {
-    await this.approvalPolicy.assertMayUpdate(actor.id, 'purchase order lines');
-    await this.requireNstPo(id);
-    const line = await this.prisma.ordDetail.findUnique({
-      where: { id: lineId },
-      select: { id: true, ordrId: true, qtyReqd: true, qtyUsed: true, price: true, entityUnit: true, description: true },
-    });
-    if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${lineId} is not on purchase order #${id}.`);
-    // An NST PO can already carry receipts (receiving doesn't change status), so a
-    // qty reduction must not drop below what's been received — that would make
-    // backordered (clamped at 0) silently mask an over-receipt.
-    if (dto.qtyReqd !== undefined && dto.qtyReqd < (line.qtyUsed ?? 0)) {
-      throw new BadRequestException(`Cannot set the ordered qty below the ${line.qtyUsed} already received.`);
     }
 
-    const data: Record<string, unknown> = {};
-    const changes: { tableName: string; recordId: string; fieldName: string; oldValue: string | null; newValue: string | null }[] = [];
-    if (dto.qtyReqd !== undefined) {
-      data.qtyReqd = dto.qtyReqd;
-      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'QtyReqd', oldValue: line.qtyReqd != null ? String(line.qtyReqd) : null, newValue: String(dto.qtyReqd) });
-    }
-    if (dto.price !== undefined) {
-      data.price = dto.price;
-      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Price', oldValue: line.price != null ? String(line.price) : null, newValue: String(dto.price) });
-    }
-    if (dto.unit !== undefined) {
-      data.entityUnit = dto.unit || null;
-      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'EntityUnit', oldValue: line.entityUnit, newValue: dto.unit || null });
-    }
-    if (dto.description !== undefined) {
-      data.description = dto.description || null;
-      changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Description', oldValue: line.description, newValue: dto.description || null });
-    }
-    if (!Object.keys(data).length) return { id, lineId, unchanged: true };
-
-    return this.prisma.$transaction(async (tx) => {
+    if (payload.op === 'update') {
+      const { lineId, dto } = payload;
+      const line = v.line!;
+      const data: Record<string, unknown> = {};
+      const changes: { tableName: string; recordId: string; fieldName: string; oldValue: string | null; newValue: string | null }[] = [];
+      if (dto.qtyReqd !== undefined) {
+        data.qtyReqd = dto.qtyReqd;
+        changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'QtyReqd', oldValue: line.qtyReqd != null ? String(line.qtyReqd) : null, newValue: String(dto.qtyReqd) });
+      }
+      if (dto.price !== undefined) {
+        data.price = dto.price;
+        changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Price', oldValue: line.price != null ? String(line.price) : null, newValue: String(dto.price) });
+      }
+      if (dto.unit !== undefined) {
+        data.entityUnit = dto.unit || null;
+        changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'EntityUnit', oldValue: line.entityUnit, newValue: dto.unit || null });
+      }
+      if (dto.description !== undefined) {
+        data.description = dto.description || null;
+        changes.push({ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'Description', oldValue: line.description, newValue: dto.description || null });
+      }
+      if (!Object.keys(data).length) return { id, lineId, unchanged: true };
       await tx.ordDetail.update({ where: { id: lineId }, data });
       await this.audit.record(
         { action: 'purchaseorder.line.update', actorUserId: actor.id, actorLabel: actor.label, program: 'purchasing.create', summary: `Line ${lineId} on purchase order #${id} updated`, changes },
         tx,
       );
       return { id, lineId };
+    }
+
+    // remove
+    const { lineId } = payload;
+    await tx.ordDetailPricing.deleteMany({ where: { ordDetailId: lineId } });
+    await tx.ordDetail.delete({ where: { id: lineId } });
+    await this.audit.record(
+      { action: 'purchaseorder.line.remove', actorUserId: actor.id, actorLabel: actor.label, program: 'purchasing.create', summary: `Line ${lineId} removed from purchase order #${id}`, changes: [{ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'removed', oldValue: 'line', newValue: null }] },
+      tx,
+    );
+    return { id, lineId, removed: true };
+  }
+
+  /** Submit a PENDING PO line-edit request (the PO is left unchanged until a
+   * qualified approver enacts it). Atomic audit. */
+  private async submitPoLineRequest(id: number, payload: PoLineEditPayload, summary: string, actor: Actor) {
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const req = await this.approvalRequests.create(
+        tx,
+        { kind: PO_LINE_EDIT_KIND, targetTable: 'Ordr', targetId: String(id), payload, requiredCapability: 'approveUpdate' },
+        actor,
+        at,
+      );
+      await this.audit.record(
+        {
+          action: 'purchaseorder.line.request',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'purchasing.create',
+          summary: `Purchase order #${id} line edit requested (${summary}) — awaiting approval`,
+          changes: [{ tableName: 'approval_request', recordId: String(req.id), fieldName: 'state', oldValue: null, newValue: 'PENDING' }],
+        },
+        tx,
+      );
+      return { id, pending: true as const, requestId: Number(req.id) };
     });
   }
 
-  /** Remove a line from an NST PO (and its packaging snapshot). Rejects removing
-   * the last line (a PO needs at least one) or a line that already has receipts. */
-  async removeLine(id: number, lineId: number, actor: Actor) {
-    await this.approvalPolicy.assertMayUpdate(actor.id, 'purchase order lines');
-    await this.requireNstPo(id);
-    const line = await this.prisma.ordDetail.findUnique({
-      where: { id: lineId },
-      select: { id: true, ordrId: true, qtyUsed: true },
-    });
-    if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${lineId} is not on purchase order #${id}.`);
-    if ((line.qtyUsed ?? 0) > 0) throw new BadRequestException('Cannot remove a line that already has receipts.');
-    const lineCount = await this.prisma.ordDetail.count({ where: { ordrId: id, context: PO_CONTEXT } });
-    if (lineCount <= 1) throw new BadRequestException('A purchase order must have at least one line.');
-
+  /** Approve a pending PO line-edit request — enacts it (re-validating NST + the
+   * op under a row lock). CAS-decide; separation of duties. */
+  async approvePoLineEdit(requestId: number, actor: Actor) {
+    const req = await this.approvalRequests.get<PoLineEditPayload>(BigInt(requestId));
+    if (!req || req.kind !== PO_LINE_EDIT_KIND) throw new NotFoundException('Purchase-order line-edit request not found');
+    if (req.state !== 'PENDING') throw new BadRequestException(`This request is already ${req.state.toLowerCase()}.`);
+    await this.approvalPolicy.assertMayApproveUpdate(actor.id, 'purchase order line edits');
+    if (req.requestedById === actor.id) throw new BadRequestException('You cannot approve your own line-edit request.');
+    const id = Number(req.targetId);
+    await this.requireNstPo(id); // fast-fail; re-asserted under lock in applyPoLineEditTx
+    const at = new Date();
     return this.prisma.$transaction(async (tx) => {
-      await tx.ordDetailPricing.deleteMany({ where: { ordDetailId: lineId } });
-      await tx.ordDetail.delete({ where: { id: lineId } });
+      await this.approvalRequests.decide(tx, req.id, 'APPROVED', actor, at);
+      const res = await this.applyPoLineEditTx(tx, id, req.payload, actor);
+      return { ...res, requestId, enacted: true };
+    });
+  }
+
+  /** Reject a pending PO line-edit request (PO unchanged; reason required). */
+  async rejectPoLineEdit(requestId: number, dto: { reason?: string }, actor: Actor) {
+    if (!dto.reason?.trim()) throw new BadRequestException('A reason is required to reject a line-edit request.');
+    const req = await this.approvalRequests.get(BigInt(requestId));
+    if (!req || req.kind !== PO_LINE_EDIT_KIND) throw new NotFoundException('Purchase-order line-edit request not found');
+    if (req.state !== 'PENDING') throw new BadRequestException(`This request is already ${req.state.toLowerCase()}.`);
+    await this.approvalPolicy.assertMayApproveUpdate(actor.id, 'purchase order line edits');
+    const reason = dto.reason.trim();
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      await this.approvalRequests.decide(tx, req.id, 'REJECTED', actor, at, reason);
       await this.audit.record(
-        { action: 'purchaseorder.line.remove', actorUserId: actor.id, actorLabel: actor.label, program: 'purchasing.create', summary: `Line ${lineId} removed from purchase order #${id}`, changes: [{ tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'removed', oldValue: 'line', newValue: null }] },
+        { action: 'purchaseorder.line.reject', actorUserId: actor.id, actorLabel: actor.label, program: 'purchasing.create', summary: `Purchase order #${req.targetId} line-edit request rejected — ${reason}`, changes: [{ tableName: 'approval_request', recordId: String(req.id), fieldName: 'state', oldValue: 'PENDING', newValue: 'REJECTED' }] },
         tx,
       );
-      return { id, lineId, removed: true };
+      return { requestId, state: 'REJECTED' as const };
     });
+  }
+
+  /** Pending PO line-edit requests decorated with order + op context (the queue). */
+  async listPoLineApprovals() {
+    const reqs = await this.approvalRequests.listPending<PoLineEditPayload>(PO_LINE_EDIT_KIND);
+    if (!reqs.length) return { rows: [] };
+    const orderIds = [...new Set(reqs.map((r) => Number(r.targetId)))];
+    const addItemIds = [...new Set(reqs.filter((r) => r.payload.op === 'add').map((r) => (r.payload as { dto: CreatePurchaseOrderLineDto }).dto.itemId))];
+    const [orders, items] = await Promise.all([
+      this.prisma.ordr.findMany({ where: { id: { in: orderIds } }, select: { id: true, poNumber: true, status: true } }),
+      addItemIds.length ? this.prisma.item.findMany({ where: { id: { in: addItemIds } }, select: { id: true, itemCode: true } }) : Promise.resolve([]),
+    ]);
+    const orderById = new Map(orders.map((o) => [o.id, o]));
+    const codeById = new Map(items.map((i) => [i.id, i.itemCode]));
+    return {
+      rows: reqs.map((r) => {
+        const o = orderById.get(Number(r.targetId));
+        return {
+          requestId: Number(r.id),
+          orderId: Number(r.targetId),
+          poNumber: o?.poNumber ?? null,
+          orderStatus: o?.status ?? null,
+          op: r.payload.op,
+          lineId: r.payload.op !== 'add' ? r.payload.lineId : null,
+          summary: summarizeLinePayload(r.payload, codeById),
+          requestReason: r.requestReason,
+          requestedBy: r.requestedByLabel ?? r.requestedById,
+          requestedAt: r.requestedAt,
+        };
+      }),
+    };
   }
 
   /**

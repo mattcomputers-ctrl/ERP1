@@ -151,6 +151,10 @@ function LineEditPanel({ poId, onClose }: { poId: number; onClose: () => void })
   };
   // Per-line draft edits (qty/price/unit), keyed by lineId.
   const [edits, setEdits] = useState<Record<number, { qty: string; price: string; unit: string }>>({});
+  // A request-only group's edit comes back pending (awaiting approval); show that.
+  const [notice, setNotice] = useState<string | null>(null);
+  const noteResult = (r: { pending?: boolean; requestId?: number }) =>
+    setNotice(r?.pending ? `Submitted for approval (request #${r.requestId}) — it takes effect once a qualified approver approves it.` : null);
   const draftFor = (l: DetailLine) =>
     edits[l.lineId] ?? { qty: num3(l.qty), price: l.price != null ? String(l.price) : '', unit: l.unit ?? '' };
   const setDraft = (lineId: number, patch: Partial<{ qty: string; price: string; unit: string }>) =>
@@ -158,12 +162,12 @@ function LineEditPanel({ poId, onClose }: { poId: number; onClose: () => void })
 
   const save = useMutation({
     mutationFn: ({ lineId, body }: { lineId: number; body: Record<string, unknown> }) =>
-      api.patch(`/purchase-orders/${poId}/lines/${lineId}`, body),
-    onSuccess: (_r, v) => { setEdits((p) => { const n = { ...p }; delete n[v.lineId]; return n; }); refresh(); },
+      api.patch<{ pending?: boolean; requestId?: number }>(`/purchase-orders/${poId}/lines/${lineId}`, body),
+    onSuccess: (r, v) => { setEdits((p) => { const n = { ...p }; delete n[v.lineId]; return n; }); noteResult(r); refresh(); },
   });
   const remove = useMutation({
-    mutationFn: (lineId: number) => api.del(`/purchase-orders/${poId}/lines/${lineId}`),
-    onSuccess: refresh,
+    mutationFn: (lineId: number) => api.del<{ pending?: boolean; requestId?: number }>(`/purchase-orders/${poId}/lines/${lineId}`),
+    onSuccess: (r) => { noteResult(r); refresh(); },
   });
 
   const onSave = (l: DetailLine) => {
@@ -223,14 +227,15 @@ function LineEditPanel({ poId, onClose }: { poId: number; onClose: () => void })
           {(save.isError || remove.isError) && (
             <p className="mt-2 text-sm text-red-600">{((save.error || remove.error) as Error).message}</p>
           )}
-          <AddPoLine poId={poId} onAdded={refresh} />
+          {notice && <p className="mt-2 text-sm text-amber-700">{notice}</p>}
+          <AddPoLine poId={poId} onAdded={refresh} onPending={(requestId) => setNotice(`Submitted for approval (request #${requestId}) — it takes effect once a qualified approver approves it.`)} />
         </>
       )}
     </Card>
   );
 }
 
-function AddPoLine({ poId, onAdded }: { poId: number; onAdded: () => void }) {
+function AddPoLine({ poId, onAdded, onPending }: { poId: number; onAdded: () => void; onPending: (requestId?: number) => void }) {
   const [itemSearch, setItemSearch] = useState('');
   const [qty, setQty] = useState('1');
   const items = useQuery({
@@ -239,8 +244,8 @@ function AddPoLine({ poId, onAdded }: { poId: number; onAdded: () => void }) {
     enabled: itemSearch.trim().length >= 1,
   });
   const add = useMutation({
-    mutationFn: (itemId: number) => api.post(`/purchase-orders/${poId}/lines`, { itemId, qtyReqd: Number(qty) > 0 ? Number(qty) : 1 }),
-    onSuccess: () => { setItemSearch(''); onAdded(); },
+    mutationFn: (itemId: number) => api.post<{ pending?: boolean; requestId?: number }>(`/purchase-orders/${poId}/lines`, { itemId, qtyReqd: Number(qty) > 0 ? Number(qty) : 1 }),
+    onSuccess: (r) => { setItemSearch(''); if (r?.pending) onPending(r.requestId); onAdded(); },
   });
   return (
     <div className="mt-3 rounded-md border border-slate-200 p-3">
