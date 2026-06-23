@@ -84,9 +84,9 @@ export function services(prisma: PrismaClient) {
     valuation,
     priceVersions,
     salesPricing,
-    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation),
-    purchasing: new PurchasingService(p, settings, audit, party, valuation, priceVersions),
-    shipping: new ShippingService(p, audit, party, salesPricing),
+    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation, approvalPolicy),
+    purchasing: new PurchasingService(p, settings, audit, party, valuation, priceVersions, approvalPolicy),
+    shipping: new ShippingService(p, audit, party, salesPricing, approvalPolicy),
     genealogy: new GenealogyService(p, party),
     miscReceipt: new MiscReceiptService(p, audit, valuation),
     approvalPolicy,
@@ -96,10 +96,34 @@ export function services(prisma: PrismaClient) {
   };
 }
 
-/** Create an actor User (audit rows FK to User) and return the Actor identity. */
-export async function seedActor(prisma: PrismaClient): Promise<Actor> {
+/**
+ * Create an actor User (audit rows FK to User) and return the Actor identity.
+ * Pass withApprovalCaps=true to also give the actor a role with a full approval
+ * policy — needed by flows whose edit actions are gated by `canApproveUpdate`.
+ */
+export async function seedActor(prisma: PrismaClient, withApprovalCaps = false): Promise<Actor> {
   const u = await prisma.user.create({
-    data: { email: 'flow@test.local', displayName: 'Flow Test' },
+    data: {
+      email: 'flow@test.local',
+      displayName: 'Flow Test',
+      ...(withApprovalCaps
+        ? {
+            roles: {
+              create: {
+                role: {
+                  create: {
+                    code: 'TEST_ACTOR',
+                    name: 'Test Actor',
+                    approvalPolicy: {
+                      create: { canRequestApproval: true, canApprove: true, canApproveUpdate: true, canApproveChange: true, canOverride: true, noApprovalRequired: true },
+                    },
+                  },
+                },
+              },
+            },
+          }
+        : {}),
+    },
     select: { id: true, displayName: true },
   });
   return { id: u.id, label: u.displayName };

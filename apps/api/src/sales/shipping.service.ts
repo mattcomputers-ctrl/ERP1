@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
+import { ApprovalPolicyService } from '../approval/approval-policy.service';
 import { AuditService } from '../audit/audit.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
@@ -21,6 +22,7 @@ export class ShippingService {
     private readonly audit: AuditService,
     private readonly party: PartyService,
     private readonly salesPricing: SalesPricingService,
+    private readonly approvalPolicy: ApprovalPolicyService,
   ) {}
 
   /**
@@ -187,6 +189,7 @@ export class ShippingService {
    * no packaging snapshot — OrdDetailPricing is purchasing-only.)
    */
   async addLine(id: number, dto: ShippingLineDto, actor: Actor) {
+    await this.approvalPolicy.assertMayUpdate(actor.id, 'shipping order lines');
     const order = await this.requireNstSh(id);
     const item = await this.prisma.item.findUnique({
       where: { id: dto.itemId },
@@ -235,6 +238,7 @@ export class ShippingService {
    * (IDOR-safe). SH lines have no receipts (shipping is captured at close and
    * moves the order out of NST), so a qty reduction is unguarded. */
   async updateLine(id: number, lineId: number, dto: UpdateShippingOrderLineDto, actor: Actor) {
+    await this.approvalPolicy.assertMayUpdate(actor.id, 'shipping order lines');
     await this.requireNstSh(id);
     const line = await this.prisma.ordDetail.findUnique({
       where: { id: lineId },
@@ -275,6 +279,7 @@ export class ShippingService {
   /** Remove a line from an NST SH order. Rejects removing the last line (an order
    * needs at least one). SH lines have no receipts/packaging to clean up. */
   async removeLine(id: number, lineId: number, actor: Actor) {
+    await this.approvalPolicy.assertMayUpdate(actor.id, 'shipping order lines');
     await this.requireNstSh(id);
     const line = await this.prisma.ordDetail.findUnique({ where: { id: lineId }, select: { id: true, ordrId: true } });
     if (!line || line.ordrId !== id) throw new NotFoundException(`Line ${lineId} is not on shipping order #${id}.`);

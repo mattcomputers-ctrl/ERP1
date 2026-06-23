@@ -33,7 +33,7 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   await resetDb(prisma);
-  actor = await seedActor(prisma);
+  actor = await seedActor(prisma, true); // PO line-edit tests are gated by canApproveUpdate
 });
 
 describe('PurchasingService.receive', () => {

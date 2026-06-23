@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ApprovalModule } from '../approval/approval.module';
 import { AuthModule } from '../auth/auth.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { SalesModule } from '../sales/sales.module';
@@ -8,7 +9,7 @@ import { PurchasingController } from './purchasing.controller';
 import { PurchasingService } from './purchasing.service';
 
 @Module({
-  imports: [AuthModule, SettingsModule, SalesModule, InventoryModule],
+  imports: [AuthModule, SettingsModule, SalesModule, InventoryModule, ApprovalModule],
   controllers: [PurchasingController],
   providers: [PurchasingService, PriceVersionService],
 })

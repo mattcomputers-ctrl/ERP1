@@ -18,7 +18,7 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   await resetDb(prisma);
-  actor = await seedActor(prisma);
+  actor = await seedActor(prisma, true); // SH line-edit tests are gated by canApproveUpdate
 });
 
 describe('ShippingService.create (native SH order)', () => {

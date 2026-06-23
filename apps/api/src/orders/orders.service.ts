@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
+import { ApprovalPolicyService } from '../approval/approval-policy.service';
 import { AuditService, type FieldChange } from '../audit/audit.service';
 import { ESignatureService } from '../audit/esignature.service';
 import { AuthService } from '../auth/auth.service';
@@ -69,6 +70,7 @@ export class OrdersService {
     private readonly permissions: PermissionService,
     private readonly esign: ESignatureService,
     private readonly valuation: ValuationService,
+    private readonly approvalPolicy: ApprovalPolicyService,
   ) {}
 
   async list(query: OrdersListQuery) {
@@ -536,6 +538,8 @@ export class OrdersService {
    * fields. Only NST orders are editable; atomic + audited.
    */
   async edit(id: number, dto: EditOrderDto, actor: Actor) {
+    // Approval policy: the actor's group must be permitted to edit (canApproveUpdate).
+    await this.approvalPolicy.assertMayUpdate(actor.id, 'orders');
     const order = await this.requireTransition(id, 'NST', 'edit');
     const isBatch = order.context === 'MFBA';
 

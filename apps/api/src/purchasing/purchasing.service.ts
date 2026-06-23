@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
+import { ApprovalPolicyService } from '../approval/approval-policy.service';
 import { AuditService } from '../audit/audit.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
@@ -37,6 +38,7 @@ export class PurchasingService {
     private readonly party: PartyService,
     private readonly valuation: ValuationService,
     private readonly priceVersions: PriceVersionService,
+    private readonly approvalPolicy: ApprovalPolicyService,
   ) {}
 
   /** Browse purchase orders (Ordr Context='PO') with supplier name + line total. */
@@ -479,6 +481,7 @@ export class PurchasingService {
    * added line renders the same packaging detail. Native id under the alloc lock.
    */
   async addLine(id: number, dto: CreatePurchaseOrderLineDto, actor: Actor) {
+    await this.approvalPolicy.assertMayUpdate(actor.id, 'purchase order lines');
     const po = await this.requireNstPo(id);
     const item = await this.prisma.item.findUnique({
       where: { id: dto.itemId },
@@ -539,6 +542,7 @@ export class PurchasingService {
    * A qty edit intentionally does NOT re-source the tier price / packaging
    * snapshot — the operator sets the price explicitly here. */
   async updateLine(id: number, lineId: number, dto: UpdatePurchaseOrderLineDto, actor: Actor) {
+    await this.approvalPolicy.assertMayUpdate(actor.id, 'purchase order lines');
     await this.requireNstPo(id);
     const line = await this.prisma.ordDetail.findUnique({
       where: { id: lineId },
@@ -585,6 +589,7 @@ export class PurchasingService {
   /** Remove a line from an NST PO (and its packaging snapshot). Rejects removing
    * the last line (a PO needs at least one) or a line that already has receipts. */
   async removeLine(id: number, lineId: number, actor: Actor) {
+    await this.approvalPolicy.assertMayUpdate(actor.id, 'purchase order lines');
     await this.requireNstPo(id);
     const line = await this.prisma.ordDetail.findUnique({
       where: { id: lineId },

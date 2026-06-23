@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { PrismaService } from '../prisma/prisma.service';
@@ -130,6 +130,21 @@ export class ApprovalPolicyService {
       for (const cap of APPROVAL_CAPABILITIES) if (p[cap]) out[cap] = true;
     }
     return out;
+  }
+
+  /** Whether a policy may ENACT an edit/update directly (approve-update / approve /
+   * override / exempt). A request-only group cannot (no pending-edit workflow yet). */
+  mayUpdate(caps: ApprovalPolicy): boolean {
+    return caps.canApproveUpdate || caps.canApprove || caps.canOverride || caps.noApprovalRequired;
+  }
+
+  /** Guard an edit action by the actor's group approval policy (the `canApproveUpdate`
+   * capability). Throws 403 if the actor's group may not perform updates directly. */
+  async assertMayUpdate(userId: string, what: string): Promise<void> {
+    const caps = await this.effectiveForUser(userId);
+    if (!this.mayUpdate(caps)) {
+      throw new ForbiddenException(`Your group is not permitted to edit ${what} — it needs an "approve update" (or approve / override) capability.`);
+    }
   }
 
   /** Resolve a stored row (or its absence) to the full effective policy. */
