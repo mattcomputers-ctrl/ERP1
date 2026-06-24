@@ -5,6 +5,7 @@ import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { PrismaService } from '../prisma/prisma.service';
 import type { AdjustInventoryDto } from './dto/adjust-inventory.dto';
+import type { ReverseReceiptDto } from './dto/reverse-receipt.dto';
 import type { TransferInventoryDto } from './dto/transfer-inventory.dto';
 
 // Legacy ChangeSet context for a stock count/adjustment (verified: 1,491 'COUNT'
@@ -176,6 +177,90 @@ export class InventoryService {
         tx,
       );
       return { inventoryId: src.id, fromLocationId: src.locationId, toLocationId: dto.toLocationId, qty: dto.qty, sourceRemaining: sourceQty - dto.qty, targetInventoryId, changeSetId: csId };
+    });
+  }
+
+  /**
+   * Reverse a posted receipt (legacy `ChangeSet` Context='PO' or 'MISC', each 1:1
+   * with a `ChangeSetReceipt`). Allowed ONLY while the received stock is still
+   * untouched — exactly one Inventory parcel for the receipt's sublot, holding the
+   * full received quantity (so anything consumed, moved, split, or adjusted is
+   * refused). Creates a reversing `ChangeSet` (Context='RVS'+original, pointing
+   * back via reverseChangeSetId), removes the minted on-hand parcel, and for a PO
+   * receipt unwinds the `OrdDetail.QtyUsed` bump. Atomic + audited.
+   */
+  async reverseReceipt(changeSetId: number, dto: ReverseReceiptDto, actor: Actor) {
+    if (!dto.reason?.trim()) throw new BadRequestException('A reason is required to reverse a receipt.');
+
+    const cs = await this.prisma.changeSet.findUnique({ where: { id: changeSetId }, select: { id: true, context: true, ordrId: true } });
+    if (!cs) throw new NotFoundException('Receipt not found');
+    if (cs.context !== 'PO' && cs.context !== 'MISC') {
+      throw new BadRequestException('Only purchase or miscellaneous receipts can be reversed.');
+    }
+    const receipt = await this.prisma.changeSetReceipt.findUnique({
+      where: { changeSetId },
+      select: { sublotId: true, itemId: true, psQty: true, ordDetailId: true },
+    });
+    if (!receipt) throw new BadRequestException('That change set is not a receipt.');
+    if (receipt.sublotId == null) throw new BadRequestException('This receipt has no sublot to reverse.');
+
+    const received = receipt.psQty ?? 0;
+    const sublotId = receipt.sublotId;
+    const reason = dto.reason.trim();
+    const reverseContext = `RVS${cs.context}`;
+    const at = new Date();
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+
+      // Dup-check + untouched-check INSIDE the lock so two concurrent reversals of
+      // the same receipt can't both pass the gate (the lock serializes them; the
+      // second sees the first's reversing change set and is refused cleanly).
+      const already = await tx.changeSet.findFirst({ where: { reverseChangeSetId: changeSetId }, select: { id: true } });
+      if (already) throw new BadRequestException('This receipt has already been reversed.');
+
+      // Untouched check: at most one parcel for the sublot, holding the full
+      // received quantity. Zero parcels = the receipt minted no on-hand (e.g. a
+      // location-less install) — allowed, with nothing to delete. Anything else
+      // (consumed / moved / split / adjusted) is refused.
+      const parcels = await tx.inventory.findMany({ where: { sublotId }, select: { id: true, qty: true } });
+      const totalOnHand = parcels.reduce((s, p) => s + (p.qty ?? 0), 0);
+      if (parcels.length > 1 || (parcels.length === 1 && (parcels[0].qty ?? 0) !== received)) {
+        throw new BadRequestException(
+          `Cannot reverse — the received stock has since been moved, split, consumed, or adjusted (on hand ${totalOnHand}, received ${received}).`,
+        );
+      }
+      const parcel = parcels[0] ?? null;
+
+      const csId = ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+      await tx.changeSet.create({ data: { id: csId, context: reverseContext, changeDate: at, reverseChangeSetId: changeSetId, ordrId: cs.ordrId } });
+
+      // Remove the minted on-hand (the receipt never happened).
+      if (parcel) await tx.inventory.delete({ where: { id: parcel.id } });
+
+      // PO: unwind the receipt's QtyUsed bump on the ordered line (floored at 0).
+      // The read-modify-write is safe under the advisory lock, which a concurrent
+      // receive also takes before its own QtyUsed increment.
+      if (cs.context === 'PO' && receipt.ordDetailId != null && received > 0) {
+        const line = await tx.ordDetail.findUnique({ where: { id: receipt.ordDetailId }, select: { qtyUsed: true } });
+        await tx.ordDetail.update({ where: { id: receipt.ordDetailId }, data: { qtyUsed: Math.max(0, (line?.qtyUsed ?? 0) - received) } });
+      }
+
+      await this.audit.record(
+        {
+          action: 'inventory.reverseReceipt',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'inventory.reverse',
+          summary: `Reversed ${cs.context} receipt (change set ${changeSetId}) — removed ${parcel ? received : 0} on hand — ${reason}`,
+          changes: [
+            { tableName: 'ChangeSet', recordId: String(csId), fieldName: 'reverseChangeSet', oldValue: null, newValue: String(changeSetId) },
+            ...(parcel ? [{ tableName: 'Inventory', recordId: String(parcel.id), fieldName: 'removed', oldValue: String(received), newValue: null }] : []),
+          ],
+        },
+        tx,
+      );
+      return { changeSetId, reversedBy: csId, removedQty: parcel ? received : 0, context: cs.context };
     });
   }
 

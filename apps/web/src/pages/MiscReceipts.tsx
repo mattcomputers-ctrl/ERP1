@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
 
@@ -22,9 +22,11 @@ interface ListResp { rows: ReceiptRow[]; total: number }
 
 export function MiscReceipts() {
   const [showCreate, setShowCreate] = useState(false);
+  const [reversing, setReversing] = useState<number | null>(null);
   const qc = useQueryClient();
   const list = useQuery({ queryKey: ['misc-receipts'], queryFn: () => api.get<ListResp>('/inventory-receipts?pageSize=50') });
   const rows = list.data?.rows ?? [];
+  const refresh = () => qc.invalidateQueries({ queryKey: ['misc-receipts'] });
 
   return (
     <div className="space-y-4">
@@ -58,24 +60,54 @@ export function MiscReceipts() {
                 <th className="py-1 pr-2 font-medium">Unit</th>
                 <th className="py-1 pr-2 text-right font-medium">Containers</th>
                 <th className="py-1 pr-2 font-medium">Our lot</th>
+                <th className="py-1 pr-2" />
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.changeSetId} className="border-b border-slate-100">
-                  <td className="py-1 pr-2 font-medium">{r.changeSetId}</td>
-                  <td className="py-1 pr-2">{fmtDate(r.date)}</td>
-                  <td className="py-1 pr-2">{r.itemCode} <span className="text-slate-500">{r.itemDescription}</span></td>
-                  <td className="py-1 pr-2 text-right tabular-nums">{num3(r.qty)}</td>
-                  <td className="py-1 pr-2">{r.unit}</td>
-                  <td className="py-1 pr-2 text-right tabular-nums">{r.containers ?? ''}</td>
-                  <td className="py-1 pr-2">{r.lot ?? <span className="text-slate-300">—</span>}</td>
-                </tr>
+                <Fragment key={r.changeSetId}>
+                  <tr className="border-b border-slate-100">
+                    <td className="py-1 pr-2 font-medium">{r.changeSetId}</td>
+                    <td className="py-1 pr-2">{fmtDate(r.date)}</td>
+                    <td className="py-1 pr-2">{r.itemCode} <span className="text-slate-500">{r.itemDescription}</span></td>
+                    <td className="py-1 pr-2 text-right tabular-nums">{num3(r.qty)}</td>
+                    <td className="py-1 pr-2">{r.unit}</td>
+                    <td className="py-1 pr-2 text-right tabular-nums">{r.containers ?? ''}</td>
+                    <td className="py-1 pr-2">{r.lot ?? <span className="text-slate-300">—</span>}</td>
+                    <td className="py-1 pr-2 text-right">
+                      <button onClick={() => setReversing((c) => (c === r.changeSetId ? null : r.changeSetId))} className="font-medium text-red-600 hover:underline">Reverse</button>
+                    </td>
+                  </tr>
+                  {reversing === r.changeSetId && (
+                    <tr className="bg-slate-50"><td colSpan={8} className="px-2 py-2">
+                      <ReverseForm changeSetId={r.changeSetId} onDone={() => { setReversing(null); refresh(); }} />
+                    </td></tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
         )}
       </Card>
+    </div>
+  );
+}
+
+// Reverse a posted receipt (only while its minted stock is still untouched; the
+// API enforces and explains otherwise). Removes the on-hand + writes a reversing
+// change set.
+function ReverseForm({ changeSetId, onDone }: { changeSetId: number; onDone: () => void }) {
+  const [reason, setReason] = useState('');
+  const m = useMutation({
+    mutationFn: () => api.post(`/inventory/receipts/${changeSetId}/reverse`, { reason: reason.trim() }),
+    onSuccess: onDone,
+  });
+  return (
+    <div className="flex flex-wrap items-end gap-2">
+      <span className="text-sm text-slate-600">Reverse receipt #{changeSetId} — this removes the on-hand it created.</span>
+      <Field label="Reason (required)"><Input value={reason} onChange={(e) => setReason(e.target.value)} className="w-64" /></Field>
+      <Button onClick={() => m.mutate()} disabled={!reason.trim() || m.isPending}>{m.isPending ? 'Reversing…' : 'Confirm reversal'}</Button>
+      {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
     </div>
   );
 }

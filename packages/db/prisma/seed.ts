@@ -49,6 +49,7 @@ const BASELINE_PROGRAMS = [
   { key: 'inventory.browser', name: 'Inventory Browser', folder: 'Transactions/Inventory' },
   { key: 'inventory.adjust', name: 'Inventory Adjustment', folder: 'Transactions/Inventory' },
   { key: 'inventory.transfer', name: 'Inventory Transfer', folder: 'Transactions/Inventory' },
+  { key: 'inventory.reverse', name: 'Reverse Receipt', folder: 'Transactions/Inventory' },
   { key: 'inventory.receipts', name: 'Miscellaneous Receipts', folder: 'Transactions/Inventory' },
   { key: 'inventory.lotTracking', name: 'Lot Tracking', folder: 'Transactions/Inventory' },
   { key: 'inventory.trace', name: 'Trace Genealogy', folder: 'Transactions/Inventory' },

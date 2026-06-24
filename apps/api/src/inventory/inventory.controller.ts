@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
 import { CurrentUser, type Actor } from '../auth/current-user.decorator';
 import type { ListQuery } from '../common/list';
 import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
 import { AdjustInventoryDto } from './dto/adjust-inventory.dto';
+import { ReverseReceiptDto } from './dto/reverse-receipt.dto';
 import { TransferInventoryDto } from './dto/transfer-inventory.dto';
 import { InventoryService } from './inventory.service';
 
@@ -38,5 +39,12 @@ export class InventoryController {
   @RequireProgram('inventory.transfer')
   transfer(@Body() dto: TransferInventoryDto, @CurrentUser() actor: Actor) {
     return this.inventory.transfer(dto, actor);
+  }
+
+  // Reverse a posted purchase/misc receipt (only while its stock is untouched).
+  @Post('inventory/receipts/:changeSetId/reverse')
+  @RequireProgram('inventory.reverse')
+  reverseReceipt(@Param('changeSetId', ParseIntPipe) changeSetId: number, @Body() dto: ReverseReceiptDto, @CurrentUser() actor: Actor) {
+    return this.inventory.reverseReceipt(changeSetId, dto, actor);
   }
 }
