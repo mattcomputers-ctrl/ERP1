@@ -12,6 +12,7 @@ const ROLE_FLAG: Record<string, string> = {
   customer: 'isBillTo',
   shipto: 'isShipTo',
   salesman: 'isSalesman',
+  shipvia: 'isShipVia',
   warehouse: 'isWarehouse',
 };
 
@@ -70,6 +71,7 @@ export class EntitiesService {
           isBillTo: dto.isBillTo ?? false,
           isShipTo: dto.isShipTo ?? false,
           isSalesman: dto.isSalesman ?? false,
+          isShipVia: dto.isShipVia ?? false,
           isWarehouse: dto.isWarehouse ?? false,
           currency: dto.currency,
           terms: dto.terms,
@@ -115,13 +117,17 @@ export class EntitiesService {
           actorLabel: actor.label,
           program: 'master.entities',
           summary: `Updated entity ${e.entityCode}`,
-          changes: Object.keys(dto).map((k) => ({
-            tableName: 'Entity',
-            recordId: String(id),
-            fieldName: k,
-            oldValue: String((existing as Record<string, unknown>)[k] ?? ''),
-            newValue: String((dto as Record<string, unknown>)[k] ?? ''),
-          })),
+          // Only record fields that actually changed — the edit form sends every
+          // role flag each time, so logging all keys would be pure noise.
+          changes: Object.keys(dto)
+            .map((k) => ({
+              tableName: 'Entity',
+              recordId: String(id),
+              fieldName: k,
+              oldValue: String((existing as Record<string, unknown>)[k] ?? ''),
+              newValue: String((dto as Record<string, unknown>)[k] ?? ''),
+            }))
+            .filter((c) => c.oldValue !== c.newValue),
         },
         tx,
       );

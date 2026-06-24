@@ -13,9 +13,12 @@ interface EntityRow {
   isBillTo?: boolean;
   isShipTo?: boolean;
   isSalesman?: boolean;
+  isShipVia?: boolean;
   isWarehouse?: boolean;
+  inactive?: boolean;
   customerType?: string | null;
   currency?: string | null;
+  terms?: string | null;
 }
 interface ListResp {
   rows: EntityRow[];
@@ -31,17 +34,22 @@ const ROLES: [string, string][] = [
   ['customer', 'Customers'],
   ['shipto', 'Ship-Tos'],
   ['salesman', 'Salesmen'],
+  ['shipvia', 'Carriers'],
   ['warehouse', 'Warehouses'],
 ];
 
-const ROLE_LABELS: [keyof EntityRow, string][] = [
+// The editable role flags (Entity field -> short label), shared by the create +
+// edit forms and the list's role badges.
+const FLAG_FIELDS: [keyof EntityRow, string][] = [
   ['isSupplier', 'Supplier'],
   ['isManufacturer', 'Mfr'],
   ['isBillTo', 'Customer'],
   ['isShipTo', 'Ship-To'],
   ['isSalesman', 'Salesman'],
+  ['isShipVia', 'Carrier'],
   ['isWarehouse', 'Warehouse'],
 ];
+const ROLE_LABELS = FLAG_FIELDS;
 
 export function Entities() {
   const qc = useQueryClient();
@@ -50,6 +58,7 @@ export function Entities() {
   const [role, setRole] = useState('');
   const [sort, setSort] = useState('entityCode:asc');
   const [showCreate, setShowCreate] = useState(false);
+  const [editing, setEditing] = useState<EntityRow | null>(null);
 
   const params = new URLSearchParams({ page: String(page), pageSize: '25', sort });
   if (q) params.set('q', q);
@@ -81,6 +90,13 @@ export function Entities() {
     },
     { key: 'customerType', header: 'Type' },
     { key: 'currency', header: 'Currency' },
+    {
+      key: 'edit',
+      header: '',
+      render: (r) => (
+        <button onClick={() => setEditing(r)} className="font-medium text-indigo-600 hover:underline">Edit</button>
+      ),
+    },
   ];
 
   return (
@@ -96,6 +112,14 @@ export function Entities() {
             setShowCreate(false);
             qc.invalidateQueries({ queryKey: ['entities'] });
           }}
+        />
+      )}
+
+      {editing && (
+        <EditEntity
+          row={editing}
+          onClose={() => setEditing(null)}
+          onDone={() => { setEditing(null); qc.invalidateQueries({ queryKey: ['entities'] }); }}
         />
       )}
 
@@ -127,24 +151,82 @@ export function Entities() {
   );
 }
 
+type Flags = Partial<Record<keyof EntityRow, boolean>>;
+
+function FlagChecks({ flags, onToggle }: { flags: Flags; onToggle: (k: keyof EntityRow, v: boolean) => void }) {
+  return (
+    <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+      {FLAG_FIELDS.map(([k, label]) => (
+        <label key={k as string} className="flex items-center gap-1">
+          <input type="checkbox" checked={!!flags[k]} onChange={(e) => onToggle(k, e.target.checked)} /> {label}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 function CreateEntity({ onDone }: { onDone: () => void }) {
-  const [form, setForm] = useState({ entityCode: '', name: '', isSupplier: false, isBillTo: false, isManufacturer: false });
-  const m = useMutation({ mutationFn: () => api.post('/entities', form), onSuccess: onDone });
+  const [entityCode, setEntityCode] = useState('');
+  const [name, setName] = useState('');
+  const [flags, setFlags] = useState<Flags>({});
+  const m = useMutation({ mutationFn: () => api.post('/entities', { entityCode, name: name || undefined, ...flags }), onSuccess: onDone });
   return (
     <Card>
-      <form className="grid gap-3 sm:grid-cols-3" onSubmit={(e) => { e.preventDefault(); m.mutate(); }}>
-        <Field label="Entity code"><Input value={form.entityCode} onChange={(e) => setForm({ ...form, entityCode: e.target.value })} required /></Field>
-        <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-        <div className="flex items-end gap-3 text-sm">
-          <label className="flex items-center gap-1"><input type="checkbox" checked={form.isSupplier} onChange={(e) => setForm({ ...form, isSupplier: e.target.checked })} /> Supplier</label>
-          <label className="flex items-center gap-1"><input type="checkbox" checked={form.isBillTo} onChange={(e) => setForm({ ...form, isBillTo: e.target.checked })} /> Customer</label>
-          <label className="flex items-center gap-1"><input type="checkbox" checked={form.isManufacturer} onChange={(e) => setForm({ ...form, isManufacturer: e.target.checked })} /> Mfr</label>
+      <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (entityCode.trim()) m.mutate(); }}>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Field label="Entity code"><Input value={entityCode} onChange={(e) => setEntityCode(e.target.value)} maxLength={20} required /></Field>
+          <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} maxLength={255} /></Field>
         </div>
-        <div className="flex items-center gap-3 sm:col-span-3">
-          <Button type="submit" disabled={m.isPending}>{m.isPending ? 'Saving…' : 'Create entity'}</Button>
+        <div><div className="mb-1 text-xs font-medium text-slate-500">Roles</div><FlagChecks flags={flags} onToggle={(k, v) => setFlags((f) => ({ ...f, [k]: v }))} /></div>
+        <div className="flex items-center gap-3">
+          <Button type="submit" disabled={!entityCode.trim() || m.isPending}>{m.isPending ? 'Saving…' : 'Create entity'}</Button>
           {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
         </div>
       </form>
     </Card>
+  );
+}
+
+// Edit an existing entity's roles, status, and trading terms (PATCH /entities/:id).
+function EditEntity({ row, onClose, onDone }: { row: EntityRow; onClose: () => void; onDone: () => void }) {
+  const init: Flags = Object.fromEntries(FLAG_FIELDS.map(([k]) => [k, !!row[k]]));
+  const [flags, setFlags] = useState<Flags>(init);
+  const [inactive, setInactive] = useState(!!row.inactive);
+  const [currency, setCurrency] = useState(row.currency ?? '');
+  const [terms, setTerms] = useState(row.terms ?? '');
+  const [customerType, setCustomerType] = useState(row.customerType ?? '');
+  const m = useMutation({
+    mutationFn: () => api.patch(`/entities/${row.id}`, {
+      ...flags,
+      inactive,
+      currency: currency.trim() || undefined,
+      terms: terms.trim() || undefined,
+      customerType: customerType.trim() || undefined,
+    }),
+    onSuccess: onDone,
+  });
+  return (
+    <div className="fixed inset-0 z-20 flex items-center justify-center bg-slate-900/30 p-4" onClick={onClose}>
+      <div className="w-full max-w-lg rounded-lg bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-start justify-between">
+          <h2 className="text-lg font-medium">Edit {row.entityCode}{row.name ? <span className="text-slate-400"> — {row.name}</span> : null}</h2>
+          <button onClick={onClose} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+        </div>
+        <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); m.mutate(); }}>
+          <div><div className="mb-1 text-xs font-medium text-slate-500">Roles</div><FlagChecks flags={flags} onToggle={(k, v) => setFlags((f) => ({ ...f, [k]: v }))} /></div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Field label="Currency"><Input value={currency} onChange={(e) => setCurrency(e.target.value)} maxLength={10} /></Field>
+            <Field label="Terms"><Input value={terms} onChange={(e) => setTerms(e.target.value)} maxLength={20} /></Field>
+            <Field label="Customer type"><Input value={customerType} onChange={(e) => setCustomerType(e.target.value)} maxLength={20} /></Field>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={inactive} onChange={(e) => setInactive(e.target.checked)} /> Inactive (hidden from pickers)</label>
+          <div className="flex items-center gap-3">
+            <Button type="submit" disabled={m.isPending}>{m.isPending ? 'Saving…' : 'Save changes'}</Button>
+            <button type="button" onClick={onClose} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+            {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }

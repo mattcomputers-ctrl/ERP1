@@ -16,6 +16,7 @@ export class CreateEntityDto {
   @IsOptional() @IsBoolean() isBillTo?: boolean;
   @IsOptional() @IsBoolean() isShipTo?: boolean;
   @IsOptional() @IsBoolean() isSalesman?: boolean;
+  @IsOptional() @IsBoolean() isShipVia?: boolean;
   @IsOptional() @IsBoolean() isWarehouse?: boolean;
   @IsOptional() @IsString() @MaxLength(10) currency?: string;
   @IsOptional() @IsString() @MaxLength(20) terms?: string;
@@ -28,6 +29,7 @@ export class UpdateEntityDto {
   @IsOptional() @IsBoolean() isBillTo?: boolean;
   @IsOptional() @IsBoolean() isShipTo?: boolean;
   @IsOptional() @IsBoolean() isSalesman?: boolean;
+  @IsOptional() @IsBoolean() isShipVia?: boolean;
   @IsOptional() @IsBoolean() isWarehouse?: boolean;
   @IsOptional() @IsBoolean() inactive?: boolean;
   @IsOptional() @IsString() @MaxLength(10) currency?: string;
