@@ -101,7 +101,7 @@ export function services(prisma: PrismaClient) {
     roles: new RolesService(p, audit),
     users: new UsersService(p, auth, audit),
     securedItems: new SecuredItemsService(p, audit),
-    itemTests: new ItemTestsService(p),
+    itemTests: new ItemTestsService(p, audit),
   };
 }
 
