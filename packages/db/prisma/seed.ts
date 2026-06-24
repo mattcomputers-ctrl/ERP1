@@ -46,6 +46,7 @@ const BASELINE_PROGRAMS = [
   { key: 'qa.results', name: 'Enter Test Results', folder: 'Quality' },
   { key: 'qa.itemTests', name: 'Item Test Requirements', folder: 'Quality' },
   { key: 'inventory.browser', name: 'Inventory Browser', folder: 'Transactions/Inventory' },
+  { key: 'inventory.adjust', name: 'Inventory Adjustment', folder: 'Transactions/Inventory' },
   { key: 'inventory.receipts', name: 'Miscellaneous Receipts', folder: 'Transactions/Inventory' },
   { key: 'inventory.lotTracking', name: 'Lot Tracking', folder: 'Transactions/Inventory' },
   { key: 'inventory.trace', name: 'Trace Genealogy', folder: 'Transactions/Inventory' },

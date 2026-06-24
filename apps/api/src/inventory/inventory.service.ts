@@ -1,6 +1,16 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { AuditService } from '../audit/audit.service';
+import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
+import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { PrismaService } from '../prisma/prisma.service';
+import type { AdjustInventoryDto } from './dto/adjust-inventory.dto';
+
+// Legacy ChangeSet context for a stock count/adjustment (verified: 1,491 'COUNT'
+// change sets in the live data). The quantity change itself lands directly on the
+// Inventory parcel — ERP1 tracks on-hand as Inventory rows, not InvMovement (the
+// same model native receiving uses).
+const ADJUST_CONTEXT = 'COUNT';
 
 interface InventoryRow {
   id: number;
@@ -13,7 +23,72 @@ interface InventoryRow {
 
 @Injectable()
 export class InventoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
+
+  /**
+   * Adjust an on-hand inventory parcel to a new absolute quantity (a count /
+   * correction — write-on or write-off), with a required reason. Records a
+   * `ChangeSet` Context='COUNT' header (native id) as the adjustment event and
+   * sets `Inventory.qty`; atomic, audited (the before→after quantity + reason). A
+   * no-op (same quantity) short-circuits without a transaction or change set.
+   */
+  async adjust(dto: AdjustInventoryDto, actor: Actor) {
+    if (!dto.reason?.trim()) throw new BadRequestException('A reason is required to adjust inventory.');
+    if (dto.newQty < 0) throw new BadRequestException('The adjusted quantity cannot be negative.');
+
+    const parcel = await this.prisma.inventory.findUnique({
+      where: { id: dto.inventoryId },
+      select: { id: true, itemId: true, sublotId: true, locationId: true },
+    });
+    if (!parcel) throw new NotFoundException('Inventory parcel not found');
+
+    // Decoration for a readable audit summary (item / lot / location) — reference
+    // data, resolved outside the transaction.
+    const [item, sublot, location] = await Promise.all([
+      parcel.itemId != null ? this.prisma.item.findUnique({ where: { id: parcel.itemId }, select: { itemCode: true } }) : Promise.resolve(null),
+      parcel.sublotId != null ? this.prisma.sublot.findUnique({ where: { id: parcel.sublotId }, select: { lot: true } }) : Promise.resolve(null),
+      parcel.locationId != null ? this.prisma.location.findUnique({ where: { id: parcel.locationId }, select: { locationCode: true } }) : Promise.resolve(null),
+    ]);
+    const reason = dto.reason.trim();
+    const at = new Date();
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      // Read the current qty under the serialization lock so the recorded delta /
+      // before-value and the no-op check reflect any concurrent adjust that just
+      // committed (the lock makes adjusts mutually exclusive). The parcel can't be
+      // deleted in this app, but guard defensively.
+      const cur = await tx.inventory.findUnique({ where: { id: parcel.id }, select: { qty: true } });
+      if (!cur) throw new NotFoundException('Inventory parcel not found');
+      const oldQty = cur.qty ?? 0;
+      const delta = dto.newQty - oldQty;
+      if (delta === 0) return { inventoryId: parcel.id, oldQty, newQty: dto.newQty, delta: 0, unchanged: true };
+
+      const csId = ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+      await tx.changeSet.create({ data: { id: csId, context: ADJUST_CONTEXT, changeDate: at } });
+      await tx.inventory.update({ where: { id: parcel.id }, data: { qty: dto.newQty } });
+      await this.audit.record(
+        {
+          action: 'inventory.adjust',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'inventory.adjust',
+          summary:
+            `Inventory adjusted${item?.itemCode ? ` — ${item.itemCode}` : ''}${sublot?.lot ? ` lot ${sublot.lot}` : ''}` +
+            `${location?.locationCode ? ` @ ${location.locationCode}` : ''}: ${oldQty} → ${dto.newQty} (${delta > 0 ? '+' : ''}${delta}) — ${reason}`,
+          changes: [
+            { tableName: 'Inventory', recordId: String(parcel.id), fieldName: 'qty', oldValue: String(oldQty), newValue: String(dto.newQty) },
+            { tableName: 'ChangeSet', recordId: String(csId), fieldName: 'Context', oldValue: null, newValue: ADJUST_CONTEXT },
+          ],
+        },
+        tx,
+      );
+      return { inventoryId: parcel.id, oldQty, newQty: dto.newQty, delta, changeSetId: csId };
+    });
+  }
 
   /** Current on-hand stock (Inventory joined to item/location/sublot/lot). */
   async list(query: ListQuery & { status?: string; item?: string; onHand?: string }) {

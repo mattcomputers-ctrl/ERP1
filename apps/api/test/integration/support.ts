@@ -9,6 +9,7 @@ import type { Actor } from '../../src/auth/current-user.decorator';
 import { PermissionService } from '../../src/auth/permission.service';
 import { GenealogyService } from '../../src/genealogy/genealogy.service';
 import { ItemTestsService } from '../../src/qa/item-tests.service';
+import { InventoryService } from '../../src/inventory/inventory.service';
 import { MiscReceiptService } from '../../src/inventory/misc-receipt.service';
 import { ValuationService } from '../../src/inventory/valuation.service';
 import { OrdersService } from '../../src/orders/orders.service';
@@ -93,6 +94,7 @@ export function services(prisma: PrismaClient) {
     purchasing: new PurchasingService(p, settings, audit, party, valuation, priceVersions, approvalPolicy, approvalRequests),
     shipping: new ShippingService(p, audit, party, salesPricing, approvalPolicy, approvalRequests),
     genealogy: new GenealogyService(p, party),
+    inventory: new InventoryService(p, audit),
     miscReceipt: new MiscReceiptService(p, audit, valuation),
     approvalPolicy,
     releases: new ReleasesService(p, audit, esign, auth, permissions, approvalPolicy, approvalRequests),
