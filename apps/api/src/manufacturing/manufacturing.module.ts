@@ -1,11 +1,13 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { SettingsModule } from '../settings/settings.module';
+import { RecipeEditorService } from './recipe-editor.service';
 import { RecipesController } from './recipes.controller';
 import { RecipesService } from './recipes.service';
 
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, SettingsModule],
   controllers: [RecipesController],
-  providers: [RecipesService],
+  providers: [RecipesService, RecipeEditorService],
 })
 export class ManufacturingModule {}

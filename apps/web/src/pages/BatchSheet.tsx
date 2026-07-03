@@ -20,10 +20,10 @@ interface TestRow {
   test: string | null;
   specification: string;
 }
-interface BatchSheetModel {
+export interface BatchSheetModel {
   header: {
     companyName: string;
-    batchOrderId: number;
+    batchOrderId: number | null;
     context: string | null;
     recipeNumber: string | null;
     batchDate: string | null;
@@ -61,6 +61,12 @@ export function BatchSheet() {
   if (isError) return <div className="p-8 text-red-600">{(error as Error).message}</div>;
   if (!data) return null;
 
+  return <BatchSheetView data={data} />;
+}
+
+/** The printable sheet body — shared by the order batch ticket and the
+ * recipe batch-record PREVIEW (which supplies extra toolbar controls). */
+export function BatchSheetView({ data, toolbar, banner }: { data: BatchSheetModel; toolbar?: ReactNode; banner?: ReactNode }) {
   const h = data.header;
   const docTitle = h.context === 'MFPP' ? 'Packaging Record' : 'Batch Ticket';
   const sizeLine = [h.totalWeight != null ? `${wt(h.totalWeight)} ${h.weightUnit ?? ''}`.trim() : null]
@@ -69,12 +75,19 @@ export function BatchSheet() {
 
   return (
     <div className="mx-auto max-w-4xl bg-white p-4 text-[13px] text-slate-900">
-      <div className="mb-4 flex items-center justify-between print:hidden">
-        <h1 className="text-xl font-semibold">{docTitle} — order #{h.batchOrderId}</h1>
-        <button onClick={() => window.print()} className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">
-          Print
-        </button>
+      <div className="mb-4 flex items-center justify-between gap-3 print:hidden">
+        <h1 className="text-xl font-semibold">
+          {docTitle}
+          {h.batchOrderId != null ? ` — order #${h.batchOrderId}` : ` — recipe ${h.recipeNumber ?? ''} (preview)`}
+        </h1>
+        <div className="flex items-center gap-3">
+          {toolbar}
+          <button onClick={() => window.print()} className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">
+            Print
+          </button>
+        </div>
       </div>
+      {banner}
 
       {/* Header */}
       <div className="flex items-baseline justify-between border-b border-slate-300 pb-1 text-xs text-slate-600">
@@ -92,7 +105,7 @@ export function BatchSheet() {
         {sizeLine && <span className="ml-3 font-semibold">{sizeLine}</span>}
       </div>
       <div className="mt-1 grid grid-cols-2 gap-x-8 gap-y-0.5">
-        <Hdr label="Batch Order" value={String(h.batchOrderId)} />
+        <Hdr label="Batch Order" value={h.batchOrderId != null ? String(h.batchOrderId) : 'PREVIEW'} />
         <Hdr label="This Lot #" value={h.thisLot} strong />
         <Hdr label="Total Weight" value={sizeLine} />
         <Hdr label="Last Lot #" value={h.lastLot} />
@@ -174,7 +187,7 @@ export function BatchSheet() {
       </div>
 
       <p className="mt-6 text-[10px] text-slate-400">
-        ERP1 batch ticket · order #{h.batchOrderId} · generated {fmtDate(new Date().toISOString())}
+        ERP1 batch ticket · {h.batchOrderId != null ? `order #${h.batchOrderId}` : `recipe ${h.recipeNumber ?? ''} preview — no lot assigned`} · generated {fmtDate(new Date().toISOString())}
       </p>
     </div>
   );

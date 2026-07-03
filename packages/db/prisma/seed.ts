@@ -23,6 +23,7 @@ const BASELINE_PROGRAMS = [
   { key: 'master.items', name: 'Items', folder: 'Master Tables' },
   { key: 'master.units', name: 'Units', folder: 'Master Tables' },
   { key: 'recipe.manager', name: 'Recipe Manager', folder: 'Master Tables/Recipe Manager' },
+  { key: 'recipe.editor', name: 'Recipe Editor', folder: 'Master Tables/Recipe Manager' },
   { key: 'orders.browser', name: 'Order Browser', folder: 'Transactions/Orders' },
   { key: 'orders.create', name: 'Create Order', folder: 'Transactions/Orders' },
   { key: 'orders.edit', name: 'Edit Order', folder: 'Transactions/Orders' },
@@ -75,6 +76,13 @@ const SECURED_ITEMS = [
     description: 'Sign-off on a QA lot disposition (release / hold / reject)',
     requireReason: true,
     requireSignature: true,
+    requireWitness: false,
+  },
+  {
+    key: 'recipe.publish',
+    description: 'Sign-off on publishing a batching or packaging recipe',
+    requireReason: true,
+    requireSignature: false,
     requireWitness: false,
   },
 ];

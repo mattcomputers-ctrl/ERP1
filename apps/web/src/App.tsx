@@ -30,6 +30,7 @@ import { PriceLists } from './pages/PriceLists';
 import { PurchaseOrderDoc } from './pages/PurchaseOrderDoc';
 import { Purchasing } from './pages/Purchasing';
 import { Recall } from './pages/Recall';
+import { RecipePreview } from './pages/RecipePreview';
 import { Recipes } from './pages/Recipes';
 import { Roles } from './pages/Roles';
 import { SecuredItems } from './pages/SecuredItems';
@@ -67,6 +68,7 @@ export function App() {
         <Route path="/items" element={<Items />} />
         <Route path="/units" element={<Units />} />
         <Route path="/recipes" element={<Recipes />} />
+        <Route path="/recipes/:id/preview" element={<RecipePreview />} />
         <Route path="/orders" element={<Orders />} />
         <Route path="/orders/:id/sheet" element={<BatchSheet />} />
         <Route path="/purchasing" element={<Purchasing />} />

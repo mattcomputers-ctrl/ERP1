@@ -598,9 +598,13 @@ model Inventory {
 }
 
 // ===========================================================================
-// Manufacturing recipes (mirrors legacy). Recipe header (Context/OrdSubType
-// distinguish batching vs packaging; XML holds the serialized procedure) +
-// RecipeDetail lines (ingredients/components/steps).
+// Manufacturing recipes (mirrors legacy). Recipe header (Context RMBA batching
+// / RMPP packaging) + RecipeDetail lines. The RecipeDetail rows ARE the
+// procedure — a Parent tree with a Context discriminator (BA root, UI
+// ingredient, INSTR instruction, PK product, UB use-bulk pointer), interleaved
+// by ExecOrder; legacy XML is NULL on every row (verified live).
+// Versioning: revisions are sibling rows numbered `BASE.NN` (single active
+// published recipe per product); the Version column is an internal save count.
 // ===========================================================================
 
 model Recipe {
@@ -661,6 +665,11 @@ model RecipeDetail {
   itemNameId         Int?     @map("ItemName")
   totalWeight        Float?   @map("TotalWeight")
   totalWeightPercent Float?   @map("TotalWeightPercent")
+  totalVolume        Float?   @map("TotalVolume")
+  totalVolumePercent Float?   @map("TotalVolumePercent")
+  // Opaque execution pointer on UB ("use bulk") lines — mirrored for a future
+  // batch-execution increment; semantics undecoded (see docs/OPEN_QUESTIONS.md).
+  useFrom            Int?     @map("UseFrom")
   inactive           Boolean? @map("Inactive")
   percentUnder       Float?   @map("PercentUnder")
   percentOver        Float?   @map("PercentOver")

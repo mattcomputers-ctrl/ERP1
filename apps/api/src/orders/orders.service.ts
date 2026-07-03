@@ -299,7 +299,7 @@ export class OrdersService {
   async create(dto: CreateOrderDto, actor: Actor) {
     const recipe = await this.prisma.recipe.findUnique({
       where: { id: dto.recipeId },
-      select: { id: true, recipeNumber: true, context: true, ownerId: true },
+      select: { id: true, recipeNumber: true, context: true, ownerId: true, isPublished: true, inactive: true },
     });
     if (!recipe) throw new NotFoundException('Recipe not found');
     // Recipe contexts are RM* (RMBA batching, RMPP packaging); each maps to an
@@ -309,6 +309,20 @@ export class OrdersService {
       throw new BadRequestException(
         `Recipe ${recipe.recipeNumber ?? recipe.id} is not a production recipe ` +
           `(context ${recipe.context ?? 'none'}); only RMBA (batching) and RMPP (packaging) recipes create orders.`,
+      );
+    }
+    // Vendor rule (now load-bearing with the native recipe editor): orders may
+    // only be created from PUBLISHED, ACTIVE recipes — a draft or a superseded
+    // revision must never reach production.
+    if (recipe.isPublished !== true) {
+      throw new BadRequestException(
+        `Recipe ${recipe.recipeNumber ?? recipe.id} is not published; publish it before creating orders.`,
+      );
+    }
+    if (recipe.inactive === true) {
+      throw new BadRequestException(
+        `Recipe ${recipe.recipeNumber ?? recipe.id} is inactive (superseded); ` +
+          'orders can only be created from the active revision.',
       );
     }
     const isBatch = orderContext === 'MFBA';
@@ -766,6 +780,8 @@ export class OrdersService {
       where: {
         context: { in: ['RMBA', 'RMPP'] },
         isPublished: true,
+        // Inactive = superseded revision; never offer it (matches create()'s guard).
+        NOT: { inactive: true },
         ...(term ? { recipeNumber: { contains: term, mode: 'insensitive' as const } } : {}),
       },
       orderBy: { recipeNumber: 'asc' },
