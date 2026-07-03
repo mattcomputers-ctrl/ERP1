@@ -43,12 +43,12 @@ beforeEach(async () => {
  * lot of record), a lot-traced UI line, a FIFO UI line, and an instruction.
  * Raw stock: traced lot 'RT' (cost 5/unit, 100 on hand), FIFO lots OLD/NEW.
  */
-async function releasedBatch(opts?: { status?: string; percentOver?: number | null }) {
+async function releasedBatch(opts?: { status?: string; percentOver?: number | null; context?: 'MFBA' | 'MFPP' }) {
   await addLocation(prisma, { id: 1, code: 'WH', context: 'WHS' });
   await addItem(prisma, { id: 1, code: 'PROD' }); // product
   await addItem(prisma, { id: 2, code: 'TRACED', lotTracked: true }); // traced raw
   await addItem(prisma, { id: 3, code: 'BULK', lotTracked: false, purchasePrice: 4 }); // FIFO raw
-  await addOrder(prisma, { id: 800, context: 'MFBA', status: opts?.status ?? 'RLS', actualBatchSize: 100 });
+  await addOrder(prisma, { id: 800, context: opts?.context ?? 'MFBA', status: opts?.status ?? 'RLS', actualBatchSize: 100 });
   await addOrdDetail(prisma, { id: 900, ordrId: 800, context: 'PK', itemId: 1, qtyReqd: 100 });
   await addOrdDetail(prisma, {
     id: 901, ordrId: 800, context: 'UI', itemId: 2, qtyReqd: 10,
@@ -330,5 +330,104 @@ describe('complete() stamps the legacy PK ExecStatus convention + re-rolls cost 
     expect(v.yield.planned).toBe(100);
     expect(v.yield.actual).toBe(102); // completed — the recorded actual yield
     expect(v.yield.pct).toBeCloseTo(102, 10);
+  });
+});
+
+describe('OrdersService.expressExecute (record all remaining at standard)', () => {
+  it('records every remaining line at planned qty: FIFO picks (traced incl.), lineage, cost roll-up, one audit', async () => {
+    await releasedBatch();
+    const { orders } = services(prisma);
+
+    const res = await orders.expressExecute(800, {}, actor);
+    expect(res.materials).toBe(2);
+    expect(res.instructions).toBe(1);
+    expect(res.shortfalls).toEqual([]);
+
+    const lines = await prisma.ordDetail.findMany({ where: { ordrId: 800 }, orderBy: { id: 'asc' } });
+    expect(lines.find((l) => l.id === 901)).toMatchObject({ qtyUsed: 10, execStatus: 'CMP' });
+    expect(lines.find((l) => l.id === 902)).toMatchObject({ qtyUsed: 8, execStatus: 'CMP' });
+    expect(lines.find((l) => l.id === 903)!.execStatus).toBe('CMP');
+
+    // Traced item took its (only) lot; FIFO item drew OLD (6) then NEW (2).
+    expect(await onHandForLot(prisma, 'RT')).toBe(90);
+    expect(await onHandForLot(prisma, 'OLD')).toBe(0);
+    expect(await onHandForLot(prisma, 'NEW')).toBe(4);
+    const edges = await prisma.lotGenealogy.findMany({
+      where: { childLot: 'PROD1', source: 'consumption' },
+      orderBy: { parentLot: 'asc' },
+    });
+    expect(edges.map((e) => [e.parentLot, e.qty])).toEqual([
+      ['NEW', 2],
+      ['OLD', 6],
+      ['RT', 10],
+    ]);
+    // (10×5 + 6×3 + 2×9) / 100
+    expect(Number((await prisma.lot.findUnique({ where: { lot: 'PROD1' } }))!.unitCost)).toBeCloseTo(0.86, 10);
+    expect(await prisma.auditLog.count({ where: { action: 'order.execution.express' } })).toBe(1);
+  });
+
+  it('leaves individually recorded lines untouched — express covers only the remainder', async () => {
+    await releasedBatch();
+    const { orders } = services(prisma);
+    await orders.recordLine(800, 901, { actualQty: 12, lots: [{ lot: 'RT', qty: 12 }] }, actor);
+
+    const res = await orders.expressExecute(800, {}, actor);
+    expect(res.materials).toBe(1); // only the FIFO line remained
+    expect(res.instructions).toBe(1);
+
+    // The per-line ACTUAL (12) survives; only line 902 got the standard 8.
+    expect((await prisma.ordDetail.findUnique({ where: { id: 901 } }))!.qtyUsed).toBe(12);
+    expect((await prisma.ordDetail.findUnique({ where: { id: 902 } }))!.qtyUsed).toBe(8);
+    expect(await onHandForLot(prisma, 'RT')).toBe(88); // untouched by express
+    const rt = await prisma.lotGenealogy.findFirst({ where: { childLot: 'PROD1', parentLot: 'RT' } });
+    expect(rt!.qty).toBe(12);
+  });
+
+  it('records an UNTRACED shortfall without blocking and still stamps the standard quantity', async () => {
+    await releasedBatch();
+    await prisma.ordDetail.update({ where: { id: 902 }, data: { qtyReqd: 20 } }); // only 12 on hand
+    const { orders } = services(prisma);
+
+    const res = await orders.expressExecute(800, {}, actor);
+    expect(res.shortfalls).toEqual([{ item: 'BULK', shortfall: 8 }]);
+    expect((await prisma.ordDetail.findUnique({ where: { id: 902 } }))!.qtyUsed).toBe(20);
+    expect(await onHandForLot(prisma, 'OLD')).toBe(0);
+    expect(await onHandForLot(prisma, 'NEW')).toBe(0);
+  });
+
+  it('REFUSES (and rolls back) when a lot-traced item is short — lineage must equal the stamped quantity', async () => {
+    await releasedBatch();
+    await prisma.ordDetail.update({ where: { id: 901 }, data: { qtyReqd: 150 } }); // traced RT has only 100
+    const { orders } = services(prisma);
+
+    await expect(orders.expressExecute(800, {}, actor)).rejects.toThrow(/TRACED is short on hand/);
+    // Full rollback: nothing recorded, nothing depleted, no edges, no audit.
+    expect((await prisma.ordDetail.findUnique({ where: { id: 902 } }))!.execStatus).not.toBe('CMP');
+    expect(await onHandForLot(prisma, 'RT')).toBe(100);
+    expect(await onHandForLot(prisma, 'OLD')).toBe(6);
+    expect(await prisma.lotGenealogy.count({ where: { childLot: 'PROD1' } })).toBe(0);
+    expect(await prisma.auditLog.count({ where: { action: 'order.execution.express' } })).toBe(0);
+  });
+
+  it('works on a packaging (MFPP) order — same engine, same lineage', async () => {
+    await releasedBatch({ context: 'MFPP' });
+    const { orders } = services(prisma);
+
+    const res = await orders.expressExecute(800, {}, actor);
+    expect(res.materials).toBe(2);
+    expect(res.instructions).toBe(1);
+    expect((await prisma.ordDetail.findUnique({ where: { id: 901 } }))!).toMatchObject({ qtyUsed: 10, execStatus: 'CMP' });
+    const edges = await prisma.lotGenealogy.findMany({ where: { childLot: 'PROD1', source: 'consumption' } });
+    expect(edges.map((e) => e.parentLot).sort()).toEqual(['NEW', 'OLD', 'RT']);
+  });
+
+  it('refuses when not Released and when nothing is left to record', async () => {
+    await releasedBatch({ status: 'NST' });
+    const { orders } = services(prisma);
+    await expect(orders.expressExecute(800, {}, actor)).rejects.toThrow(/Only Released|not Released|Released/);
+
+    await prisma.ordr.update({ where: { id: 800 }, data: { status: 'RLS' } });
+    await orders.expressExecute(800, {}, actor);
+    await expect(orders.expressExecute(800, {}, actor)).rejects.toThrow(/Nothing left to record/);
   });
 });

@@ -9,6 +9,7 @@ import { ConsumeLotsDto } from './dto/consume-lots.dto';
 import { ConsumeQtyDto } from './dto/consume-qty.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { EditOrderDto } from './dto/edit-order.dto';
+import { ExpressExecuteDto } from './dto/express-execute.dto';
 import { IptResultsDto } from './dto/ipt-results.dto';
 import { RecordLineDto } from './dto/record-line.dto';
 import { RejectEditApprovalDto } from './dto/edit-approval.dto';
@@ -196,6 +197,14 @@ export class OrdersController {
   @RequireProgram('orders.execute')
   addExecutionLine(@Param('id', ParseIntPipe) id: number, @Body() dto: AddExecutionLineDto, @CurrentUser() actor: Actor) {
     return this.orders.addExecutionLine(id, dto, actor);
+  }
+
+  // Express execution: record every remaining procedure line at standard in
+  // one action (FIFO lot selection; shortfalls recorded, never blocking).
+  @Post(':id/execution/express')
+  @RequireProgram('orders.execute')
+  expressExecute(@Param('id', ParseIntPipe) id: number, @Body() dto: ExpressExecuteDto, @CurrentUser() actor: Actor) {
+    return this.orders.expressExecute(id, dto, actor);
   }
 
   // Record in-process test results during execution (ERP1 extension — legacy

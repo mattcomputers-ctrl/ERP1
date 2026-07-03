@@ -386,3 +386,34 @@ recipe without a packaged product) does not occur in this install.
    is explicitly non-orderable; a bound recipe that is not an active
    published RMPP recipe (incl. wrong context) falls through to
    active-revision resolution; binding ids are validated to the int4 domain.
+
+## Express execution + multi-batch decision (§5/§6, built 2026-07-03)
+
+1. **Express execution** (`POST /orders/:id/execution/express`) adapts the
+   vendor's Batch Execution Express (§6.11) / Package Express Execution
+   (§8.5) to ERP1's line model: record every REMAINING unrecorded procedure
+   line at standard in one action (materials at planned qty, instructions
+   checked off). Matches the plant's real practice — quantities were
+   dispensed to plan and written up afterwards. Consumption is FIFO
+   oldest-first for EVERY item in ONE locked acquisition (`depleteFifoMany`
+   — the lock-order invariant forbids per-line scans in one tx); for
+   lot-traced items the FIFO picks ARE the recorded dispensed lots (real
+   lineage). The express trade-off (accepted, recorded here): the operator
+   forgoes scanning specific lots — if the physical dispense deviated from
+   FIFO, use the per-line panel instead. UNTRACED shortfalls warn, never
+   block; a LOT-TRACED item short on hand REFUSES express (tx rollback) —
+   stamping QtyUsed=standard with lineage edges summing to less would break
+   the sum(edges)==QtyUsed recall invariant, and inventing an edge for a
+   lot FIFO never dispensed would corrupt recall (found in review; the
+   per-line panel is the right path there — the operator asserts the
+   physical lots). Lines recorded individually first are left untouched;
+   unexecuted lines
+   match on ExecStatus NULL **or** ≠ CMP (live NULL shape — a bare Prisma
+   NOT filter drops NULLs).
+2. **Multi-batch (UG §6.9) is deferred ⏸️**, not built: `Ordr.Parent` is
+   NULL on every one of the ~75K live orders — the plant never used it,
+   sizing each batch to its demand instead (the OrdDetailCommit data shows
+   batches created 1:1 with packout demand). ERP1 covers the underlying
+   need (one packaging run fed by several batches) via specify-packouts'
+   editable Supplied Qty. The Parent column stays mirrored; revisit only if
+   the plant asks for parent/child batches.

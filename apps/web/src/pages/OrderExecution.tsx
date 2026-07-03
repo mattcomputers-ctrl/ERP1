@@ -299,6 +299,63 @@ function IptResults({ orderId, tests, canRecord, onDone }: { orderId: number; te
   );
 }
 
+// Express execution (vendor §6.11/§8.5): one action records every remaining
+// line at standard — FIFO lot selection for traced items, shortfalls warned.
+type ExpressResult = {
+  orderId: number;
+  materials: number;
+  instructions: number;
+  consumed: { lot: string; qty: number }[];
+  shortfalls: { item: string; shortfall: number }[];
+  unitCost: number | null;
+};
+
+function ExpressExecute({ orderId, remaining, onDone }: {
+  orderId: number; remaining: number; onDone: (r: ExpressResult) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const m = useMutation({
+    mutationFn: () => api.post<ExpressResult>(`/orders/${orderId}/execution/express`, {}),
+    onSuccess: (r) => {
+      setConfirming(false);
+      onDone(r);
+    },
+  });
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md bg-indigo-50/60 px-3 py-2 text-sm">
+      {!confirming ? (
+        <>
+          <span className="text-slate-600">
+            Express execution — record all {remaining} remaining line(s) at standard (FIFO lots).
+          </span>
+          <button type="button" onClick={() => setConfirming(true)} className="font-medium text-indigo-600 hover:underline">
+            Express…
+          </button>
+        </>
+      ) : (
+        <>
+          <span className="text-slate-700">
+            Record every remaining material line at its planned quantity, consuming stock FIFO
+            (lot-traced items take the oldest on-hand lots), and check off the instructions?
+          </span>
+          <button
+            type="button"
+            disabled={m.isPending}
+            onClick={() => m.mutate()}
+            className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {m.isPending ? 'Recording…' : 'Record at standard'}
+          </button>
+          <button type="button" onClick={() => setConfirming(false)} className="text-slate-500 hover:underline">
+            Cancel
+          </button>
+        </>
+      )}
+      {m.isError && <span className="text-red-600">{(m.error as Error).message}</span>}
+    </div>
+  );
+}
+
 /** The collapsible guided-execution panel shown on a Released/Completed production order. */
 export function ExecutionPanel({ orderId, onDone }: { orderId: number; onDone: () => void }) {
   const [open, setOpen] = useState(false);
@@ -368,6 +425,22 @@ export function ExecutionPanel({ orderId, onDone }: { orderId: number; onDone: (
             <div className="rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-500">
               The order is not Released — lines are read-only{model.context === 'MFBA' ? '; in-process results can still be recorded until it closes' : ''}.
             </div>
+          )}
+          {model.executable && model.lines.some((l) => !l.recorded) && (
+            <ExpressExecute
+              orderId={orderId}
+              remaining={model.lines.filter((l) => !l.recorded).length}
+              onDone={(r) => {
+                setNotices((p) =>
+                  [
+                    ...p,
+                    `Express: ${r.materials} material line(s) at standard, ${r.instructions} instruction(s) checked off`,
+                    ...r.shortfalls.map((s) => `Express: ${s.item} short on hand (${fmtQty(s.shortfall)})`),
+                  ].slice(-6),
+                );
+                refresh();
+              }}
+            />
           )}
           {model.lines.map((l) =>
             l.recorded || !model.executable ? (

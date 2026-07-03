@@ -2850,6 +2850,158 @@ export class OrdersService {
   }
 
   /**
+   * Express execution (vendor §6.11 Batch Execution Express / §8.5 Package
+   * Express Execution, adapted to ERP1's line model): record every REMAINING
+   * unrecorded procedure line at standard in one action — material (UI) lines
+   * at their planned quantity, instruction lines checked off. Matches how the
+   * plant actually ran: quantities were dispensed to plan and written up
+   * afterwards, so "everything at standard" is the overwhelmingly common
+   * record. Consumption draws FIFO oldest-first for EVERY item in ONE locked
+   * acquisition (the system-wide lock-order invariant — never per-line scans,
+   * which deadlock against each other); for lot-traced items the FIFO picks
+   * are recorded as the dispensed lots (real forward lineage — the express
+   * trade-off is that the operator accepts FIFO lot selection instead of
+   * scanning specific lots). Shortfalls are recorded, never block. Lines
+   * already recorded individually are left untouched; a line skipped via the
+   * per-line panel (actual 0) stays skipped. One transaction, one audit entry.
+   */
+  async expressExecute(orderId: number, dto: { reason?: string }, actor: Actor) {
+    const order = await this.requireTransition(orderId, 'RLS', 'express-execute');
+    if (!OrdersService.EXEC_CONTEXTS.has(order.context ?? '')) {
+      throw new BadRequestException('Only production (MFBA/MFPP) orders are executed.');
+    }
+    const { childLot, pkLines } = await this.producedLotOf(orderId);
+    const producedQty = order.actualBatchSize ?? pkLines[0]?.qtyReqd ?? 0;
+    const at = new Date();
+
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockAndRequireReleased(tx, orderId);
+      // The remaining work is read under the order lock — a per-line record
+      // racing this express run must enact exactly once.
+      const lines = await tx.ordDetail.findMany({
+        // Unexecuted lines carry ExecStatus NULL (live shape) or 'NST' — a
+        // bare NOT filter would drop the NULLs (SQL three-valued logic).
+        where: {
+          ordrId: orderId,
+          context: { in: ['UI', 'INSTR'] },
+          OR: [{ execStatus: null }, { execStatus: { not: 'CMP' } }],
+        },
+        orderBy: [{ execOrder: 'asc' }, { id: 'asc' }],
+        select: { id: true, context: true, itemId: true, qtyReqd: true, execStatus: true },
+      });
+      if (!lines.length) {
+        throw new BadRequestException('Nothing left to record — every procedure line is already recorded.');
+      }
+      const materials = lines.filter((l) => l.context === 'UI');
+      const instructions = lines.filter((l) => l.context === 'INSTR');
+
+      const items = new Map(
+        (
+          await tx.item.findMany({
+            where: { id: { in: [...new Set(materials.map((l) => l.itemId).filter((v): v is number => v != null))] } },
+            select: { id: true, itemCode: true, lotTracked: true },
+          })
+        ).map((i) => [i.id, i]),
+      );
+
+      // ONE locked FIFO acquisition across every consumed item (traced and
+      // not) — per-item totals, since genealogy edges are lot-level, not
+      // line-level.
+      const requests = materials
+        .filter((l) => l.itemId != null && (l.qtyReqd ?? 0) > 0)
+        .map((l) => ({ itemId: l.itemId as number, qty: l.qtyReqd as number }));
+      const depletions = requests.length ? await this.valuation.depleteFifoMany(tx, requests) : new Map();
+
+      const consumed: { lot: string; qty: number }[] = [];
+      const shortfalls: { item: string; shortfall: number }[] = [];
+      for (const [itemId, res] of depletions) {
+        const item = items.get(itemId);
+        // A lot-traced item short on hand REFUSES express (tx rolls back):
+        // the stamped QtyUsed would exceed the recorded lineage edges — and
+        // inventing an edge for a lot FIFO never dispensed would corrupt
+        // recall. The per-line panel is the right path there: the operator
+        // asserts the physical lots, and the full claimed quantity is traced.
+        // Untraced items stay warn-only (consumeQuantity semantics).
+        if (item?.lotTracked && res.shortfall > 0) {
+          throw new BadRequestException(
+            `Lot-traced item ${item.itemCode ?? itemId} is short on hand (${res.shortfall} short of standard) — ` +
+              'record that line via the per-line panel (or adjust stock), then express the rest.',
+          );
+        }
+        for (const p of res.picks) {
+          if (p.lot === childLot) continue; // never self-edge the produced lot
+          await tx.$executeRaw`
+            INSERT INTO lot_genealogy (child_lot, parent_lot, via_ordr, qty, source)
+            VALUES (${childLot}, ${p.lot}, ${orderId}, ${p.qty}, 'consumption')
+            ON CONFLICT (child_lot, parent_lot, via_ordr)
+            DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
+          consumed.push(p);
+        }
+        if (res.shortfall > 0) shortfalls.push({ item: item?.itemCode ?? `item ${itemId}`, shortfall: res.shortfall });
+      }
+
+      for (const l of materials) {
+        await tx.ordDetail.update({
+          where: { id: l.id },
+          data: { qtyUsed: l.qtyReqd ?? 0, execStatus: 'CMP', dateUpdated: at },
+        });
+      }
+      if (instructions.length) {
+        await tx.ordDetail.updateMany({
+          where: { id: { in: instructions.map((l) => l.id) } },
+          data: { execStatus: 'CMP', dateUpdated: at },
+        });
+      }
+
+      const unitCost = consumed.length ? await this.valuation.rollUpProducedCost(tx, childLot, producedQty) : null;
+
+      await this.audit.record(
+        {
+          action: 'order.execution.express',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.execute',
+          summary:
+            `Order #${orderId}: express execution — ${materials.length} material line(s) recorded at standard, ` +
+            `${instructions.length} instruction(s) checked off` +
+            (shortfalls.length ? `; ${shortfalls.length} item(s) short on-hand` : '') +
+            (dto.reason ? ` — ${dto.reason}` : ''),
+          changes: [
+            ...materials.flatMap((l) => [
+              {
+                tableName: 'OrdDetail', recordId: String(l.id), fieldName: 'QtyUsed',
+                oldValue: null, newValue: String(l.qtyReqd ?? 0),
+              },
+              {
+                tableName: 'OrdDetail', recordId: String(l.id), fieldName: 'ExecStatus',
+                oldValue: l.execStatus, newValue: 'CMP',
+              },
+            ]),
+            ...instructions.map((l) => ({
+              tableName: 'OrdDetail', recordId: String(l.id), fieldName: 'ExecStatus',
+              oldValue: l.execStatus, newValue: 'CMP',
+            })),
+            ...consumed.map((c) => ({
+              tableName: 'lot_genealogy', recordId: childLot, fieldName: 'consumed',
+              oldValue: null, newValue: `${c.lot} (qty ${c.qty})`,
+            })),
+          ],
+        },
+        tx,
+      );
+
+      return {
+        orderId,
+        materials: materials.length,
+        instructions: instructions.length,
+        consumed,
+        shortfalls,
+        unitCost,
+      };
+    });
+  }
+
+  /**
    * Record in-process test results during execution. Legacy stored NO result on
    * the order line (results were handwritten on the paper ticket, then LIMS
    * captured release-level results) — the erp1_* result columns are ERP1's
