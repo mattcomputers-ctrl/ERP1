@@ -116,9 +116,11 @@ command upgrades in place.
    then **§13 accounting/QuickBooks export**, **§17 email notifications**,
    **§14 config tabs**, **§18 viewer library** (batch-build on DataGrid),
    **§15 i18n**, **§19 handheld PWA** — in that rough order.
-5. Background chips pending: enforce secured-item PERFORM grant on
-   order.complete + release.disposition; align InventoryService.transfer +
-   lot-tracking deleteMany with the single-scan lock convention.
+5. Background chip pending: enforce secured-item PERFORM grant on
+   order.complete + release.disposition. (The transfer/lot-tracking lock
+   alignment shipped in 9ad2322 — which also stopped imports from mirroring
+   lot-tracked items' Inventory rows, a resurrection bug found in its
+   review.)
 6. OPEN_QUESTIONS: native-Lot marker column (`erp1_native`) if parallel
    running shows YYMMDD### collisions on raw-material lots.
 7. Before cutover: one real install pass on the actual Proxmox VM; a live
