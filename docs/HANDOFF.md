@@ -103,47 +103,59 @@ command upgrades in place.
 
 ## Priority queue (toward "shipped")
 
-1. **Verify latest CI is green** (last session ended pushing 0f8641f —
-   incremental sync; ab13884 order reversal is confirmed green; check 0f8641f
-   completed green, fix first if red).
-2. **`ItemPackagedProduct` mirror** (7,136 rows; bulk→packout binding) —
-   needed for §5 "specify packouts" and §6 packaging-product lookup. Schema +
-   migration + import TableSpec + surface where §6 needs it.
-3. **§5/§6 remaining execution**: multi-batch creation, express modes,
-   batch-order edit revisions (`OrdrEdit`/`OrdDetailEdit` are 0-row — native
-   design), packaging end-lot specifics.
-4. **§10 Planning/MRP** (supply/demand, plan trace, create-PO-from-plan),
-   then **§13 accounting/QuickBooks export**, **§17 email notifications**,
+1. **Verify latest CI is green** (last session ended at 2f0746a — express
+   execution; 69d31dd packouts is confirmed green; check 2f0746a completed
+   green, fix first if red).
+2. **§5 batch-order edit revisions** (`OrdrEdit`/`OrdDetailEdit` are 0-row —
+   native design per the vendor's §7 semantics: revise a RELEASED order's
+   quantities/testing with a published revision trail; ERP1 already has
+   edit-before-release + rescale). Then §6 packaging end-lot specifics +
+   reserved-material release (vendor §8.5), if the data shows they're used.
+3. **§10 Planning/MRP** (supply/demand, plan trace, create-PO-from-plan) —
+   specify-packouts already writes the demand allocation (OrdDetailCommit),
+   which is the §10 building block.
+4. Then **§13 accounting/QuickBooks export**, **§17 email notifications**,
    **§14 config tabs**, **§18 viewer library** (batch-build on DataGrid),
    **§15 i18n**, **§19 handheld PWA** — in that rough order.
 5. Background chip pending: enforce secured-item PERFORM grant on
-   order.complete + release.disposition. (The transfer/lot-tracking lock
-   alignment shipped in 9ad2322 — which also stopped imports from mirroring
-   lot-tracked items' Inventory rows, a resurrection bug found in its
-   review.)
+   order.complete + release.disposition.
 6. OPEN_QUESTIONS: native-Lot marker column (`erp1_native`) if parallel
-   running shows YYMMDD### collisions on raw-material lots.
+   running shows YYMMDD### collisions on raw-material lots; whether recipe
+   publish should also re-point ItemPackagedProduct bindings (current answer:
+   no — read-time resolution, see ASSUMPTIONS §Packouts).
 7. Before cutover: one real install pass on the actual Proxmox VM; a live
    `POST /import/sync` against the real legacy DB (only tested against the
    seam fake + shape-validated queries so far).
 
-## State of the world (as of 2026-07-03, commit 0f8641f)
+## State of the world (as of 2026-07-03, commit 2f0746a)
 
 - Foundations ✅ (auth/RBAC/audit/e-sig/DataGrid/installer/migrations/CI).
-- §4 Recipes ✅; §5/§6 guided execution core ✅ + **order reversal ✅**
-  (un-complete CMP→RLS: RVSMFP ChangeSet, produced stock un-minted if
-  untouched, consumed lots restored from the consumption edges, lines reset,
-  `order.reverse` secured item — see ASSUMPTIONS §Order reversal; an ERP1
-  extension, vendor forbade it).
+- §4 Recipes ✅; §5/§6 guided execution core ✅ + order reversal ✅ +
+  **packouts ✅** (2026-07-03: `ItemPackagedProduct` mirrored + imported;
+  specify-what-to-packout on batch orders — creates the MFPP order from the
+  ACTIVE recipe revision + OrdDetailCommit allocation in one tx; demand/
+  supply panels; 7.22-style packaging-product lookup in the create form —
+  see ASSUMPTIONS §Packouts) + **express execution ✅** (record all
+  remaining lines at standard, one locked FIFO acquisition, traced picks =
+  lineage; traced shortfall REFUSES, untraced warns — see ASSUMPTIONS
+  §Express execution).
+- **Multi-batch is ⏸️ with evidence**: `Ordr.Parent` NULL on all 75K live
+  orders; the plant sizes batches to demand (don't rebuild it without a
+  user ask).
 - **§0 import engine ✅**: full import + log-driven incremental sync +
-  reconciliation report (see ASSUMPTIONS §Incremental import sync — the
-  Log/LogResult mechanics, watermark rules, never-logged-table recopies,
-  native-row guards). NOT yet run against the real legacy DB end-to-end.
-- Suites: 74 unit + 245 integration green; CI green through ab13884 (0f8641f
-  pending at session end — verify).
-- Programs added: `orders.reverse` (+ secured item `order.reverse`).
-  No schema changes this session — no new migrations (latest remains
-  `20260703010000_test_catalog`).
+  reconciliation report. NOT yet run against the real legacy DB end-to-end.
+- Suites: 74 unit + 273 integration green; CI green through 69d31dd
+  (2f0746a pending at session end — verify).
+- New this session: migration `20260703170000_item_packaged_product`;
+  routes `GET /orders/packout-options`, `GET/POST /orders/:id/packouts`,
+  `POST /orders/:id/execution/express`; no new programs (packouts under
+  `orders.create`, express under `orders.execute`).
+- Hardening worth remembering (multi-agent reviews each increment):
+  everything an audited verdict depends on must be re-read IN-TX under the
+  row lock; `curStatus(null)`='NST' means absent rows must throw explicitly
+  (fixed in `lockAndRequireStatus` too); Prisma `NOT:{col:'X'}` drops NULL
+  rows (unexecuted lines carry ExecStatus NULL); tests must seed explicit
+  `false` on boolean mirror columns (legacy has NO NULL booleans).
 - Known quirks: recipe editor authors at per-100-lb basis (stored per-1-lb);
   `UseFrom` on UB lines undecoded; RMPP exec numbering is a documented
   extension; `Ordr.ActualBatchSize` holds the PLANNED size until completion
