@@ -189,7 +189,10 @@ function TestForm({ initial, submitLabel, onSubmit, onDone }: { initial: Draft; 
   const set = (patch: Partial<Draft>) => setD((p) => ({ ...p, ...patch }));
   const names = useQuery({
     queryKey: ['item-test-names', d.test],
-    queryFn: () => api.get<{ rows: string[] }>(`/item-tests/test-name-options?q=${encodeURIComponent(d.test)}`),
+    queryFn: () =>
+      api.get<{ rows: { test: string; description: string | null; catalog: boolean }[] }>(
+        `/item-tests/test-name-options?q=${encodeURIComponent(d.test)}`,
+      ),
     enabled: d.test.trim().length >= 1,
   });
   const m = useMutation({ mutationFn: () => onSubmit(draftBody(d)), onSuccess: onDone });
@@ -199,7 +202,11 @@ function TestForm({ initial, submitLabel, onSubmit, onDone }: { initial: Draft; 
       <div className="grid gap-3 sm:grid-cols-3">
         <Field label="Test name">
           <Input list="item-test-names" value={d.test} onChange={(e) => set({ test: e.target.value })} maxLength={20} />
-          <datalist id="item-test-names">{names.data?.rows.map((n) => <option key={n} value={n} />)}</datalist>
+          <datalist id="item-test-names">
+            {names.data?.rows.map((n) => (
+              <option key={n.test} value={n.test}>{n.description ?? undefined}</option>
+            ))}
+          </datalist>
         </Field>
         <Field label="Group"><Input value={d.testGroup} onChange={(e) => set({ testGroup: e.target.value })} maxLength={20} /></Field>
         <Field label="Grade"><Input value={d.grade} onChange={(e) => set({ grade: e.target.value })} maxLength={6} /></Field>

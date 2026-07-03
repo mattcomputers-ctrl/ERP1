@@ -77,17 +77,52 @@ export class ItemTestsService {
     };
   }
 
-  /** Distinct existing test names (for the editor's name datalist). */
+  /**
+   * Test names for the editor's datalist: the master catalog (`Test`, with its
+   * description / result type / unit) first, then any ad-hoc names that exist
+   * only on ItemTest rows (legacy references the catalog by NAME, no FK — names
+   * outside the catalog are valid and must keep appearing). Backward-compatible
+   * shape: rows of { test, description, catalog }.
+   */
   async testNameOptions(q?: string) {
     const term = q?.trim();
-    const rows = await this.prisma.itemTest.findMany({
-      where: { test: term ? { contains: term, mode: 'insensitive' } : { not: null } },
-      distinct: ['test'],
-      orderBy: { test: 'asc' },
-      take: 50,
-      select: { test: true },
-    });
-    return { rows: rows.map((r) => r.test).filter((t): t is string => !!t) };
+    const nameFilter = term ? { contains: term, mode: 'insensitive' as const } : undefined;
+    const [catalog, adhoc] = await Promise.all([
+      this.prisma.test.findMany({
+        where: nameFilter ? { test: nameFilter } : {},
+        orderBy: { test: 'asc' },
+        take: 50,
+        select: { test: true, description: true, testResultType: true, unit: true },
+      }),
+      this.prisma.itemTest.findMany({
+        where: { test: nameFilter ?? { not: null } },
+        distinct: ['test'],
+        orderBy: { test: 'asc' },
+        take: 50,
+        select: { test: true },
+      }),
+    ]);
+    const seen = new Set(catalog.map((c) => c.test.trim().toUpperCase()));
+    const rows = [
+      ...catalog.map((c) => ({
+        test: c.test,
+        description: c.description ?? null,
+        resultType: c.testResultType ?? null,
+        unit: c.unit ?? null,
+        catalog: true,
+      })),
+      ...adhoc
+        .map((r) => r.test)
+        .filter((t): t is string => !!t)
+        .filter((t) => {
+          const key = t.trim().toUpperCase();
+          if (seen.has(key)) return false; // vs the catalog AND earlier ad-hoc names
+          seen.add(key);
+          return true;
+        })
+        .map((t) => ({ test: t, description: null, resultType: null, unit: null, catalog: false })),
+    ];
+    return { rows: rows.slice(0, 50) };
   }
 
   // --- editing (mutating; RBAC + atomic audit) -----------------------------

@@ -796,6 +796,51 @@ model OrdDetail {
   @@map("OrdDetail")
 }
 
+// QC test master catalog (mirrors legacy; 35 rows in this install). The names
+// the Item Tests editor offers — ItemTest.Test / OrdDetailTest.Test reference
+// these by name (no FK in legacy). TestResultType: NUM (with Precision) / BOOL.
+model Test {
+  test           String   @id @map("Test") @db.VarChar(20)
+  version        Int?     @map("Version")
+  description    String?  @map("Description") @db.VarChar(256)
+  testResultType String?  @map("TestResultType") @db.VarChar(4)
+  precision      Int?     @map("Precision")
+  testGroup      String?  @map("TestGroup") @db.VarChar(20)
+  memo           String?  @map("Memo") @db.Text
+  sampleSize     Float?   @map("SampleSize")
+  prototype      Boolean? @map("Prototype")
+  unit           String?  @map("Unit") @db.VarChar(20)
+  testGrouping   String?  @map("TestGrouping") @db.VarChar(20)
+  method         String?  @map("Method") @db.VarChar(256)
+  specification  String?  @map("Specification") @db.Text
+
+  @@map("Test")
+}
+
+// QC test-group master catalog (mirrors legacy; 4 rows in this install) —
+// sampling defaults per group of tests (sample size/unit/method, retain flag).
+model TestGroup {
+  testGroup            String   @id @map("TestGroup") @db.VarChar(20)
+  version              Int?     @map("Version")
+  description          String?  @map("Description") @db.VarChar(256)
+  labId                Int?     @map("Lab")
+  sampleSize           Float?   @map("SampleSize")
+  unit                 String?  @map("Unit") @db.VarChar(6)
+  samplingMethod       String?  @map("SamplingMethod") @db.VarChar(6)
+  labelGroup           String?  @map("LabelGroup") @db.VarChar(20)
+  isRetain             Boolean? @map("IsRetain")
+  sampleSizePer        Float?   @map("SampleSizePer")
+  memo                 String?  @map("Memo") @db.Text
+  maximumSampleSize    Float?   @map("MaximumSampleSize")
+  maximumSampleSizePer Float?   @map("MaximumSampleSizePer")
+  mfSamplingMethod     String?  @map("MFSamplingMethod") @db.VarChar(6)
+  retestSamplingMethod String?  @map("RetestSamplingMethod") @db.VarChar(6)
+  testGroupGroup       String?  @map("TestGroupGroup") @db.VarChar(20)
+  multiResultSave      Boolean? @map("MultiResultSave")
+
+  @@map("TestGroup")
+}
+
 // QC / in-process test spec attached to an order line (mirrors legacy). Powers
 // the Quality Control section of the batch sheet: Test + Min/Max/Target/
 // Specification -> spec range, with a blank Result for hand-recording.

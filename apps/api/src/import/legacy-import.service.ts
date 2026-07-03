@@ -90,6 +90,28 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    name: 'Test', legacyTable: 'dbo.Test', delegate: 'test',
+    where: (d) => ({ test: d.test }),
+    map: (r) => ({
+      test: r.Test, version: r.Version, description: r.Description, testResultType: r.TestResultType,
+      precision: r.Precision, testGroup: r.TestGroup, memo: r.Memo, sampleSize: r.SampleSize,
+      prototype: b(r.Prototype), unit: r.Unit, testGrouping: r.TestGrouping, method: r.Method,
+      specification: r.Specification,
+    }),
+  },
+  {
+    name: 'TestGroup', legacyTable: 'dbo.TestGroup', delegate: 'testGroup',
+    where: (d) => ({ testGroup: d.testGroup }),
+    map: (r) => ({
+      testGroup: r.TestGroup, version: r.Version, description: r.Description, labId: r.Lab,
+      sampleSize: r.SampleSize, unit: r.Unit, samplingMethod: r.SamplingMethod, labelGroup: r.LabelGroup,
+      isRetain: b(r.IsRetain), sampleSizePer: r.SampleSizePer, memo: r.Memo,
+      maximumSampleSize: r.MaximumSampleSize, maximumSampleSizePer: r.MaximumSampleSizePer,
+      mfSamplingMethod: r.MFSamplingMethod, retestSamplingMethod: r.RetestSamplingMethod,
+      testGroupGroup: r.TestGroupGroup, multiResultSave: b(r.MultiResultSave),
+    }),
+  },
+  {
     name: 'ItemTest', legacyTable: 'dbo.ItemTest', delegate: 'itemTest', idColumn: 'ItemTest',
     where: (d) => ({ id: d.id }),
     map: (r) => ({

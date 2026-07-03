@@ -46,7 +46,9 @@ export async function resetDb(prisma: PrismaClient): Promise<void> {
     DO $$
     DECLARE r RECORD;
     BEGIN
-      FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+      -- Keep the migration ledger: truncating it makes the next local
+      -- migrate deploy try to re-apply the baseline against a full schema.
+      FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations') LOOP
         EXECUTE 'TRUNCATE TABLE ' || quote_ident(r.tablename) || ' RESTART IDENTITY CASCADE';
       END LOOP;
     END $$;

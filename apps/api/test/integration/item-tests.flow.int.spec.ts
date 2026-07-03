@@ -60,4 +60,23 @@ describe('ItemTestsService (qa.itemTests)', () => {
     expect(res.rows.map((r) => r.itemCode)).toEqual(['TESTED']); // only the one with tests
     expect(res.rows[0].testCount).toBe(2);
   });
+
+  it('test-name options merge the master catalog (described, first) with ad-hoc ItemTest names, deduped', async () => {
+    await prisma.test.create({
+      data: { test: 'VISC #2 ZAHN', description: 'Check viscosity using #2 Zahn Cup', testResultType: 'NUM', unit: 'SECONDS' },
+    });
+    await prisma.test.create({ data: { test: 'VISC', description: 'Visc from Laray', testResultType: 'NUM' } });
+    await addItem(prisma, { id: 1 });
+    await addTest(1, { test: 'visc' }); // ad-hoc row that matches a catalog name case-insensitively
+    await addTest(1, { test: 'VISC CUSTOM' }); // genuinely ad-hoc — must still be offered
+    const { itemTests } = services(prisma);
+
+    const res = await itemTests.testNameOptions('VISC');
+    const names = res.rows.map((r) => r.test);
+    // Catalog entries first (with descriptions), the case-duplicate dropped, the ad-hoc kept.
+    expect(names).toEqual(['VISC', 'VISC #2 ZAHN', 'VISC CUSTOM']);
+    expect(res.rows[0].catalog).toBe(true);
+    expect(res.rows[1].description).toBe('Check viscosity using #2 Zahn Cup');
+    expect(res.rows[2].catalog).toBe(false);
+  });
 });
