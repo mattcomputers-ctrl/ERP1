@@ -26,3 +26,10 @@ default was chosen and recorded in ASSUMPTIONS.md).
 ## Platform
 - (none currently — the native installer is validated in a container;
   a real Proxmox-VM install pass is still worth doing before cutover)
+
+- **Native lot marker**: ERP1-native Lot rows have no explicit marker column;
+  the import sync protects native PRODUCED lots via `ordDetailId >= 1e9`, but
+  a native raw-material receiving lot (sequence lot numbers) colliding with a
+  legacy lot code would not be distinguished. If parallel running shows real
+  collisions, add an `erp1_native` boolean to Lot (migration + set at every
+  native mint) and guard on it instead. (2026-07-03)

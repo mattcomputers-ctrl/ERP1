@@ -1,14 +1,29 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import * as sql from 'mssql';
+import { NATIVE_ID_BASE } from '../common/locks';
 import { GenealogyService } from '../genealogy/genealogy.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { LegacyDbService, type LegacyConnection, type LogTouch } from './legacy-db.service';
 
 /**
  * Read-only import/sync from the legacy Mar-Kov CMS (SQL Server) into our
  * PostgreSQL mirror. Idempotent (upsert by legacy key, preserving surrogate
  * IDs), resets sequences afterwards, and produces a reconciliation report.
  *
- * Only SELECT statements are ever issued against the legacy database.
+ * Two modes:
+ * - FULL (`run`): copy every mirrored table wholesale. Records the legacy
+ *   `Log` high-water mark (captured BEFORE copying starts, so anything
+ *   written during the copy is re-processed by the first sync).
+ * - INCREMENTAL (`sync`): walk the legacy change feed since the watermark.
+ *   Legacy logs one `Log` row per user operation and one `LogResult` row per
+ *   AFFECTED ROW (TableName + key column + key value — the authoritative
+ *   delta feed; discovery 2026-07-03: per-row `Version` is an
+ *   optimistic-concurrency counter, NOT usable as a watermark). Touched keys
+ *   are re-pulled and upserted; a key absent at source is a legacy delete
+ *   (legacy keeps no tombstones), propagated only under the conservative
+ *   rules below. `reconcile` compares per-table row counts source vs mirror.
+ *
+ * Only SELECT statements are ever issued against the legacy database (via
+ * LegacyDbService — the seam integration tests replace with a fake).
  */
 
 interface TableSpec {
@@ -400,32 +415,167 @@ const TABLES: TableSpec[] = [
   },
 ];
 
+// LogResult TableName -> registry name, where they differ. `AddressRef` is the
+// INSTEAD OF-trigger view fronting AddressReference; `SubLot` is a casing
+// quirk. LogResult TableNames with no registry entry are unmirrored (views,
+// dropped tables, tables ERP1 intentionally doesn't mirror) — reported, not
+// synced.
+const LOG_TABLE_ALIASES: Record<string, string> = {
+  addressref: 'AddressReference',
+  sublot: 'Sublot',
+};
+
+// The app-settings key holding the incremental watermark: the highest legacy
+// `Log` id already reflected in the mirror. Absent until a FULL import
+// succeeds (sync refuses to run without that foundation — Log history was
+// purged pre-2014, so the log walk is a top-up, never the baseline).
+const WATERMARK_KEY = 'import.logWatermark';
+
+// Each sync re-walks this many Log ids BEFORE the watermark. MAX(Log) returns
+// the highest COMMITTED id, but identity allocation order is not commit
+// order: a legacy transaction that allocated a lower id and committed after
+// the previous sync's capture would otherwise be skipped forever. Re-walking
+// an overlap is free of harm (upserts are idempotent; deletes re-check
+// against the source) and 1,000 operations ≈ days of this plant's activity —
+// far beyond any real in-flight transaction.
+const REWALK_LAG = 1_000;
+
+// Mirrored tables that NEVER appear in the legacy change feed (verified
+// live: zero LogResult rows ever name them — they are maintained by
+// encrypted triggers / side effects, not logged commands). The log walk
+// cannot refresh them, so sync re-copies them wholesale: the tiny ones every
+// run, the bigger ones when a proxy table that always accompanies their
+// changes was touched (err on re-copy; reconciliation is the backstop).
+const NEVER_LOGGED_ALWAYS = ['Currency', 'TestGroup', 'Address', 'SublotParent'];
+const NEVER_LOGGED_PROXIED: Array<{ name: string; proxies: string[] }> = [
+  // Every legacy stock movement posts InvMovement rows (logged) under a
+  // ChangeSet — either touch means Inventory balances moved.
+  { name: 'Inventory', proxies: ['invmovement', 'changeset'] },
+  // CofA headers change with their Release.
+  { name: 'ReleaseCofA', proxies: ['release', 'releasecofa'] },
+  // Lot composition changes when lots are made/edited.
+  { name: 'LotIngredient', proxies: ['lot', 'lotingredient'] },
+];
+
+// Numeric key column (mirror field name) for natural-PK mirrors whose native
+// rows ARE identifiable by the id range — shared by the reconciliation
+// report and the native-row upsert guard (id-column tables use `id`).
+const NATURAL_NUMERIC_KEY: Record<string, string> = {
+  ChangeSetReceipt: 'changeSetId',
+  ChangeSetShipment: 'changeSetId',
+  ReleaseCofA: 'releaseId',
+};
+
 @Injectable()
 export class LegacyImportService {
   private readonly logger = new Logger(LegacyImportService.name);
 
+  // In-process mutual exclusion between run() and sync(): a full import
+  // overlapping a scheduled sync could resurrect legacy-deleted rows from its
+  // stale table snapshots. Single-node deployment (one API process) — a
+  // process-local flag is the correct scope.
+  private busy: string | null = null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly genealogy: GenealogyService,
+    private readonly legacyDb: LegacyDbService,
   ) {}
 
-  private config(): sql.config {
-    const server = process.env.LEGACY_MSSQL_HOST;
-    if (!server) {
-      throw new BadRequestException(
-        'Legacy import is not configured. Set LEGACY_MSSQL_HOST/PORT/DB/USER/PASSWORD in .env.',
-      );
+  private acquireBusy(what: string): void {
+    if (this.busy) {
+      throw new BadRequestException(`Cannot start ${what} — ${this.busy} is already running.`);
     }
-    return {
-      server,
-      port: Number(process.env.LEGACY_MSSQL_PORT ?? '1433'),
-      database: process.env.LEGACY_MSSQL_DB ?? 'CMS',
-      user: process.env.LEGACY_MSSQL_USER ?? 'sds_readonly',
-      password: process.env.LEGACY_MSSQL_PASSWORD ?? '',
-      options: { encrypt: false, trustServerCertificate: true },
-      requestTimeout: 180_000,
-      pool: { max: 4, min: 0, idleTimeoutMillis: 30_000 },
-    };
+    this.busy = what;
+  }
+
+  /**
+   * Chunked idempotent upsert of legacy rows through a table spec, with the
+   * native-row guard: a mirror row ERP1 itself created must never be
+   * overwritten by legacy data. Rows whose numeric key lands in the native
+   * range are dropped outright (legacy ids never reach it — such a row is
+   * bogus or a collision); Lot rows whose mirror row belongs to a native
+   * production order (ordDetailId >= NATIVE_ID_BASE) are dropped too — the
+   * plant's YYMMDD### lot numbering is shared between legacy and ERP1, so a
+   * same-day lot code CAN collide during parallel running.
+   */
+  private async upsertRows(spec: TableSpec, rows: Record<string, any>[]) {
+    let processed = 0;
+    let rejected = 0;
+    let skippedNative = 0;
+    const delegate = (this.prisma as unknown as Record<string, any>)[spec.delegate];
+
+    // Native produced lots to protect (prefetched — the guard must not read
+    // per row). Only lots whose codes appear in this batch are checked.
+    let nativeLots: Set<string> | null = null;
+    if (spec.name === 'Lot' && rows.length) {
+      nativeLots = new Set<string>();
+      const codes = rows.map((r) => r.Lot).filter((v): v is string => v != null);
+      for (let i = 0; i < codes.length; i += 5_000) {
+        const found = await this.prisma.lot.findMany({
+          where: { lot: { in: codes.slice(i, i + 5_000) }, ordDetailId: { gte: NATIVE_ID_BASE } },
+          select: { lot: true },
+        });
+        for (const l of found) nativeLots.add(l.lot);
+      }
+    }
+    const numericKey = spec.idColumn ? 'id' : NATURAL_NUMERIC_KEY[spec.name];
+
+    const CONCURRENCY = 16;
+    for (let i = 0; i < rows.length; i += CONCURRENCY) {
+      const chunk = rows.slice(i, i + CONCURRENCY);
+      const guarded = chunk.filter((row) => {
+        const data = spec.map(row);
+        if (numericKey != null && Number(data[numericKey]) >= NATIVE_ID_BASE) {
+          skippedNative++;
+          return false;
+        }
+        if (nativeLots?.has(row.Lot)) {
+          skippedNative++;
+          return false;
+        }
+        return true;
+      });
+      const results = await Promise.allSettled(
+        guarded.map((row) => {
+          const data = spec.map(row);
+          return delegate.upsert({ where: spec.where(data), create: data, update: data });
+        }),
+      );
+      for (const res of results) {
+        if (res.status === 'fulfilled') {
+          processed++;
+        } else {
+          rejected++;
+          if (rejected <= 5) this.logger.warn(`${spec.name} row rejected: ${(res.reason as Error)?.message}`);
+        }
+      }
+    }
+    if (skippedNative > 0) {
+      this.logger.warn(`${spec.name}: ${skippedNative} source row(s) skipped — they would overwrite ERP1-native rows`);
+    }
+    return { processed, rejected, skippedNative };
+  }
+
+  private async getWatermark(): Promise<number | null> {
+    const row = await this.prisma.appSetting.findUnique({ where: { key: WATERMARK_KEY } });
+    // Strict digits-only: Number('') is 0, and a cleared setting must read as
+    // "no watermark" (sync refuses) rather than as a walk of ALL history.
+    const value = row?.value?.trim() ?? '';
+    return /^\d+$/.test(value) ? Number(value) : null;
+  }
+
+  private async setWatermark(logId: number) {
+    await this.prisma.appSetting.upsert({
+      where: { key: WATERMARK_KEY },
+      create: {
+        key: WATERMARK_KEY,
+        value: String(logId),
+        description:
+          'Incremental import watermark: the highest legacy Log id already reflected in the mirror. Managed by the import engine; lower it to re-walk recent legacy changes.',
+      },
+      update: { value: String(logId) },
+    });
   }
 
   async run(triggeredBy?: string, only?: string[]) {
@@ -437,43 +587,32 @@ export class LegacyImportService {
         `No matching tables for: ${only.join(', ')}. Known: ${TABLES.map((t) => t.name).join(', ')}`,
       );
     }
+    const fullMode = !only?.length;
+    this.acquireBusy(fullMode ? 'a full import' : 'a partial import');
 
     const runRecord = await this.prisma.importRun.create({
-      data: { status: 'running', mode: only?.length ? 'partial' : 'full', triggeredBy: triggeredBy ?? null },
+      data: { status: 'running', mode: fullMode ? 'full' : 'partial', triggeredBy: triggeredBy ?? null },
+    }).catch((e) => {
+      this.busy = null;
+      throw e;
     });
 
     const tables: Array<{ name: string; source: number; target: number; processed: number; rejected: number }> = [];
-    let pool: sql.ConnectionPool | undefined;
+    let conn: LegacyConnection | undefined;
     try {
-      pool = await new sql.ConnectionPool(this.config()).connect();
+      conn = await this.legacyDb.open();
+
+      // Watermark target, captured BEFORE any copying: legacy keeps writing
+      // during the copy, and anything after this point is re-processed by the
+      // first incremental sync (upserts are idempotent, so overlap is safe —
+      // a gap would not be).
+      const logWatermark = await conn.maxLogId();
 
       for (const spec of selected) {
-        const result = await pool.request().query(`SELECT * FROM ${spec.legacyTable}`);
-        const rows = result.recordset as Record<string, any>[];
-        let processed = 0;
-        let rejected = 0;
-        const delegate = (this.prisma as unknown as Record<string, any>)[spec.delegate];
-
-        const CONCURRENCY = 16;
-        for (let i = 0; i < rows.length; i += CONCURRENCY) {
-          const chunk = rows.slice(i, i + CONCURRENCY);
-          const results = await Promise.allSettled(
-            chunk.map((row) => {
-              const data = spec.map(row);
-              return delegate.upsert({ where: spec.where(data), create: data, update: data });
-            }),
-          );
-          for (const res of results) {
-            if (res.status === 'fulfilled') {
-              processed++;
-            } else {
-              rejected++;
-              if (rejected <= 5) this.logger.warn(`${spec.name} row rejected: ${(res.reason as Error)?.message}`);
-            }
-          }
-        }
-
+        const rows = (await conn.fetchAll(spec.legacyTable)) as Record<string, any>[];
+        const { processed, rejected } = await this.upsertRows(spec, rows);
         if (spec.idColumn) await this.resetSequence(spec.name, spec.idColumn);
+        const delegate = (this.prisma as unknown as Record<string, any>)[spec.delegate];
         const target = await delegate.count();
         tables.push({ name: spec.name, source: rows.length, target, processed, rejected });
         this.logger.log(`[import] ${spec.name}: source=${rows.length} target=${target} rejected=${rejected}`);
@@ -484,10 +623,16 @@ export class LegacyImportService {
       const { edges } = await this.genealogy.derive();
       this.logger.log(`[import] genealogy: derived ${edges} lot edges`);
 
+      // Only a FULL run establishes/advances the watermark — a partial run
+      // hasn't reflected other tables' changes, so the log walk must still
+      // cover them.
+      if (fullMode) await this.setWatermark(logWatermark);
+
       const report = {
         tables,
         totalRejected: tables.reduce((s, t) => s + (t.rejected as number), 0),
         genealogyEdges: edges,
+        ...(fullMode ? { logWatermark } : {}),
       };
       await this.prisma.importRun.update({
         where: { id: runRecord.id },
@@ -501,7 +646,313 @@ export class LegacyImportService {
       });
       throw e;
     } finally {
-      await pool?.close().catch(() => undefined);
+      this.busy = null;
+      await conn?.close().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Incremental sync: walk the legacy change feed (`LogResult`) since the
+   * watermark, re-pull every touched key, upsert what exists, and propagate
+   * deletes conservatively. Idempotent — a failed run leaves the watermark
+   * unmoved and simply re-processes on the next attempt.
+   *
+   * Delete rules (a key that re-pulls empty was deleted in legacy):
+   * - only enacted on id-keyed tables when the touch was keyed by that very
+   *   id column, and only for ids below the native range — a mirror row the
+   *   legacy system never owned (>= NATIVE_ID_BASE) is never deleted;
+   * - natural-key / composite-key tables never delete via sync (legacy
+   *   deletes are rare; count reconciliation surfaces any residue).
+   * Children are deleted before parents (reverse registry order).
+   */
+  async sync(triggeredBy?: string) {
+    const fromLog = await this.getWatermark();
+    if (fromLog == null) {
+      throw new BadRequestException('No import watermark yet — run a full Legacy Import first.');
+    }
+    this.acquireBusy('an incremental sync');
+
+    const runRecord = await this.prisma.importRun.create({
+      data: { status: 'running', mode: 'incremental', triggeredBy: triggeredBy ?? null },
+    }).catch((e) => {
+      this.busy = null;
+      throw e;
+    });
+
+    const tables: Array<{ name: string; keys: number; upserted: number; deleted: number; rejected: number }> = [];
+    const skipped: Array<{ tableName: string; touches: number }> = [];
+    let conn: LegacyConnection | undefined;
+    try {
+      conn = await this.legacyDb.open();
+      const toLog = await conn.maxLogId();
+
+      if (toLog <= fromLog) {
+        const report = { fromLog, toLog, touches: 0, tables: [], skipped: [], upToDate: true };
+        await this.prisma.importRun.update({
+          where: { id: runRecord.id },
+          data: { status: 'success', finishedAt: new Date(), report },
+        });
+        return { id: runRecord.id.toString(), status: 'success', ...report };
+      }
+
+      // Walk from BELOW the watermark: MAX(Log) is the highest COMMITTED id,
+      // and identity allocation order is not commit order — a legacy
+      // transaction that allocated a lower id but committed after the last
+      // capture would otherwise be skipped forever. Re-processing the overlap
+      // is harmless (idempotent upserts; deletes re-check the source).
+      const walkFrom = Math.max(0, fromLog - REWALK_LAG);
+      const touches = await conn.logDelta(walkFrom, toLog);
+
+      // Group touches by registry table (via aliases); collect unmirrored
+      // TableNames for the report. Plain pushes — a single legacy bulk op
+      // fans out to thousands of touches, so no per-touch array copying.
+      const specByName = new Map(TABLES.map((t) => [t.name.toLowerCase(), t]));
+      const touchesBySpec = new Map<string, LogTouch[]>();
+      const skippedCounts = new Map<string, number>();
+      for (const t of touches) {
+        const key = t.tableName.toLowerCase();
+        const specName = specByName.has(key) ? key : LOG_TABLE_ALIASES[key]?.toLowerCase();
+        if (specName && specByName.has(specName)) {
+          const spec = specByName.get(specName)!;
+          let arr = touchesBySpec.get(spec.name);
+          if (!arr) touchesBySpec.set(spec.name, (arr = []));
+          arr.push(t);
+        } else {
+          skippedCounts.set(t.tableName, (skippedCounts.get(t.tableName) ?? 0) + 1);
+        }
+      }
+      for (const [tableName, count] of skippedCounts) skipped.push({ tableName, touches: count });
+
+      // Process in registry order (parents before children) for upserts;
+      // deletes are collected and enacted afterwards in reverse order.
+      const deletes: Array<{ spec: TableSpec; id: number }> = [];
+      const touchedNames = new Set<string>();
+      for (const spec of TABLES) {
+        const specTouches = touchesBySpec.get(spec.name);
+        if (!specTouches?.length) continue;
+        touchedNames.add(spec.name);
+
+        const columns = await conn.tableColumns(spec.legacyTable);
+        // Canonicalize to the PHYSICAL column casing. LogResult FieldNames can
+        // case differently (live data: FieldName 'SubLot' vs column 'Sublot');
+        // SQL Server doesn't care, but the mssql recordset keys use physical
+        // casing, so every JS property read MUST use the canonical name — a
+        // verbatim FieldName read would return undefined and (in the delete
+        // detection) condemn rows that still exist.
+        const canonicalByLower = new Map(columns.map((c) => [c.toLowerCase(), c]));
+
+        // Group keys by their CANONICAL key-column signature (legacy keys
+        // Item rows by ItemCode in bulk ops and by Item elsewhere; OrdDetail
+        // sometimes by Item; composites are comma-joined in FieldName AND
+        // FieldValue). Single-column values are taken whole — never split —
+        // so an embedded comma in a key value can't derail them.
+        const byField = new Map<string, string[][]>();
+        let unresolvable = 0;
+        for (const t of specTouches) {
+          const rawCols = t.fieldName.split(',').map((c) => c.trim());
+          const cols = rawCols.map((c) => canonicalByLower.get(c.toLowerCase()));
+          if (!cols.length || cols.some((c) => c == null)) {
+            unresolvable++;
+            continue;
+          }
+          const vals = cols.length === 1 ? [t.fieldValue.trim()] : t.fieldValue.split(',').map((v) => v.trim());
+          if (vals.length !== cols.length) {
+            unresolvable++;
+            continue;
+          }
+          const fieldKey = (cols as string[]).join(',');
+          let arr = byField.get(fieldKey);
+          if (!arr) byField.set(fieldKey, (arr = []));
+          arr.push(vals);
+        }
+
+        let upserted = 0;
+        let rejected = 0;
+        let keys = 0;
+
+        // Delete detection shared by both branches: ids the window touched
+        // BY the table's own key column that the given source rows do not
+        // contain exist no more in legacy. (Re-pulls by a secondary key —
+        // ItemCode, Item on OrdDetail — can't distinguish "deleted" from
+        // "re-keyed", so they never delete.)
+        const collectDeletes = (canonCol: string, values: string[][], sourceRows: Record<string, any>[]) => {
+          if (!spec.idColumn || canonCol.toLowerCase() !== spec.idColumn.toLowerCase()) return;
+          const returned = new Set(sourceRows.map((r) => String(r[canonCol])));
+          for (const v of values) {
+            const id = Number(v[0]);
+            if (!Number.isFinite(id) || returned.has(String(id)) || returned.has(v[0])) continue;
+            if (id >= NATIVE_ID_BASE) continue; // never touch native rows
+            deletes.push({ spec, id });
+          }
+        };
+
+        if (unresolvable > 0) {
+          // A touch we can't key (FieldName isn't a column of the table) —
+          // fall back to a wholesale re-copy of the table. Rare (odd
+          // LogResult conventions); correctness over cleverness. The keyed
+          // groups we DID resolve still drive delete detection against the
+          // full source rowset — a fallback must not swallow legacy deletes.
+          this.logger.warn(`[sync] ${spec.name}: ${unresolvable} unresolvable key(s) — falling back to full re-copy`);
+          const rows = (await conn.fetchAll(spec.legacyTable)) as Record<string, any>[];
+          const res = await this.upsertRows(spec, rows);
+          upserted = res.processed;
+          rejected = res.rejected;
+          keys = specTouches.length;
+          for (const [fieldKey, values] of byField) {
+            const cols = fieldKey.split(',');
+            if (cols.length === 1) collectDeletes(cols[0], values, rows);
+          }
+        } else {
+          for (const [fieldKey, values] of byField) {
+            const cols = fieldKey.split(',');
+            keys += values.length;
+            const rows = (await conn.fetchByKeys(spec.legacyTable, cols, values)) as Record<string, any>[];
+            const res = await this.upsertRows(spec, rows);
+            upserted += res.processed;
+            rejected += res.rejected;
+            if (cols.length === 1) collectDeletes(cols[0], values, rows);
+          }
+        }
+
+        if (spec.idColumn) await this.resetSequence(spec.name, spec.idColumn);
+        tables.push({ name: spec.name, keys, upserted, deleted: 0, rejected });
+      }
+
+      // Wholesale re-copy of the never-logged tables (the change feed cannot
+      // see them): the tiny ones every sync, the bigger ones when a proxy
+      // table that always accompanies their changes appeared in the window
+      // (including unmirrored proxies like InvMovement).
+      const touchedLower = new Set(touches.map((t) => t.tableName.toLowerCase()));
+      for (const spec of TABLES) {
+        const proxied = NEVER_LOGGED_PROXIED.find((p) => p.name === spec.name);
+        const always = NEVER_LOGGED_ALWAYS.includes(spec.name);
+        if (!always && !proxied) continue;
+        if (!always && proxied && !proxied.proxies.some((p) => touchedLower.has(p))) continue;
+        const rows = (await conn.fetchAll(spec.legacyTable)) as Record<string, any>[];
+        const res = await this.upsertRows(spec, rows);
+        if (spec.idColumn) await this.resetSequence(spec.name, spec.idColumn);
+        touchedNames.add(spec.name);
+        tables.push({ name: `${spec.name} (re-copy)`, keys: rows.length, upserted: res.processed, deleted: 0, rejected: res.rejected });
+      }
+
+      // Deletes, children before parents (reverse registry order).
+      const deletedBySpec = new Map<string, number>();
+      const specOrder = new Map(TABLES.map((t, i) => [t.name, i]));
+      deletes.sort((a, b) => (specOrder.get(b.spec.name) ?? 0) - (specOrder.get(a.spec.name) ?? 0));
+      for (const d of deletes) {
+        const delegate = (this.prisma as unknown as Record<string, any>)[d.spec.delegate];
+        try {
+          const res = await delegate.deleteMany({ where: { id: d.id } });
+          if (res.count > 0) deletedBySpec.set(d.spec.name, (deletedBySpec.get(d.spec.name) ?? 0) + res.count);
+        } catch (e) {
+          this.logger.warn(`[sync] delete ${d.spec.name} ${d.id} failed: ${(e as Error).message}`);
+          const row = tables.find((t) => t.name === d.spec.name);
+          if (row) row.rejected++;
+        }
+      }
+      for (const row of tables) row.deleted = deletedBySpec.get(row.name) ?? 0;
+
+      // Re-derive lot genealogy only when its inputs moved.
+      let genealogyEdges: number | undefined;
+      if (['OrdDetailCommit', 'Lot', 'OrdDetail'].some((n) => touchedNames.has(n))) {
+        genealogyEdges = (await this.genealogy.derive()).edges;
+        this.logger.log(`[sync] genealogy: derived ${genealogyEdges} lot edges`);
+      }
+
+      const totalRejected = tables.reduce((s, t) => s + t.rejected, 0);
+      const report = {
+        fromLog,
+        toLog,
+        touches: touches.length,
+        tables,
+        skipped,
+        totalRejected,
+        ...(genealogyEdges != null ? { genealogyEdges } : {}),
+      };
+
+      // A rejected change is a legacy change the mirror did NOT absorb.
+      // Advancing the watermark past it would lose it forever (the next walk
+      // starts beyond its Log id, and reconcile's counts can't see a stale
+      // UPDATE) — so the run fails and the watermark holds; re-running after
+      // fixing the cause re-processes the whole window idempotently.
+      if (totalRejected > 0) {
+        const message = `${totalRejected} change(s) could not be applied — watermark NOT advanced; resolve the cause and re-run sync.`;
+        await this.prisma.importRun.update({
+          where: { id: runRecord.id },
+          data: { status: 'failed', finishedAt: new Date(), error: message, report },
+        });
+        throw new BadRequestException(message);
+      }
+
+      await this.setWatermark(toLog);
+      await this.prisma.importRun.update({
+        where: { id: runRecord.id },
+        data: { status: 'success', finishedAt: new Date(), report },
+      });
+      this.logger.log(`[sync] Log ${fromLog} -> ${toLog}: ${touches.length} touches, ${tables.length} tables`);
+      return { id: runRecord.id.toString(), status: 'success', ...report };
+    } catch (e) {
+      // The rejected-changes path above already recorded its failed run.
+      await this.prisma.importRun.updateMany({
+        where: { id: runRecord.id, status: 'running' },
+        data: { status: 'failed', finishedAt: new Date(), error: (e as Error).message, report: { fromLog, tables, skipped } },
+      });
+      throw e;
+    } finally {
+      this.busy = null;
+      await conn?.close().catch(() => undefined);
+    }
+  }
+
+  /**
+   * Reconciliation report: per mirrored table, the authoritative legacy row
+   * count vs the mirror — with the mirror's native (ERP1-created,
+   * id >= NATIVE_ID_BASE) rows broken out so the comparable delta is
+   * (mirror - native) - legacy. Tables whose native rows can't be identified
+   * by a numeric key range are reported with comparable=false (totals only).
+   */
+  async reconcile() {
+    let conn: LegacyConnection | undefined;
+    try {
+      conn = await this.legacyDb.open();
+      const rows: Array<{
+        name: string;
+        legacy: number;
+        mirror: number;
+        native: number | null;
+        delta: number | null;
+        comparable: boolean;
+      }> = [];
+      for (const spec of TABLES) {
+        const delegate = (this.prisma as unknown as Record<string, any>)[spec.delegate];
+        const [legacy, mirror] = await Promise.all([conn.countRows(spec.legacyTable), delegate.count()]);
+        const keyField = spec.idColumn ? 'id' : NATURAL_NUMERIC_KEY[spec.name];
+        let native: number | null = null;
+        if (keyField) {
+          native = await delegate.count({ where: { [keyField]: { gte: NATIVE_ID_BASE } } });
+        }
+        const comparable = keyField != null;
+        rows.push({
+          name: spec.name,
+          legacy,
+          mirror,
+          native,
+          delta: comparable ? mirror - (native ?? 0) - legacy : null,
+          comparable,
+        });
+      }
+      const watermark = await this.getWatermark();
+      const maxLog = await conn.maxLogId();
+      return {
+        generatedAt: new Date().toISOString(),
+        logWatermark: watermark,
+        legacyMaxLog: maxLog,
+        pendingLogs: watermark != null ? Math.max(0, maxLog - watermark) : null,
+        tables: rows,
+        drift: rows.filter((r) => r.comparable && r.delta !== 0).length,
+      };
+    } finally {
+      await conn?.close().catch(() => undefined);
     }
   }
 

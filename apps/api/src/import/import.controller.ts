@@ -17,6 +17,20 @@ export class ImportController {
     return this.importer.run(actor.label ?? actor.id, tables);
   }
 
+  // Incremental sync: walk the legacy change feed since the watermark and
+  // re-pull only the touched keys (requires a prior full import).
+  @Post('sync')
+  sync(@CurrentUser() actor: Actor) {
+    return this.importer.sync(actor.label ?? actor.id);
+  }
+
+  // Reconciliation report: per-table legacy vs mirror row counts (+ native
+  // breakout) and the current watermark lag.
+  @Get('reconcile')
+  reconcile() {
+    return this.importer.reconcile();
+  }
+
   @Get('runs')
   runs() {
     return this.importer.listRuns();

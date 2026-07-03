@@ -235,3 +235,79 @@ aggregated), 2026-07-02.
    per-lot lexical-order depletion loops — two different total orders — so
    the loops were replaced with the single-scan batch forms; the lock order
    and the FIFO draw order are independent concerns.)
+
+## Incremental import sync (§0, built 2026-07-03)
+
+1. **The watermark is the legacy `Log` id, not `Version`.** Schema Report §9
+   assumed per-row `Version` could drive incremental sync — live discovery
+   disproved it: `Version` is a small per-row optimistic-concurrency counter
+   (max Item.Version = 24; the app XML shows CheckVersion/UpdateVersion
+   steps), useless as a change marker, and absent from ~19 mirrored tables
+   (TransDetail, Release, Inventory, RecipeDetail, OrdDetailCommit, ...).
+   `Log` (one row per user operation, identity PK, monotonic — one clock-skew
+   inversion in 666K rows; identity-cache gaps of ~1000 are normal) +
+   `LogResult` (one row per AFFECTED ROW: TableName, key column, key value;
+   24.2M rows, indexed on (TableName, FieldName, FieldValue, Log) and
+   (Log, Step)) are the change feed. Failed operations roll back and leave no
+   LogResult rows.
+2. **Sync = re-pull touched keys since the watermark.** `SELECT DISTINCT
+   TableName, FieldName, FieldValue FROM LogResult WHERE Log > W AND Log <=
+   W2`, keys grouped per key-column signature and re-pulled parameterized +
+   chunked (column names validated against INFORMATION_SCHEMA — LogResult
+   text is never interpolated). Key quirks handled: bulk Item ops key by
+   `ItemCode` (one op can touch 18K items — DISTINCT dedupe is mandatory),
+   some OrdDetail touches key by `Item`, the `AddressRef` VIEW fronts
+   AddressReference with comma-joined composite keys, `SubLot` cases
+   differently. An unresolvable key column falls back to a wholesale re-copy
+   of that table. Unmirrored TableNames are counted and reported, not synced.
+   Int columns match varchar parameters via SQL Server implicit conversion
+   (verified live).
+3. **Deletes propagate conservatively.** Legacy keeps no tombstones; a
+   touched key that re-pulls empty was deleted (verified live on a deleted
+   OrdDetail/OrdDetailPricing pair). Sync enacts a delete ONLY when the touch
+   was keyed by the table's own id column and the id is below
+   NATIVE_ID_BASE — ERP1-native rows are never deleted, and natural-key /
+   composite-key tables (Lot, Test, AddressReference, ChangeSet satellites,
+   ...) never delete via sync (a secondary-key re-pull can't distinguish
+   deleted from re-keyed). Children delete before parents (reverse registry
+   order). Residue surfaces in the reconciliation counts.
+4. **The watermark is captured BEFORE the full copy starts** and advanced
+   only when a run succeeds — overlap is re-processed (idempotent upserts),
+   a gap is impossible; a failed sync leaves the watermark unmoved. A
+   partial (?only=) import never moves it. Log history was purged pre-2014
+   in this install: the log walk is a top-up, never the baseline — sync
+   refuses to run before a full import has recorded a watermark. Stored as
+   `app_settings import.logWatermark` (operator-visible; lowering it
+   re-walks recent changes harmlessly).
+5. **Reconciliation = counts with the native range broken out.** Per table:
+   legacy COUNT_BIG vs mirror count, native (id >= 1e9) rows subtracted
+   before the delta; natural-key tables whose native rows have no numeric
+   range are reported comparable=false (totals only — native lots inflate
+   the Lot mirror count by design). Version-sum drift checks were considered
+   and dropped (Version is nullable, semantics weak; counts + the log walk
+   cover the cutover story).
+6. **Review-hardened invariants (multi-agent review 2026-07-03, fixed).**
+   (a) LogResult FieldNames are canonicalized to the PHYSICAL column casing
+   before any recordset property read — live data logs `SubLot` for column
+   `Sublot`, and a verbatim-cased read would have condemned every touched
+   sublot as deleted. (b) A sync with ANY rejected change fails and holds the
+   watermark (a rejected change would otherwise be lost forever — e.g. a
+   unique-code swap needs a second pass; reconcile counts can't see a stale
+   UPDATE). (c) Each sync re-walks 1,000 Log ids below the watermark:
+   MAX(Log) is the highest COMMITTED id but identity allocation order is not
+   commit order, so a straggler transaction could land below the mark;
+   re-processing the overlap is harmless. (d) Seven mirrored tables NEVER
+   appear in the change feed (verified live: Inventory, Address,
+   LotIngredient, SublotParent, Currency, TestGroup, ReleaseCofA — trigger-
+   maintained); sync re-copies them wholesale: tiny ones every run, Inventory
+   / ReleaseCofA / LotIngredient when a proxy (InvMovement/ChangeSet, Release,
+   Lot) was touched. (e) The upsert path enforces the native-row guard both
+   ways: source rows whose numeric key lands in the native range are dropped,
+   and a Lot whose mirror row belongs to a native production order
+   (ordDetailId >= 1e9) is never overwritten — the plant's YYMMDD### lot
+   numbering is shared, so same-day collisions are real during parallel
+   running (residual risk for native RAW-material lots, which carry no
+   marker, is noted in OPEN_QUESTIONS). (f) run() and sync() are mutually
+   exclusive in-process (single-node deployment) — a full import racing a
+   scheduled sync could resurrect legacy-deleted rows from its stale
+   snapshot.
