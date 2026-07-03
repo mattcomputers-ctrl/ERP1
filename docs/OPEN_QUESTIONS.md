@@ -24,8 +24,6 @@ default was chosen and recorded in ASSUMPTIONS.md).
   recipes using ingredient X, clone+replace with Y, republish).
 
 ## Platform
-- **Versioned Prisma migrations**: repo still deploys via `prisma db push`
-  fallback (scripts/migrate.sh); baseline migration pending (task #5).
 - **install.sh** still references the docker-compose hostname `db:5432` —
   the native-Ubuntu installer path needs a verification pass against the
   brief's deployment spec.

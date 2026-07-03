@@ -68,8 +68,17 @@ jobs:
       - name: Generate Prisma client
         run: pnpm --filter @erp1/db generate
 
-      - name: Push schema to the test database
-        run: pnpm --filter @erp1/db exec prisma db push --skip-generate
+      - name: Apply versioned migrations to the test database
+        run: pnpm --filter @erp1/db migrate:deploy
+
+      # A schema.prisma change without a matching migration must fail CI —
+      # deploys run `migrate deploy`, so silent drift would break upgrades.
+      - name: Fail on schema/migration drift
+        run: >-
+          pnpm --filter @erp1/db exec prisma migrate diff
+          --from-url "$DATABASE_URL"
+          --to-schema-datamodel prisma/schema.prisma
+          --exit-code
 
       - name: Run integration tests
         run: pnpm --filter @erp1/api test:integration

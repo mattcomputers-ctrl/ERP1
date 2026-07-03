@@ -13,7 +13,7 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 |---|---|---|
 | Phase 0 schema & data discovery | ✅ | [SCHEMA_REPORT.md](docs/SCHEMA_REPORT.md) |
 | Architecture proposal | ✅ | [ARCHITECTURE.md](docs/ARCHITECTURE.md) — awaiting approval |
-| Monorepo + Docker + unattended Ubuntu installer | ✅ | Validated: build + up + smoke all green |
+| Monorepo + Docker + unattended Ubuntu installer | ✅ | Validated: build + up + smoke all green. **Versioned Prisma migrations now the deploy mechanism**: baseline `000000000000_init` generated from the schema (validated: fresh deploy ⇒ zero drift vs schema; existing db-push'd databases auto-baselined via the P3005 → `migrate resolve --applied` path in scripts/migrate.sh); CI applies migrations + **fails on schema/migration drift** (`migrate diff --exit-code`), so a schema change without a migration can't land green |
 | CI (GitHub Actions) | 🟡 | Pipeline pushed; lockfile committed; awaiting green run |
 | Auth — Argon2id, Redis sessions, lockout, session-fixation hardening | ✅ | login/logout/me/change-password live |
 | Auth — MFA (TOTP), OIDC SSO | ⬜ | Modeled (`User.mfaSecret`/`ssoSubject`); not wired yet |

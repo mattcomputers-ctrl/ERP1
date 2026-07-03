@@ -4,12 +4,26 @@
 set -e
 cd /app
 
+# Versioned Prisma migrations are the deployment mechanism. Databases created
+# before the baseline migration existed were db-push'd and have the full
+# schema but no _prisma_migrations table — those are BASELINED first (the
+# init migration is marked as already applied) so `migrate deploy` only runs
+# migrations newer than the schema they already hold.
+BASELINE="000000000000_init"
+
 echo "[migrate] Applying database schema..."
-if [ -d packages/db/prisma/migrations ] && [ -n "$(ls -A packages/db/prisma/migrations 2>/dev/null)" ]; then
-  pnpm --filter @erp1/db migrate:deploy
+if pnpm --filter @erp1/db migrate:deploy 2>/tmp/migrate-deploy.err; then
+  echo "[migrate] Migrations deployed."
 else
-  echo "[migrate] No versioned migrations present; using 'prisma db push' (fresh database)."
-  pnpm --filter @erp1/db db:push
+  if grep -q "P3005" /tmp/migrate-deploy.err; then
+    # Pre-migrations (db-push'd) database: baseline it, then deploy the rest.
+    echo "[migrate] Existing schema without migration history detected — baselining ${BASELINE}."
+    pnpm --filter @erp1/db exec prisma migrate resolve --applied "${BASELINE}"
+    pnpm --filter @erp1/db migrate:deploy
+  else
+    cat /tmp/migrate-deploy.err >&2
+    exit 1
+  fi
 fi
 
 echo "[migrate] Seeding baseline data (idempotent)..."

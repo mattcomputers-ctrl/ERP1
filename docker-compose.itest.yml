@@ -1,6 +1,6 @@
-# Integration-test runner: a disposable Postgres + a one-shot runner that pushes
-# the schema and runs the integration suite against it. Mirrors the CI job for
-# local reproduction.
+# Integration-test runner: a disposable Postgres + a one-shot runner that
+# applies the versioned migrations and runs the integration suite against it.
+# Mirrors the CI job for local reproduction.
 #   docker compose -f docker-compose.itest.yml up --build \
 #     --abort-on-container-exit --exit-code-from itest-runner
 name: erp1-itest
@@ -30,4 +30,4 @@ services:
     command:
       - sh
       - -c
-      - pnpm --filter @erp1/db exec prisma db push --skip-generate && pnpm --filter @erp1/api test:integration
+      - pnpm --filter @erp1/db migrate:deploy && pnpm --filter @erp1/api test:integration
