@@ -5,7 +5,7 @@ export class EntityListQuery {
   @IsOptional() @IsString() pageSize?: string;
   @IsOptional() @IsString() sort?: string;
   @IsOptional() @IsString() q?: string;
-  @IsOptional() @IsString() role?: string; // supplier|manufacturer|customer|shipto|salesman|warehouse
+  @IsOptional() @IsString() role?: string; // supplier|manufacturer|customer|shipto|salesman|warehouse|lab
 }
 
 export class CreateEntityDto {
@@ -18,6 +18,7 @@ export class CreateEntityDto {
   @IsOptional() @IsBoolean() isSalesman?: boolean;
   @IsOptional() @IsBoolean() isShipVia?: boolean;
   @IsOptional() @IsBoolean() isWarehouse?: boolean;
+  @IsOptional() @IsBoolean() isLab?: boolean;
   @IsOptional() @IsString() @MaxLength(10) currency?: string;
   @IsOptional() @IsString() @MaxLength(20) terms?: string;
   @IsOptional() @IsString() @MaxLength(20) customerType?: string;
@@ -31,6 +32,7 @@ export class UpdateEntityDto {
   @IsOptional() @IsBoolean() isSalesman?: boolean;
   @IsOptional() @IsBoolean() isShipVia?: boolean;
   @IsOptional() @IsBoolean() isWarehouse?: boolean;
+  @IsOptional() @IsBoolean() isLab?: boolean;
   @IsOptional() @IsBoolean() inactive?: boolean;
   @IsOptional() @IsString() @MaxLength(10) currency?: string;
   @IsOptional() @IsString() @MaxLength(20) terms?: string;

@@ -14,6 +14,7 @@ const ROLE_FLAG: Record<string, string> = {
   salesman: 'isSalesman',
   shipvia: 'isShipVia',
   warehouse: 'isWarehouse',
+  lab: 'isLab',
 };
 
 @Injectable()
@@ -73,6 +74,7 @@ export class EntitiesService {
           isSalesman: dto.isSalesman ?? false,
           isShipVia: dto.isShipVia ?? false,
           isWarehouse: dto.isWarehouse ?? false,
+          isLab: dto.isLab ?? false,
           currency: dto.currency,
           terms: dto.terms,
           customerType: dto.customerType,

@@ -15,6 +15,7 @@ interface EntityRow {
   isSalesman?: boolean;
   isShipVia?: boolean;
   isWarehouse?: boolean;
+  isLab?: boolean;
   inactive?: boolean;
   customerType?: string | null;
   currency?: string | null;
@@ -36,6 +37,7 @@ const ROLES: [string, string][] = [
   ['salesman', 'Salesmen'],
   ['shipvia', 'Carriers'],
   ['warehouse', 'Warehouses'],
+  ['lab', 'Labs'],
 ];
 
 // The editable role flags (Entity field -> short label), shared by the create +
@@ -48,6 +50,7 @@ const FLAG_FIELDS: [keyof EntityRow, string][] = [
   ['isSalesman', 'Salesman'],
   ['isShipVia', 'Carrier'],
   ['isWarehouse', 'Warehouse'],
+  ['isLab', 'Lab'],
 ];
 const ROLE_LABELS = FLAG_FIELDS;
 
