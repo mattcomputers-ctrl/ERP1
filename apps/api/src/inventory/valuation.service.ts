@@ -95,31 +95,64 @@ export class ValuationService {
   }
 
   /**
-   * Deplete a specific lot's on-hand by `qty` (specific identification — used when
-   * a lot-traced input is consumed, or a finished-good lot is shipped). Reduces the
-   * lot's Inventory parcels oldest-first; never goes negative. Returns how much was
-   * actually depleted and any shortfall (recorded, not blocked — the plant records
-   * actuals even if the system's running on-hand lags).
+   * Deplete several specific lots' on-hand in ONE locked acquisition (specific
+   * identification — lot-traced consumption, finished-good shipment). Requests
+   * for the same lot are aggregated; each lot's parcels are drawn oldest-first
+   * (ascending id); never goes negative. Returns per-lot depleted/shortfall
+   * (shortfalls are recorded, not blocked — the plant records actuals even if
+   * the system's running on-hand lags; a lot with no sublot is all shortfall).
+   *
+   * LOCK ORDER INVARIANT: every multi-parcel acquisition in the system — this,
+   * depleteFifoMany, and order reversal's produced+restored scan — locks its
+   * parcels in a SINGLE `SELECT … ORDER BY "Inventory" ASC FOR UPDATE` scan.
+   * One statement, one global total order: concurrent acquirers cannot invert
+   * (a per-lot loop of scans deadlocks against any other acquirer whose lot
+   * order disagrees with the parcels' id order — found the hard way).
    */
-  async depleteSpecific(tx: Prisma.TransactionClient, lot: string, qty: number): Promise<{ depleted: number; shortfall: number }> {
-    const subs = await tx.sublot.findMany({ where: { lot }, select: { id: true } });
-    const subIds = subs.map((s) => s.id);
-    if (!subIds.length) return { depleted: 0, shortfall: qty };
-    // Read the parcels LOCKED (SELECT ... FOR UPDATE) so two concurrent
-    // depletions of the same stock serialize on the rows: an unlocked read here
-    // is a read-modify-write that silently loses the other transaction's
-    // depletion (both write absolute quantities computed from the same stale
-    // read). Ascending-id order keeps concurrent depleters deadlock-free.
-    const rows = await tx.$queryRaw<{ id: number; qty: number | null }[]>`
-      SELECT "Inventory" AS id, "Qty" AS qty FROM "Inventory"
-      WHERE "Sublot" = ANY(${subIds}) AND "Qty" > 0
+  async depleteSpecificMany(
+    tx: Prisma.TransactionClient,
+    requests: { lot: string; qty: number }[],
+  ): Promise<Map<string, { depleted: number; shortfall: number }>> {
+    const wantByLot = new Map<string, number>();
+    for (const r of requests) wantByLot.set(r.lot, (wantByLot.get(r.lot) ?? 0) + r.qty);
+    const result = new Map<string, { depleted: number; shortfall: number }>();
+    for (const [lot, want] of wantByLot) result.set(lot, { depleted: 0, shortfall: want });
+    const codes = [...wantByLot.keys()];
+    if (!codes.length) return result;
+
+    const subs = await tx.sublot.findMany({ where: { lot: { in: codes } }, select: { id: true, lot: true } });
+    if (!subs.length) return result;
+    const lotBySub = new Map(subs.map((s) => [s.id, s.lot]));
+
+    // The single locked scan (see the lock-order invariant above). Ascending-id
+    // order doubles as the oldest-first draw order within each lot.
+    const rows = await tx.$queryRaw<{ id: number; sublotId: number; qty: number | null }[]>`
+      SELECT "Inventory" AS id, "Sublot" AS "sublotId", "Qty" AS qty FROM "Inventory"
+      WHERE "Sublot" = ANY(${subs.map((s) => s.id)}) AND "Qty" > 0
       ORDER BY "Inventory" ASC
       FOR UPDATE`;
-    const { takes, depleted, shortfall } = greedyDeplete(rows.map((r) => ({ qty: r.qty ?? 0 })), qty);
-    for (let i = 0; i < rows.length; i++) {
-      if (takes[i] > 0) await tx.inventory.update({ where: { id: rows[i].id }, data: { qty: (rows[i].qty ?? 0) - takes[i] } });
+    const parcelsByLot = new Map<string, { id: number; qty: number }[]>();
+    for (const r of rows) {
+      const lot = lotBySub.get(r.sublotId);
+      if (lot == null) continue;
+      parcelsByLot.set(lot, [...(parcelsByLot.get(lot) ?? []), { id: r.id, qty: r.qty ?? 0 }]);
     }
-    return { depleted, shortfall };
+    for (const [lot, want] of wantByLot) {
+      const parcels = parcelsByLot.get(lot) ?? [];
+      if (!parcels.length) continue; // stays all-shortfall
+      const { takes, depleted, shortfall } = greedyDeplete(parcels, want);
+      for (let i = 0; i < parcels.length; i++) {
+        if (takes[i] > 0) await tx.inventory.update({ where: { id: parcels[i].id }, data: { qty: parcels[i].qty - takes[i] } });
+      }
+      result.set(lot, { depleted, shortfall });
+    }
+    return result;
+  }
+
+  /** Single-lot form of depleteSpecificMany (same one-scan acquisition). */
+  async depleteSpecific(tx: Prisma.TransactionClient, lot: string, qty: number): Promise<{ depleted: number; shortfall: number }> {
+    const res = await this.depleteSpecificMany(tx, [{ lot, qty }]);
+    return res.get(lot) ?? { depleted: 0, shortfall: qty };
   }
 
   /**
@@ -161,26 +194,34 @@ export class ValuationService {
   }
 
   /**
-   * Deplete an item's on-hand by `qty` FIFO — oldest units first — across its
-   * lots, for a NOT-lot-traced item consumed by quantity (the operator gives an
-   * item + quantity, not a specific lot). FIFO order is by each parcel's lot date
-   * (received, else manufactured; undated parcels last), then Inventory id. Returns
-   * the lots actually drawn from (lot + quantity) so the caller can record the
-   * consumption lineage, plus any shortfall (recorded, not blocked).
+   * Deplete several NOT-lot-traced items' on-hand FIFO — oldest units first —
+   * in ONE locked acquisition (see the lock-order invariant on
+   * depleteSpecificMany). Requests for the same item are aggregated. Locking
+   * order is global ascending Inventory id; the DRAW order within each item is
+   * FIFO by the parcel's lot date (received, else manufactured; undated
+   * parcels last), then id — the two orders are independent. Returns, per
+   * item, the lots actually drawn from (so the caller records the consumption
+   * lineage) plus any shortfall (recorded, not blocked).
    */
-  async depleteFifo(
+  async depleteFifoMany(
     tx: Prisma.TransactionClient,
-    itemId: number,
-    qty: number,
-  ): Promise<{ picks: { lot: string; qty: number }[]; depleted: number; shortfall: number }> {
-    // Locked read (see depleteSpecific) — ascending-id lock order across all
-    // depleters prevents both lost updates and lock-order deadlocks.
-    const rows = await tx.$queryRaw<{ id: number; sublotId: number | null; qty: number | null }[]>`
-      SELECT "Inventory" AS id, "Sublot" AS "sublotId", "Qty" AS qty FROM "Inventory"
-      WHERE "Item" = ${itemId} AND "Qty" > 0 AND "Sublot" IS NOT NULL
+    requests: { itemId: number; qty: number }[],
+  ): Promise<Map<number, { picks: { lot: string; qty: number }[]; depleted: number; shortfall: number }>> {
+    const wantByItem = new Map<number, number>();
+    for (const r of requests) wantByItem.set(r.itemId, (wantByItem.get(r.itemId) ?? 0) + r.qty);
+    const result = new Map<number, { picks: { lot: string; qty: number }[]; depleted: number; shortfall: number }>();
+    for (const [itemId, want] of wantByItem) result.set(itemId, { picks: [], depleted: 0, shortfall: want });
+    const itemIds = [...wantByItem.keys()];
+    if (!itemIds.length) return result;
+
+    // The single locked scan (lock-order invariant — one statement, global
+    // ascending id, across ALL requested items).
+    const rows = await tx.$queryRaw<{ id: number; itemId: number; sublotId: number | null; qty: number | null }[]>`
+      SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Qty" AS qty FROM "Inventory"
+      WHERE "Item" = ANY(${itemIds}) AND "Qty" > 0 AND "Sublot" IS NOT NULL
       ORDER BY "Inventory" ASC
       FOR UPDATE`;
-    if (!rows.length) return { picks: [], depleted: 0, shortfall: qty };
+    if (!rows.length) return result;
 
     const subIds = [...new Set(rows.map((r) => r.sublotId).filter((v): v is number => v != null))];
     const subs = await tx.sublot.findMany({ where: { id: { in: subIds } }, select: { id: true, lot: true } });
@@ -195,23 +236,38 @@ export class ValuationService {
       return d ? d.getTime() : Number.POSITIVE_INFINITY; // undated parcels last
     };
 
-    // Parcels with a resolvable lot, ordered FIFO (oldest first), then drawn down.
-    const parcels = rows
-      .map((r) => ({ id: r.id, qty: r.qty ?? 0, lot: r.sublotId != null ? lotBySub.get(r.sublotId) ?? null : null }))
-      .filter((p): p is { id: number; qty: number; lot: string } => p.lot != null)
-      .sort((a, b) => fifoCompare({ time: timeForLot(a.lot), seq: a.id }, { time: timeForLot(b.lot), seq: b.id }));
-    const { takes, depleted, shortfall } = greedyDeplete(parcels, qty);
+    for (const [itemId, want] of wantByItem) {
+      // The item's parcels with a resolvable lot, ordered FIFO, then drawn down.
+      const parcels = rows
+        .filter((r) => r.itemId === itemId)
+        .map((r) => ({ id: r.id, qty: r.qty ?? 0, lot: r.sublotId != null ? lotBySub.get(r.sublotId) ?? null : null }))
+        .filter((p): p is { id: number; qty: number; lot: string } => p.lot != null)
+        .sort((a, b) => fifoCompare({ time: timeForLot(a.lot), seq: a.id }, { time: timeForLot(b.lot), seq: b.id }));
+      if (!parcels.length) continue; // stays all-shortfall
+      const { takes, depleted, shortfall } = greedyDeplete(parcels, want);
 
-    const pickByLot = new Map<string, number>();
-    for (let i = 0; i < parcels.length; i++) {
-      if (takes[i] <= 0) continue;
-      await tx.inventory.update({ where: { id: parcels[i].id }, data: { qty: parcels[i].qty - takes[i] } });
-      pickByLot.set(parcels[i].lot, (pickByLot.get(parcels[i].lot) ?? 0) + takes[i]);
+      const pickByLot = new Map<string, number>();
+      for (let i = 0; i < parcels.length; i++) {
+        if (takes[i] <= 0) continue;
+        await tx.inventory.update({ where: { id: parcels[i].id }, data: { qty: parcels[i].qty - takes[i] } });
+        pickByLot.set(parcels[i].lot, (pickByLot.get(parcels[i].lot) ?? 0) + takes[i]);
+      }
+      result.set(itemId, {
+        picks: [...pickByLot.entries()].map(([lot, q]) => ({ lot, qty: q })),
+        depleted,
+        shortfall,
+      });
     }
-    return {
-      picks: [...pickByLot.entries()].map(([lot, q]) => ({ lot, qty: q })),
-      depleted,
-      shortfall,
-    };
+    return result;
+  }
+
+  /** Single-item form of depleteFifoMany (same one-scan acquisition). */
+  async depleteFifo(
+    tx: Prisma.TransactionClient,
+    itemId: number,
+    qty: number,
+  ): Promise<{ picks: { lot: string; qty: number }[]; depleted: number; shortfall: number }> {
+    const res = await this.depleteFifoMany(tx, [{ itemId, qty }]);
+    return res.get(itemId) ?? { picks: [], depleted: 0, shortfall: qty };
   }
 }

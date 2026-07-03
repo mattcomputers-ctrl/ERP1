@@ -12,6 +12,7 @@ import { EditOrderDto } from './dto/edit-order.dto';
 import { IptResultsDto } from './dto/ipt-results.dto';
 import { RecordLineDto } from './dto/record-line.dto';
 import { RejectEditApprovalDto } from './dto/edit-approval.dto';
+import { ReverseOrderDto } from './dto/reverse-order.dto';
 import { ShipLotsDto } from './dto/ship-lots.dto';
 import { OrdersService, type OrdersListQuery } from './orders.service';
 
@@ -61,6 +62,13 @@ export class OrdersController {
   @RequireProgram('orders.complete')
   completeRequirement(@CurrentUser() actor: Actor) {
     return this.orders.completeRequirement(actor.id);
+  }
+
+  // E-signature requirements for reversing a completion (drives the reverse form).
+  @Get('reverse-requirement')
+  @RequireProgram('orders.reverse')
+  reverseRequirement(@CurrentUser() actor: Actor) {
+    return this.orders.reverseRequirement(actor.id);
   }
 
   // Pending order-edit approval requests (static path before :id).
@@ -120,6 +128,15 @@ export class OrdersController {
   @RequireProgram('orders.close')
   close(@Param('id', ParseIntPipe) id: number, @Body() dto: CloseOrderDto, @CurrentUser() actor: Actor) {
     return this.orders.close(id, dto, actor);
+  }
+
+  // Reverse a completed production order (un-complete: CMP -> back to RLS) —
+  // un-mints the untouched produced stock, restores the consumed materials,
+  // resets the procedure lines, and records a reversing RVSMFP change set.
+  @Post(':id/reverse')
+  @RequireProgram('orders.reverse')
+  reverse(@Param('id', ParseIntPipe) id: number, @Body() dto: ReverseOrderDto, @CurrentUser() actor: Actor) {
+    return this.orders.reverse(id, dto, actor);
   }
 
   // --- guided batch execution (dispense/weigh per line, batch additions, IPT) ---

@@ -30,6 +30,7 @@ const BASELINE_PROGRAMS = [
   { key: 'orders.release', name: 'Release Order', folder: 'Transactions/Orders' },
   { key: 'orders.complete', name: 'Complete Order', folder: 'Transactions/Orders' },
   { key: 'orders.close', name: 'Close Order', folder: 'Transactions/Orders' },
+  { key: 'orders.reverse', name: 'Reverse Order Completion', folder: 'Transactions/Orders' },
   { key: 'orders.consume', name: 'Record Consumed Lots', folder: 'Transactions/Orders' },
   { key: 'orders.execute', name: 'Batch Execution', folder: 'Transactions/Orders' },
   { key: 'orders.variance', name: 'Material Variance', folder: 'Transactions/Orders' },
@@ -69,6 +70,13 @@ const SECURED_ITEMS = [
   {
     key: 'order.complete',
     description: 'Sign-off on completing a batch order',
+    requireReason: true,
+    requireSignature: true,
+    requireWitness: false,
+  },
+  {
+    key: 'order.reverse',
+    description: 'Sign-off on reversing a completed batch order (un-complete)',
     requireReason: true,
     requireSignature: true,
     requireWitness: false,

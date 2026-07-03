@@ -154,3 +154,84 @@ aggregated), 2026-07-02.
    and completion re-rolls each produced lot's per-unit cost at the ACTUAL
    yield (during execution the divisor is necessarily the planned size).
    Proven by a concurrent-dispense integration test (conservation of stock).
+
+## Order reversal — un-complete a batch (§5, built 2026-07-03)
+
+1. **Reversing a COMPLETED order is an ERP1 extension.** The vendor forbade it
+   ("completed MF Receipts and Packaging transactions cannot be reversed", UG
+   §6.11.10) and offered only transaction-level reversal while the order was
+   still open (Reverse Receipt in Express Execution, Unpackage/RVSMFP, Reverse
+   Dispense). The plant asked for a completed-batch reversal; ERP1 models it
+   on legacy's observed data shape: the ONE fully-reversed order in the live
+   DB (189797) went back to `RLS` with `QtyUsed` cleared to NULL, UI lines
+   back to `NST`, produced on-hand removed, and Lot/Sublot identity rows kept.
+2. **One reversing `RVSMFP` ChangeSet covers the whole un-complete.** RVSMFP
+   is the only manufacturing reversal context in the live data (389 rows, on
+   both MFBA and MFPP orders; there is no RVSMF — consumption corrections were
+   counter-receipt pairs inside the same MF changeset). ERP1 execution writes
+   no forward ChangeSet, so the reversing set carries no `ReverseChangeSet`
+   back-pointer; the `Ordr` link identifies the reversed completion and the
+   CMP re-assert under the order row lock is the double-reversal guard. Like
+   legacy, the reversal is effective-dated to the posting it reverses
+   (`ChangeDate` = the order's `DateCompleted`).
+3. **The vendor's 7.17 unpackage guard is the precondition.** Release Notes
+   7.17: "Unpackage will now give an error if there have been any inventory
+   transactions against the container being reversed." ERP1 applies it per
+   produced (PK) lot: reversal is refused unless the produced stock is exactly
+   the one parcel completion minted at the full produced quantity (or no
+   parcel, when completion had no location to mint into), plus explicit
+   refusals when a produced lot appears as a genealogy parent (consumed by
+   another batch — even a shortfall consumption that depleted nothing) or in
+   `shipment_lot` (shipped).
+4. **Only ERP1-completed (native-id) orders are reversible.** An imported
+   legacy completion's footprint (InvMovement double-entry ledger, restored
+   commitments, residual packout parcels) is not ERP1-shaped — "reversing" it
+   would corrupt rather than restore. Historical corrections on imported
+   orders are audited inventory adjusts.
+5. **Consumed materials are restored from the consumption edge set.** Every
+   consumption path (per-line record, batch additions, order-level consume
+   endpoints) writes `lot_genealogy source='consumption'` edges keyed
+   `via_ordr`, so restoring those quantities is the exact inverse: each lot's
+   restored qty is credited to its lowest-id parcel (the one consumption drew
+   from first), or a parcel is minted at the receiving location when none is
+   left to credit. The FULL recorded quantity is restored — a shortfall at
+   consumption time meant on-hand already lagged the recorded actual (flagged
+   then, in the execution audit). The edges are then deleted (recall must not
+   trace a reversed batch; the audit trail keeps both moves) and the produced
+   lot's rolled-up `unitCost` is cleared with its basis.
+6. **Lines reset, nothing deleted.** Executed UI/INSTR lines go back to
+   `ExecStatus NST` with `QtyUsed` NULL (the legacy 189797 shape); batch-
+   addition lines are kept and reset the same way (they remain on the
+   procedure as the record of the addition, re-recordable or skippable on
+   re-execution); the PK completion stamp is un-stamped `STD -> NST` (ERP1
+   symmetry with complete(); legacy's lone example left STD — documented
+   deviation). Recorded IPT results are kept — the tests were physically
+   performed on the batch. `ActualBatchSize` returns to the planned size (the
+   PK line's required qty) since the actual-yield recording is reversed.
+7. **Reversal is signed like the completion it undoes.** A new `order.reverse`
+   secured item (seeded reason + signature, witness optional, operator-
+   tunable) gates it with the same fail-safe resolution as `order.complete`;
+   the e-signature commits atomically with the reversal. Program:
+   `orders.reverse`. Closed orders are not reversible (CLS is final).
+8. **Reversal concurrency design (multi-agent review findings, fixed).** The
+   lifecycle is no longer monotonic (CMP can go back to RLS), so EVERY
+   lifecycle transition (release/complete/close) now re-asserts its
+   precondition under the Ordr row lock inside its transaction — without
+   that, a close queued behind an in-flight reversal would stamp the terminal
+   CLS onto a just-reversed order (unrecoverable), and a completion stalled in
+   its signature verify could re-mint against an empty consumption record.
+   Every consumption/shipment writer (per-line record, order-level consumes,
+   ship-lots) now DEPLETES before writing its lineage/shipment record: the
+   depletion serializes on the parcel row locks, so a reversal either sees the
+   committed depletion (untouched check refuses) or commits first (the record
+   lands sequentially after, as a plain shortfall — the legal consume-after-
+   reversal shape). And EVERY multi-parcel acquisition in the system — the
+   reversal's produced+restored scan, multi-lot specific depletion
+   (`ValuationService.depleteSpecificMany`), and multi-item FIFO depletion
+   (`depleteFifoMany`) — locks its parcels in ONE global ascending-id
+   FOR UPDATE scan. One statement, one total order: no pair of concurrent
+   acquirers can invert. (An adversarial verifier empirically reproduced a
+   40P01 deadlock between the reversal's single scan and the previous
+   per-lot lexical-order depletion loops — two different total orders — so
+   the loops were replaced with the single-scan batch forms; the lock order
+   and the FIFO draw order are independent concerns.)

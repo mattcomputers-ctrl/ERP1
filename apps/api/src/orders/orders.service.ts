@@ -23,6 +23,7 @@ import type { CreateOrderDto } from './dto/create-order.dto';
 import type { EditOrderDto } from './dto/edit-order.dto';
 import type { IptResultsDto } from './dto/ipt-results.dto';
 import type { RecordLineDto } from './dto/record-line.dto';
+import type { ReverseOrderDto } from './dto/reverse-order.dto';
 import type { ShipLotsDto } from './dto/ship-lots.dto';
 
 const LB_TO_GRAMS = 453.59237;
@@ -40,9 +41,27 @@ const RECIPE_TO_ORDER_CONTEXT: Record<string, string> = { RMBA: 'MFBA', RMPP: 'M
 // signature / witness) is seeded and operator-configurable.
 const COMPLETE_SECURED_ITEM = 'order.complete';
 
+// Secured item governing order reversal (un-completing a batch). Undoing a
+// signed completion is held to the same signing standard as the completion.
+const REVERSE_SECURED_ITEM = 'order.reverse';
+
+// Legacy ChangeSet context for reversing a production posting: RVSMFP is the
+// ONLY manufacturing reversal context in the live data (389 rows — packout
+// reversals on both MFBA and MFPP orders; there is no RVSMF). ERP1 records the
+// whole un-complete under one RVSMFP change set. Legacy effective-dates the
+// reversal to the posting it reverses; ERP1 mirrors that with the order's
+// completion timestamp. No reverseChangeSetId back-pointer: ERP1 execution
+// writes no forward change set to point at (the Ordr link identifies the
+// reversed completion; the status CAS under the row lock is the dup-guard).
+const REVERSE_ORDER_CONTEXT = 'RVSMFP';
+
 // Operator setting: the location finished-goods output lands in (a LocationCode).
 // Empty -> the valuation engine auto-resolves the install's default stock location.
 const PRODUCTION_LOCATION_SETTING = 'inventory.productionLocation';
+
+// Operator setting: the location received stock lands in — where a reversal
+// restores consumed raw material that has no parcel left to credit.
+const RECEIVING_LOCATION_SETTING = 'inventory.receivingLocation';
 
 // ApprovalRequest.kind discriminator for the order-edit blocking workflow.
 const ORDER_EDIT_KIND = 'order.edit';
@@ -801,6 +820,9 @@ export class OrdersService {
     const order = await this.requireTransition(id, 'NST', 'release');
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
+      // Re-assert the transition under the row lock (reverse() made lifecycle
+      // states non-monotonic, so the pre-tx check alone is a stale read).
+      await this.lockAndRequireStatus(tx, id, 'NST');
       const u = await tx.ordr.update({
         where: { id },
         data: { status: 'RLS', dateReleased: at },
@@ -825,23 +847,61 @@ export class OrdersService {
 
   /** The effective e-signature/reason requirements for completing an order. */
   async completeRequirement(actorId: string) {
-    return this.completeRequirements(actorId);
+    return this.securedRequirements(actorId, COMPLETE_SECURED_ITEM);
+  }
+
+  /** The effective e-signature/reason requirements for reversing a completion. */
+  async reverseRequirement(actorId: string) {
+    return this.securedRequirements(actorId, REVERSE_SECURED_ITEM);
   }
 
   /**
-   * Effective requirements for completing an order. Fail-safe: a missing or
-   * disabled `order.complete` secured item must NOT silently drop the control, so
-   * a signature + reason are required unless an *enabled* item explicitly relaxes
-   * them; a required witness implies a required signature.
+   * Effective requirements for a secured order action. Fail-safe: a missing or
+   * disabled secured item must NOT silently drop the control, so a signature +
+   * reason are required unless an *enabled* item explicitly relaxes them; a
+   * required witness implies a required signature.
    */
-  private async completeRequirements(actorId: string) {
-    const item = await this.permissions.resolveSecuredItem(actorId, COMPLETE_SECURED_ITEM);
+  private async securedRequirements(actorId: string, securedItemKey: string) {
+    const item = await this.permissions.resolveSecuredItem(actorId, securedItemKey);
     const requireWitness = item.requireWitness;
     return {
       requireReason: !item.exists || item.requireReason,
       requireSignature: !item.exists || item.requireSignature || requireWitness,
       requireWitness,
     };
+  }
+
+  /**
+   * Verify the signer's (and, when demanded, a witness's) credentials for a
+   * secured order action — BEFORE the transaction opens (Argon2 verify is
+   * slow). Returns the validated witness identity, or null when none signs.
+   * The messages are passed whole so each action keeps its exact wording
+   * (complete()'s strings predate the extraction and are API surface).
+   */
+  private async verifySignatures(
+    actor: Actor,
+    dto: { password?: string; witnessEmail?: string; witnessPassword?: string },
+    req: { requireSignature: boolean; requireWitness: boolean },
+    securedItemKey: string,
+    msgs: { password: string; witnessRequired: string; witnessNotPermitted: string },
+  ): Promise<{ id: string; label: string } | null> {
+    if (!req.requireSignature) return null;
+    if (!dto.password) {
+      throw new BadRequestException(msgs.password);
+    }
+    await this.auth.verifyPasswordById(actor.id, dto.password);
+
+    if (req.requireWitness && !dto.witnessEmail) {
+      throw new BadRequestException(msgs.witnessRequired);
+    }
+    if (!dto.witnessEmail) return null;
+    if (!dto.witnessPassword) throw new BadRequestException('Witness password is required.');
+    const w = await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false);
+    if (w.id === actor.id) throw new BadRequestException('The witness must be a different user.');
+    if (!(await this.permissions.canWitness(w.id, securedItemKey))) {
+      throw new ForbiddenException(msgs.witnessNotPermitted);
+    }
+    return { id: w.id, label: w.displayName };
   }
 
   /**
@@ -856,35 +916,23 @@ export class OrdersService {
   async complete(id: number, dto: CompleteOrderDto, actor: Actor) {
     const order = await this.requireTransition(id, 'RLS', 'complete');
 
-    const req = await this.completeRequirements(actor.id);
+    const req = await this.securedRequirements(actor.id, COMPLETE_SECURED_ITEM);
     if (req.requireReason && !dto.reason?.trim()) {
       throw new BadRequestException('A reason is required to complete this order.');
     }
-
-    // Verify signatures before opening the transaction (Argon2 verify is slow).
-    let witness: { id: string; label: string } | null = null;
-    if (req.requireSignature) {
-      if (!dto.password) {
-        throw new BadRequestException('Your password is required to sign this completion.');
-      }
-      await this.auth.verifyPasswordById(actor.id, dto.password);
-
-      if (req.requireWitness && !dto.witnessEmail) {
-        throw new BadRequestException('A witness signature is required to complete this order.');
-      }
-      if (dto.witnessEmail) {
-        if (!dto.witnessPassword) throw new BadRequestException('Witness password is required.');
-        const w = await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false);
-        if (w.id === actor.id) throw new BadRequestException('The witness must be a different user.');
-        if (!(await this.permissions.canWitness(w.id, COMPLETE_SECURED_ITEM))) {
-          throw new ForbiddenException('That user is not permitted to witness order completion.');
-        }
-        witness = { id: w.id, label: w.displayName };
-      }
-    }
+    const witness = await this.verifySignatures(actor, dto, req, COMPLETE_SECURED_ITEM, {
+      password: 'Your password is required to sign this completion.',
+      witnessRequired: 'A witness signature is required to complete this order.',
+      witnessNotPermitted: 'That user is not permitted to witness order completion.',
+    });
 
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
+      // Re-assert Released under the row lock: a completion that stalled in the
+      // Argon2 signature verify must not land on an order a concurrent reversal
+      // (or another completion) just moved — it would re-mint produced stock
+      // against an empty consumption record.
+      await this.lockAndRequireStatus(tx, id, 'RLS');
       const u = await tx.ordr.update({
         where: { id },
         data: {
@@ -1028,6 +1076,11 @@ export class OrdersService {
   async close(id: number, dto: CloseOrderDto, actor: Actor) {
     const order = await this.requireTransition(id, 'CMP', 'close');
     return this.prisma.$transaction(async (tx) => {
+      // Re-assert Completed under the row lock: a close queued behind an
+      // in-flight reversal would otherwise land AFTER it and stamp the final
+      // CLS state onto a just-reversed (Released, un-minted) order —
+      // unrecoverable, since nothing transitions out of CLS.
+      await this.lockAndRequireStatus(tx, id, 'CMP');
       const u = await tx.ordr.update({ where: { id }, data: { status: 'CLS' } });
       await this.audit.record(
         {
@@ -1043,6 +1096,332 @@ export class OrdersService {
         tx,
       );
       return { id, status: u.status };
+    });
+  }
+
+  /**
+   * Reverse a completed production order — the un-complete (Completed -> back to
+   * Released), so the batch can be corrected and re-executed. An ERP1 extension:
+   * the vendor forbade reversing after Mark Order Complete (UG §6.11.10) and
+   * offered only transaction-level reversal while open; the plant asked for the
+   * completed-batch reversal. The data shape mirrors legacy's observed full
+   * reversal (order 189797): a reversing RVSMFP ChangeSet, produced on-hand
+   * removed while the Lot/Sublot identity rows are KEPT, consumed materials
+   * restored, lines reset to ExecStatus NST with QtyUsed cleared to NULL, and
+   * the order back to RLS.
+   *
+   * Preconditions (the vendor's 7.17 unpackage guard, applied per produced lot):
+   * the produced stock must be exactly as minted at completion — one untouched
+   * parcel holding the full produced quantity (or none, when completion had no
+   * location to mint into), never consumed by another order, never shipped.
+   * Anything else is refused with the state that blocks it.
+   *
+   * Only orders ERP1 itself completed are reversible (native id range): an
+   * imported legacy completion's footprint (InvMovement-ledgered, commitments,
+   * residual packout parcels) is not ERP1-shaped, so "reversing" it would
+   * corrupt rather than restore.
+   *
+   * Gated by the `order.reverse` secured item (reason + signature by default —
+   * undoing a signed completion is held to the completion's own standard).
+   */
+  async reverse(id: number, dto: ReverseOrderDto, actor: Actor) {
+    const order = await this.requireTransition(id, 'CMP', 'reverse');
+    if (!OrdersService.EXEC_CONTEXTS.has(order.context ?? '')) {
+      throw new BadRequestException('Only production (MFBA/MFPP) orders can be reversed.');
+    }
+    if (id < NATIVE_ID_BASE) {
+      throw new BadRequestException(
+        'Only orders completed in ERP1 can be reversed — this order was imported from the legacy system.',
+      );
+    }
+
+    const req = await this.securedRequirements(actor.id, REVERSE_SECURED_ITEM);
+    if (req.requireReason && !dto.reason?.trim()) {
+      throw new BadRequestException('A reason is required to reverse this order.');
+    }
+    const witness = await this.verifySignatures(actor, dto, req, REVERSE_SECURED_ITEM, {
+      password: 'Your password is required to sign this reversal.',
+      witnessRequired: 'A witness signature is required to reverse this order.',
+      witnessNotPermitted: 'That user is not permitted to witness order reversal.',
+    });
+
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      // Same lock order as the execution endpoints (Ordr row first, then the
+      // id-allocation lock) — no deadlock against record-line/complete, and the
+      // CMP re-assert under the row lock makes double-reversal impossible (the
+      // second reverser finds the order already back at RLS).
+      await this.lockOrdr(tx, id);
+      const cur = await tx.ordr.findUnique({
+        where: { id },
+        select: { status: true, context: true, actualBatchSize: true, dateCompleted: true },
+      });
+      if (curStatus(cur?.status ?? null) !== 'CMP') {
+        throw new BadRequestException(`Order #${id} is no longer Completed.`);
+      }
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+
+      // --- the produced (PK) lots and their minted on-hand -------------------
+      const pkLines = await tx.ordDetail.findMany({
+        where: { ordrId: id, context: 'PK' },
+        select: { id: true, qtyReqd: true },
+        orderBy: { id: 'asc' },
+      });
+      const producedLots = pkLines.length
+        ? await tx.lot.findMany({ where: { ordDetailId: { in: pkLines.map((l) => l.id) } }, select: { lot: true, ordDetailId: true } })
+        : [];
+      const producedCodes = producedLots.map((l) => l.lot);
+
+      // Downstream guards: a produced lot that another batch consumed or that
+      // shipped is beyond the point of no return, even if some on-hand remains
+      // (a shortfall consumption depletes nothing yet still records lineage).
+      if (producedCodes.length) {
+        const downstream = await tx.lotGenealogy.findFirst({
+          where: { parentLot: { in: producedCodes } },
+          select: { childLot: true, parentLot: true },
+        });
+        if (downstream) {
+          throw new BadRequestException(
+            `Cannot reverse — produced lot ${downstream.parentLot} was already consumed (by lot ${downstream.childLot}).`,
+          );
+        }
+        const shipped = await tx.shipmentLot.findFirst({ where: { lot: { in: producedCodes } }, select: { lot: true } });
+        if (shipped) {
+          throw new BadRequestException(`Cannot reverse — produced lot ${shipped.lot} was already shipped.`);
+        }
+      }
+
+      // --- the consumption record to restore. Stable under the Ordr row lock:
+      // every writer of this order's edges (record-line, batch additions, the
+      // order-level consumes) locks the row first. The edge set is the record
+      // of everything this order's execution drew, so restoring it is the
+      // exact inverse. The full recorded quantity is restored — a shortfall at
+      // consumption time meant on-hand was already lagging the recorded
+      // actual, and was flagged then.
+      const edges = await tx.lotGenealogy.findMany({
+        where: { viaOrdrId: id, source: 'consumption' },
+        select: { parentLot: true, qty: true },
+      });
+      const restoreByLot = new Map<string, number>();
+      for (const e of edges) {
+        restoreByLot.set(e.parentLot, (restoreByLot.get(e.parentLot) ?? 0) + (e.qty != null ? Number(e.qty) : 0));
+      }
+      const restoreLots = [...restoreByLot.keys()].sort((a, b) => a.localeCompare(b));
+
+      // ONE locked read of every parcel this reversal touches — produced AND
+      // restored lots — in global ascending Inventory-id order: the
+      // system-wide lock-order invariant (see depleteSpecificMany — every
+      // multi-parcel acquisition is a single ascending scan, so no pair of
+      // concurrent acquirers can invert). A depleter also can't draw produced
+      // stock between the untouched check and the delete: its own locked read
+      // then finds the parcel gone and records a shortfall, never a lost
+      // update.
+      const subsByLot = new Map<string, number[]>();
+      const lotBySub = new Map<number, string>();
+      const allCodes = [...new Set([...producedCodes, ...restoreLots])];
+      if (allCodes.length) {
+        const subs = await tx.sublot.findMany({
+          where: { lot: { in: allCodes } },
+          select: { id: true, lot: true },
+          orderBy: { id: 'asc' },
+        });
+        for (const s of subs) {
+          if (s.lot == null) continue;
+          lotBySub.set(s.id, s.lot);
+          subsByLot.set(s.lot, [...(subsByLot.get(s.lot) ?? []), s.id]);
+        }
+      }
+      const parcelsByLot = new Map<string, { id: number; qty: number | null }[]>();
+      if (lotBySub.size) {
+        const lockedParcels = await tx.$queryRaw<{ id: number; sublotId: number; qty: number | null }[]>`
+          SELECT "Inventory" AS id, "Sublot" AS "sublotId", "Qty" AS qty FROM "Inventory"
+          WHERE "Sublot" = ANY(${[...lotBySub.keys()]})
+          ORDER BY "Inventory" ASC
+          FOR UPDATE`;
+        for (const p of lockedParcels) {
+          const lot = lotBySub.get(p.sublotId);
+          if (lot == null) continue;
+          parcelsByLot.set(lot, [...(parcelsByLot.get(lot) ?? []), { id: p.id, qty: p.qty }]);
+        }
+      }
+
+      // Untouched check per produced lot (the vendor's 7.17 unpackage guard):
+      // exactly the one parcel completion minted, still holding the full
+      // produced quantity — or no parcel at all (completion had no location to
+      // mint into, or no sublot was ever created).
+      const removedOnHand: { lot: string; qty: number; parcelId: number }[] = [];
+      const qtyReqdByPk = new Map(pkLines.map((l) => [l.id, l.qtyReqd ?? 0]));
+      for (const pl of producedLots) {
+        const expected =
+          cur!.context === 'MFBA'
+            ? cur!.actualBatchSize ?? (pl.ordDetailId != null ? qtyReqdByPk.get(pl.ordDetailId) ?? 0 : 0)
+            : pl.ordDetailId != null
+              ? qtyReqdByPk.get(pl.ordDetailId) ?? 0
+              : 0;
+        const parcels = parcelsByLot.get(pl.lot) ?? [];
+        if (!parcels.length) continue; // minted nothing — nothing to remove
+        const totalOnHand = parcels.reduce((s, p) => s + (p.qty ?? 0), 0);
+        if (parcels.length > 1 || (parcels[0].qty ?? 0) !== expected) {
+          throw new BadRequestException(
+            `Cannot reverse — produced lot ${pl.lot} has since been moved, split, consumed, or adjusted ` +
+              `(on hand ${totalOnHand}, produced ${expected}).`,
+          );
+        }
+        removedOnHand.push({ lot: pl.lot, qty: parcels[0].qty ?? 0, parcelId: parcels[0].id });
+      }
+
+      // --- un-mint the produced on-hand (identity Lot/Sublot rows are kept,
+      // exactly like legacy's reversal) and clear the rolled-up cost (its basis
+      // — the consumption edges — is removed below; re-execution re-rolls it).
+      for (const r of removedOnHand) {
+        await tx.inventory.delete({ where: { id: r.parcelId } });
+      }
+      if (producedCodes.length) {
+        await tx.lot.updateMany({ where: { lot: { in: producedCodes } }, data: { unitCost: null } });
+      }
+
+      // --- restore the consumed materials. Each lot's quantity is credited to
+      // its lowest-id parcel (the one consumption drew from first); a lot with
+      // no parcel left gets one minted at the receiving location (restored raw
+      // stock goes back to stores, mirroring how receiving mints). `restored`
+      // reports only stock that actually moved — a lot that could not be
+      // restored (no Lot/item to mint against, or a location-less install) is
+      // reported as skipped, not silently claimed.
+      const restored: { lot: string; qty: number }[] = [];
+      const skippedRestores: { lot: string; qty: number }[] = [];
+      for (const lotCode of restoreLots) {
+        const qty = restoreByLot.get(lotCode) ?? 0;
+        if (!(qty > 0)) continue;
+        const parcels = parcelsByLot.get(lotCode) ?? [];
+        if (parcels.length) {
+          await tx.inventory.update({ where: { id: parcels[0].id }, data: { qty: (parcels[0].qty ?? 0) + qty } });
+          restored.push({ lot: lotCode, qty });
+          continue;
+        }
+        const lotRow = await tx.lot.findUnique({ where: { lot: lotCode }, select: { itemId: true } });
+        let mintedInventoryId: number | null = null;
+        if (lotRow?.itemId != null) {
+          let sublotId = subsByLot.get(lotCode)?.[0];
+          if (sublotId == null) {
+            sublotId =
+              ((await tx.sublot.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+            await tx.sublot.create({ data: { id: sublotId, lot: lotCode, sublotCode: lotCode, context: 'LOT' } });
+          }
+          const locationId = await this.valuation.resolveLocationId(tx, RECEIVING_LOCATION_SETTING);
+          mintedInventoryId = await this.valuation.mintInventory(tx, { itemId: lotRow.itemId, sublotId, locationId, qty });
+        }
+        if (mintedInventoryId != null) restored.push({ lot: lotCode, qty });
+        else skippedRestores.push({ lot: lotCode, qty });
+      }
+
+      // The consumption record is unwound with the stock: recall must not trace
+      // a reversed batch (the audit trail keeps the history of both moves).
+      await tx.lotGenealogy.deleteMany({ where: { viaOrdrId: id, source: 'consumption' } });
+
+      // --- reset the procedure lines (legacy 189797: QtyUsed cleared to NULL,
+      // executed lines back to NST). Batch-addition lines reset like any other
+      // recorded line — they stay on the procedure as the record of what was
+      // added, re-recordable (or skippable) on re-execution. The PK completion
+      // stamp is un-stamped to the born state (ERP1 symmetry with complete();
+      // legacy's lone example kept STD there — documented deviation).
+      const resetLines = await tx.ordDetail.updateMany({
+        where: { ordrId: id, context: { in: ['UI', 'INSTR'] }, execStatus: 'CMP' },
+        data: { execStatus: 'NST', qtyUsed: null, dateUpdated: at },
+      });
+      const resetPk = await tx.ordDetail.updateMany({
+        where: { ordrId: id, context: 'PK', execStatus: 'STD' },
+        data: { execStatus: 'NST', dateUpdated: at },
+      });
+      const linesReset = resetLines.count + resetPk.count;
+
+      // --- the order itself: back to Released. The actual-yield recording is
+      // part of what is being reversed, so ActualBatchSize returns to its
+      // creation-seeded value: the planned batch size (PK required qty) for a
+      // batch order, null for a packaging order (create() seeds it only for
+      // MFBA — a stale actual would skew re-execution cost divisors).
+      const plannedBatch = cur!.context === 'MFBA' ? pkLines[0]?.qtyReqd ?? null : null;
+      await tx.ordr.update({
+        where: { id },
+        data: { status: 'RLS', dateCompleted: null, actualBatchSize: plannedBatch },
+      });
+
+      // The reversing change set — legacy convention: effective-dated to the
+      // posting it reverses (the completion), not the moment of reversal.
+      const csId = ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+      await tx.changeSet.create({
+        data: { id: csId, context: REVERSE_ORDER_CONTEXT, changeDate: cur!.dateCompleted ?? at, ordrId: id },
+      });
+
+      const reason = dto.reason?.trim();
+      const auditLog = await this.audit.record(
+        {
+          action: 'order.reverse',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.reverse',
+          summary:
+            `Order #${id} completion reversed — removed ${removedOnHand.reduce((s, r) => s + r.qty, 0)} produced on hand, ` +
+            `restored ${restored.length} consumed lot${restored.length === 1 ? '' : 's'}` +
+            `${skippedRestores.length ? ` (${skippedRestores.length} not restorable)` : ''}, ` +
+            `reset ${linesReset} line${linesReset === 1 ? '' : 's'}` +
+            `${reason ? ` — ${reason}` : ''}` +
+            (witness ? ` (witnessed by ${witness.label}${dto.witnessExplanation ? `: ${dto.witnessExplanation}` : ''})` : ''),
+          changes: [
+            { tableName: 'Ordr', recordId: String(id), fieldName: 'Status', oldValue: 'CMP', newValue: 'RLS' },
+            {
+              tableName: 'Ordr', recordId: String(id), fieldName: 'DateCompleted',
+              oldValue: cur!.dateCompleted?.toISOString() ?? null, newValue: null,
+            },
+            ...(plannedBatch !== cur!.actualBatchSize
+              ? [{
+                  tableName: 'Ordr', recordId: String(id), fieldName: 'ActualBatchSize',
+                  oldValue: cur!.actualBatchSize != null ? String(cur!.actualBatchSize) : null,
+                  newValue: plannedBatch != null ? String(plannedBatch) : null,
+                }]
+              : []),
+            { tableName: 'ChangeSet', recordId: String(csId), fieldName: 'Context', oldValue: null, newValue: REVERSE_ORDER_CONTEXT },
+            ...removedOnHand.map((r) => ({
+              tableName: 'Inventory', recordId: r.lot, fieldName: 'removed', oldValue: String(r.qty), newValue: null,
+            })),
+            ...restored.map((r) => ({
+              tableName: 'Inventory', recordId: r.lot, fieldName: 'restored', oldValue: null, newValue: String(r.qty),
+            })),
+            { tableName: 'OrdDetail', recordId: String(id), fieldName: 'linesReset', oldValue: null, newValue: String(linesReset) },
+          ],
+        },
+        tx,
+      );
+
+      if (req.requireSignature) {
+        await this.esign.sign(
+          {
+            securedItemKey: REVERSE_SECURED_ITEM,
+            meaning: 'Order reversal',
+            userId: actor.id,
+            userLabel: actor.label ?? actor.id,
+            userExplanation: reason ?? null,
+            witnessUserId: witness?.id ?? null,
+            witnessLabel: witness?.label ?? null,
+            witnessExplanation: witness ? dto.witnessExplanation ?? null : null,
+            masterTable: 'Ordr',
+            masterId: String(id),
+            auditLogId: auditLog.id,
+          },
+          tx,
+        );
+      }
+
+      return {
+        id,
+        status: 'RLS',
+        reversedBy: csId,
+        removedOnHand: removedOnHand.map((r) => ({ lot: r.lot, qty: r.qty })),
+        restored,
+        skippedRestores,
+        linesReset,
+        signed: req.requireSignature,
+        witness: witness?.label ?? null,
+      };
     });
   }
 
@@ -1084,8 +1463,17 @@ export class OrdersService {
       // sets and the last commit wins with a wrong produced-lot unitCost.
       await this.lockOrdr(tx, id);
       const shortfalls: { lot: string; shortfall: number }[] = [];
-      // Deterministic lot order (parcel row locks; see consumeLineTx).
       const ordered = [...dto.lots].sort((a, b) => a.lot.trim().localeCompare(b.lot.trim()));
+      // Deplete all consumed lots in ONE locked acquisition BEFORE recording
+      // the edges (see consumeLineTx — the single-scan lock order plus the
+      // depletion-first ordering are what serialize this record against a
+      // concurrent reversal). A shortfall is recorded, not blocked — the plant
+      // records what it actually consumed.
+      const depletions = await this.valuation.depleteSpecificMany(
+        tx,
+        ordered.map((l) => ({ lot: l.lot.trim(), qty: l.qty })),
+      );
+      const shortfallSeen = new Set<string>();
       for (const l of ordered) {
         const lotCode = l.lot.trim();
         // Accumulate qty if the same input lot is recorded against this batch again.
@@ -1094,10 +1482,11 @@ export class OrdersService {
           VALUES (${childLot}, ${lotCode}, ${id}, ${l.qty}, 'consumption')
           ON CONFLICT (child_lot, parent_lot, via_ordr)
           DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
-        // Deplete the consumed lot's on-hand (specific identification). A shortfall
-        // is recorded, not blocked — the plant records what it actually consumed.
-        const { shortfall } = await this.valuation.depleteSpecific(tx, lotCode, l.qty);
-        if (shortfall > 0) shortfalls.push({ lot: lotCode, shortfall });
+        const d = depletions.get(lotCode);
+        if (d && d.shortfall > 0 && !shortfallSeen.has(lotCode)) {
+          shortfallSeen.add(lotCode);
+          shortfalls.push({ lot: lotCode, shortfall: d.shortfall });
+        }
       }
 
       // Roll the consumed inputs' real cost into the produced batch lot's unitCost.
@@ -1167,10 +1556,16 @@ export class OrdersService {
     return this.prisma.$transaction(async (tx) => {
       // Serialize with the per-line execution writers on this order (see consumeLots).
       await this.lockOrdr(tx, id);
+      // Deplete every item in ONE locked acquisition (single ascending scan —
+      // the system-wide lock order; see depleteSpecificMany), then record the
+      // drawn-from lots as lineage. Requests for the same item aggregate.
+      const depletions = await this.valuation.depleteFifoMany(
+        tx,
+        dto.items.map((it) => ({ itemId: it.itemId, qty: it.qty })),
+      );
       const results: { itemId: number; picks: { lot: string; qty: number }[]; shortfall: number }[] = [];
-      for (const it of dto.items) {
-        const { picks, shortfall } = await this.valuation.depleteFifo(tx, it.itemId, it.qty);
-        for (const p of picks) {
+      for (const [itemId, d] of depletions) {
+        for (const p of d.picks) {
           if (p.lot === childLot) continue; // never self-edge the produced lot
           await tx.$executeRaw`
             INSERT INTO lot_genealogy (child_lot, parent_lot, via_ordr, qty, source)
@@ -1178,7 +1573,7 @@ export class OrdersService {
             ON CONFLICT (child_lot, parent_lot, via_ordr)
             DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
         }
-        results.push({ itemId: it.itemId, picks, shortfall });
+        results.push({ itemId, picks: d.picks, shortfall: d.shortfall });
       }
 
       const unitCost = await this.valuation.rollUpProducedCost(tx, childLot, producedQty);
@@ -1377,6 +1772,19 @@ export class OrdersService {
     }
 
     return this.prisma.$transaction(async (tx) => {
+      // Deplete the shipped lots' on-hand FIRST, in ONE locked acquisition
+      // (see consumeLineTx — the single-scan lock order plus depletion-first
+      // ordering serialize this shipment against a concurrent reversal of a
+      // lot's producing batch). A shortfall is recorded, not blocked — the
+      // goods left the building regardless.
+      const depletions = await this.valuation.depleteSpecificMany(
+        tx,
+        dto.lots.map((l) => ({ lot: l.lot.trim(), qty: l.qty })),
+      );
+      const shortfalls = [...depletions.entries()]
+        .filter(([, d]) => d.shortfall > 0)
+        .map(([lot, d]) => ({ lot, shortfall: d.shortfall }));
+
       await tx.shipmentLot.createMany({
         data: dto.lots.map((l) => {
           const lot = lotByCode.get(l.lot.trim())!;
@@ -1393,14 +1801,6 @@ export class OrdersService {
           };
         }),
       });
-
-      // Deplete the shipped lots' on-hand (specific identification). A shortfall is
-      // recorded, not blocked — the goods left the building regardless.
-      const shortfalls: { lot: string; shortfall: number }[] = [];
-      for (const l of dto.lots) {
-        const { shortfall } = await this.valuation.depleteSpecific(tx, l.lot.trim(), l.qty);
-        if (shortfall > 0) shortfalls.push({ lot: l.lot.trim(), shortfall });
-      }
 
       await this.audit.record(
         {
@@ -1523,6 +1923,16 @@ export class OrdersService {
       // in different orders would otherwise acquire the parcel row locks in
       // opposite order and deadlock.
       const ordered = [...(lots ?? [])].sort((a, b) => a.lot.trim().localeCompare(b.lot.trim()));
+      // Deplete all lots in ONE locked acquisition BEFORE recording the edges:
+      // the single ascending scan is the system-wide lock order (no inversion
+      // against any other acquirer), and the depletion is what serializes this
+      // record against a concurrent reversal of the lot's producing batch —
+      // the reversal either sees the depletion (untouched check refuses) or
+      // commits first (this record lands sequentially after, as a shortfall).
+      const depletions = await this.valuation.depleteSpecificMany(
+        tx,
+        ordered.map((l) => ({ lot: l.lot.trim(), qty: l.qty })),
+      );
       for (const l of ordered) {
         const lotCode = l.lot.trim();
         await tx.$executeRaw`
@@ -1530,8 +1940,8 @@ export class OrdersService {
           VALUES (${childLot}, ${lotCode}, ${orderId}, ${l.qty}, 'consumption')
           ON CONFLICT (child_lot, parent_lot, via_ordr)
           DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
-        const { shortfall } = await this.valuation.depleteSpecific(tx, lotCode, l.qty);
-        if (shortfall > 0) shortfalls.push({ lot: lotCode, shortfall });
+        const d = depletions.get(lotCode);
+        if (d && d.shortfall > 0) shortfalls.push({ lot: lotCode, shortfall: d.shortfall });
         consumed.push({ lot: lotCode, qty: l.qty });
       }
     } else {
@@ -1568,10 +1978,22 @@ export class OrdersService {
    * are atomic.
    */
   private async lockAndRequireReleased(tx: Prisma.TransactionClient, orderId: number) {
+    await this.lockAndRequireStatus(tx, orderId, 'RLS');
+  }
+
+  /**
+   * Lock the order row and re-assert its lifecycle status INSIDE the
+   * transaction. Every lifecycle transition needs this: reverse() made the
+   * lifecycle non-monotonic (CMP can go back to RLS), so a transition whose
+   * precondition was checked only before the transaction can land on a state a
+   * concurrent reversal just changed (e.g. a queued close stamping the final
+   * CLS onto a just-reversed order).
+   */
+  private async lockAndRequireStatus(tx: Prisma.TransactionClient, orderId: number, status: string) {
     await this.lockOrdr(tx, orderId);
     const ord = await tx.ordr.findUnique({ where: { id: orderId }, select: { status: true } });
-    if (curStatus(ord?.status ?? null) !== 'RLS') {
-      throw new BadRequestException(`Order #${orderId} is no longer Released.`);
+    if (curStatus(ord?.status ?? null) !== status) {
+      throw new BadRequestException(`Order #${orderId} is no longer ${STATUS_LABEL[status] ?? status}.`);
     }
   }
 

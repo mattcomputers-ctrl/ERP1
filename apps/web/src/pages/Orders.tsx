@@ -279,6 +279,14 @@ export function Orders() {
             {action.isError && <span className="text-red-600">{(action.error as Error).message}</span>}
           </div>
 
+          {/* Reverse a completion ERP1 performed (native orders only — the
+              server refuses imported legacy completions anyway). */}
+          {(detail.data.context === 'MFBA' || detail.data.context === 'MFPP') &&
+            lifeState(detail.data.status) === 'CMP' &&
+            detail.data.id >= 1_000_000_000 && (
+              <ReverseControls key={`rvs-${detail.data.id}`} orderId={detail.data.id} onDone={refresh} />
+            )}
+
           {lifeState(detail.data.status) === 'NST' && <EditOrder order={detail.data} onDone={refresh} />}
           {/* key= isolates panel state per order — cached detail data means the
               Card may never unmount when switching orders, and a stale draft
@@ -1131,8 +1139,10 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
   });
 
   // Mirror the server's requirements so the button can't be clicked into a 400.
+  // Requirements unknown (fetch failed) -> keep the button disabled: the server
+  // fails safe to reason+signature, which this form couldn't satisfy blind.
   const canSubmit =
-    !req.isLoading &&
+    !!r &&
     (!reasonRequired || !!reason.trim()) &&
     (!sig || !!password) &&
     (!witnessRequired || (!!witnessEmail && !!witnessPassword));
@@ -1141,7 +1151,12 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {req.isError && <span className="text-sm text-red-600">Couldn’t load signing requirements.</span>}
+      {req.isError && (
+        <span className="text-sm text-red-600">
+          Couldn’t load signing requirements.{' '}
+          <button type="button" onClick={() => req.refetch()} className="underline">Retry</button>
+        </span>
+      )}
       <input value={batchSize} onChange={(e) => setBatchSize(e.target.value)} type="number" min="0" step="any" placeholder="Actual batch size" className="w-36 rounded border border-slate-300 px-2 py-1" />
       <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={reasonRequired ? 'Reason (required)' : 'Reason (optional)'} className="w-48 rounded border border-slate-300 px-2 py-1" />
       {sig && (
@@ -1159,6 +1174,114 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
       )}
       <ActionButton pending={m.isPending || !canSubmit} onClick={() => m.mutate()}>Complete</ActionButton>
       {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+    </div>
+  );
+}
+
+// Reverse a completed batch (un-complete: back to Released) with the electronic
+// signature its secured item requires — mirrors CompleteControls, collapsed
+// behind an explicit toggle since it is a corrective, sign-off-worthy action.
+// The server refuses unless the produced stock is untouched (never moved,
+// consumed, shipped, or adjusted), then restores the consumed materials and
+// resets the procedure for re-execution.
+function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => void }) {
+  const me = useMe();
+  const [open, setOpen] = useState(false);
+  // Key by user: signature/witness requirements are resolved per-user server-side.
+  const req = useQuery({
+    queryKey: ['reverse-requirement', me.data?.id],
+    queryFn: () =>
+      api.get<{ requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>(
+        '/orders/reverse-requirement',
+      ),
+    enabled: open,
+  });
+  const [reason, setReason] = useState('');
+  const [password, setPassword] = useState('');
+  const [showWitness, setShowWitness] = useState(false);
+  const [witnessEmail, setWitnessEmail] = useState('');
+  const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessExplanation, setWitnessExplanation] = useState('');
+
+  const r = req.data;
+  const sig = !!r?.requireSignature;
+  const reasonRequired = !!r?.requireReason;
+  const witnessRequired = !!r?.requireWitness;
+  const witnessOpen = witnessRequired || showWitness;
+
+  const m = useMutation({
+    mutationFn: () =>
+      api.post(`/orders/${orderId}/reverse`, {
+        reason: reason || undefined,
+        password: password || undefined,
+        witnessEmail: witnessOpen && witnessEmail ? witnessEmail : undefined,
+        witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
+        witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
+      }),
+    onSuccess: onDone,
+  });
+
+  // Mirror the server's requirements so the button can't be clicked into a 400.
+  // Requirements unknown (fetch failed) -> keep the button disabled: the server
+  // fails safe to reason+signature, which this form couldn't satisfy blind.
+  const canSubmit =
+    !!r &&
+    (!reasonRequired || !!reason.trim()) &&
+    (!sig || !!password) &&
+    (!witnessRequired || (!!witnessEmail && !!witnessPassword));
+
+  if (!open) {
+    return (
+      <div className="mb-4">
+        <button type="button" onClick={() => setOpen(true)} className="text-sm font-medium text-red-600 hover:underline">
+          Reverse completion…
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2">
+      <p className="mb-2 text-sm text-red-800">
+        Reversing puts this order back to Released: the produced stock is removed (only if still untouched),
+        the consumed materials return to inventory, and the procedure resets for re-execution.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        {req.isLoading && <span className="text-sm text-slate-400">Loading…</span>}
+        {req.isError && (
+          <span className="text-sm text-red-600">
+            Couldn’t load signing requirements.{' '}
+            <button type="button" onClick={() => req.refetch()} className="underline">Retry</button>
+          </span>
+        )}
+        {!req.isLoading && (
+          <>
+            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={reasonRequired ? 'Reason (required)' : 'Reason (optional)'} className="w-56 rounded border border-slate-300 px-2 py-1" />
+            {sig && (
+              <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password (sign)" className="w-44 rounded border border-slate-300 px-2 py-1" />
+            )}
+            {sig && witnessOpen && (
+              <>
+                <input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} placeholder={`Witness email${witnessRequired ? ' (required)' : ''}`} className="w-48 rounded border border-slate-300 px-2 py-1" />
+                <input type="password" autoComplete="off" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} placeholder="Witness password" className="w-44 rounded border border-slate-300 px-2 py-1" />
+                <input value={witnessExplanation} onChange={(e) => setWitnessExplanation(e.target.value)} maxLength={500} placeholder="Witness note (optional)" className="w-48 rounded border border-slate-300 px-2 py-1" />
+              </>
+            )}
+            {sig && !witnessRequired && !showWitness && (
+              <button type="button" onClick={() => setShowWitness(true)} className="text-xs text-indigo-600 hover:underline">+ add witness</button>
+            )}
+            <button
+              onClick={() => m.mutate()}
+              disabled={m.isPending || !canSubmit}
+              className="rounded-md bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+            >
+              Reverse completion
+            </button>
+            <button type="button" onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+          </>
+        )}
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
     </div>
   );
 }
