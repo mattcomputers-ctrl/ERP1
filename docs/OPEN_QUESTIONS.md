@@ -14,11 +14,12 @@ default was chosen and recorded in ASSUMPTIONS.md).
   chain) by default?** Currently: reason required, signature operator-
   enableable via the `recipe.publish` secured item; not routed through the
   ApprovalRequest engine. Legacy install had no approval rows.
-- **`ItemPackagedProduct`** (7,136 rows: bulk item + prototype → packaged
-  product + RMPP recipe) is not yet mirrored; ERP1 packaging orders pick the
-  RMPP recipe directly so nothing breaks, but packout selection on batch
-  orders and 7.22-style packaging-product lookup will want it. Import +
-  model it with the packaging-execution increment.
+- ~~**`ItemPackagedProduct`** not yet mirrored~~ — done 2026-07-03: mirrored +
+  imported + drives specify-packouts on batch orders and the packaging-order
+  product lookup (see ASSUMPTIONS §Packouts). Remaining niggle: should ERP1's
+  recipe publish also re-point bindings (legacy's tool did)? Current answer:
+  no — resolution is read-time, so bindings never go stale; revisit only if
+  the plant reports lookup confusion.
 - **Recipe mass-substitution tool** (`RecipeReplacement*`, actively used
   through 2026): rebuild deferred — worth an increment of its own (find all
   recipes using ingredient X, clone+replace with Y, republish).

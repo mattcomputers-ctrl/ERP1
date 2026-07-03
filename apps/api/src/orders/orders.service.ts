@@ -25,6 +25,7 @@ import type { IptResultsDto } from './dto/ipt-results.dto';
 import type { RecordLineDto } from './dto/record-line.dto';
 import type { ReverseOrderDto } from './dto/reverse-order.dto';
 import type { ShipLotsDto } from './dto/ship-lots.dto';
+import type { SpecifyPackoutDto } from './dto/specify-packout.dto';
 
 const LB_TO_GRAMS = 453.59237;
 
@@ -319,6 +320,20 @@ export class OrdersService {
    * carry no in-process tests. One transaction, atomic hash-chained audit record.
    */
   async create(dto: CreateOrderDto, actor: Actor) {
+    const prep = await this.prepareOrderCreate(dto);
+    return this.prisma.$transaction(async (tx) => {
+      const created = await this.createOrderTx(tx, prep, dto, actor);
+      return { id: created.id, status: 'NST', lines: created.lineCount, tests: created.testCount, lot: created.lot };
+    });
+  }
+
+  /**
+   * Pre-transaction half of order creation: load + validate the recipe, its
+   * detail lines, the product's QC specs, and the optional required date.
+   * Shared by create() and specifyPackout() (which composes the same creation
+   * into a larger transaction alongside the demand-allocation row).
+   */
+  private async prepareOrderCreate(dto: CreateOrderDto) {
     const recipe = await this.prisma.recipe.findUnique({
       where: { id: dto.recipeId },
       select: { id: true, recipeNumber: true, context: true, ownerId: true, isPublished: true, inactive: true },
@@ -408,169 +423,183 @@ export class OrdersService {
       }
     }
 
+    return { recipe, orderContext, isBatch, rdLines, productItemIds, testsByItem, dateRequired };
+  }
+
+  /**
+   * Transactional half of order creation. Takes the native-id allocation lock;
+   * callers composing extra writes (specifyPackout) must take any Ordr row
+   * locks BEFORE calling (row lock -> advisory lock is the global order,
+   * matching complete()/reverse()).
+   */
+  private async createOrderTx(
+    tx: Prisma.TransactionClient,
+    prep: Awaited<ReturnType<OrdersService['prepareOrderCreate']>>,
+    dto: CreateOrderDto,
+    actor: Actor,
+  ) {
+    const { recipe, orderContext, isBatch, rdLines, productItemIds, testsByItem, dateRequired } = prep;
     const at = new Date();
 
-    return this.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
-      // Allocate ids in the native range (≥ NATIVE_ID_BASE) per table; the
-      // advisory lock above serializes this so MAX+1 can't be read twice.
-      const nativeWhere = { id: { gte: NATIVE_ID_BASE } };
-      const orderId =
-        ((await tx.ordr.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE) + 1;
-      let odId = (await tx.ordDetail.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
-      let otId =
-        (await tx.ordDetailTest.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+    // Allocate ids in the native range (≥ NATIVE_ID_BASE) per table; the
+    // advisory lock above serializes this so MAX+1 can't be read twice.
+    const nativeWhere = { id: { gte: NATIVE_ID_BASE } };
+    const orderId =
+      ((await tx.ordr.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE) + 1;
+    let odId = (await tx.ordDetail.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
+    let otId =
+      (await tx.ordDetailTest.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
 
-      await tx.ordr.create({
-        data: {
-          id: orderId,
-          context: orderContext,
-          status: 'NST',
-          recipeId: recipe.id,
-          ownerId: recipe.ownerId,
-          // Batch orders record the planned size in ActualBatchSize (legacy does);
-          // packaging orders leave it null and carry the scale on the lines.
-          actualBatchSize: isBatch ? dto.batchSize : null,
-          dateOrdered: at,
-          dateRequired,
-          reference: dto.reference ?? null,
-          placedBy: actor.label ?? null,
-          isQuote: false,
-        },
-      });
-
-      const lineData: Prisma.OrdDetailCreateManyInput[] = rdLines.map((rd) => {
-        const scalable = SCALABLE_CONTEXTS.has(rd.context ?? '');
-        return {
-        id: (odId += 1),
-        ordrId: orderId,
-        context: rd.context,
-        itemId: rd.itemId,
-        qtyReqd: rd.qtyReqd != null && scalable ? rd.qtyReqd * dto.batchSize : rd.qtyReqd,
-        // StdQty preserves the per-unit-batch base (so scale = QtyReqd / StdQty),
-        // matching legacy and giving variance analysis a reference later.
-        stdQty: scalable ? rd.qtyReqd : null,
-        entityUnit: rd.entityUnit,
-        phase: rd.phase,
-        execOrder: rd.execOrder,
-        batchType: rd.batchType,
-        qualifier: rd.qualifier,
-        description: rd.description,
-        comment: rd.comment,
-        mustPreweigh: rd.mustPreweigh ?? 0,
-        percentUnder: rd.percentUnder,
-        percentOver: rd.percentOver,
-        itemNameId: rd.itemNameId,
-        pkgTypeId: rd.pkgTypeId,
-        manufacturerId: rd.manufacturerId,
-        yieldPercent: rd.yieldPercent,
-        baseQty: rd.baseQty,
-        recipeDetailReference: rd.id,
-        isOpen: true,
-        };
-      });
-
-      // One IPT line per produced item carries that product's production tests
-      // (mirrors how legacy hangs an order's OrdDetailTest off an IPT line). For
-      // the normal single-product recipe this is exactly one IPT line.
-      const testData: Prisma.OrdDetailTestCreateManyInput[] = [];
-      for (const itemId of productItemIds) {
-        const tests = testsByItem.get(itemId);
-        if (!tests?.length) continue;
-        const iptId = (odId += 1);
-        lineData.push({
-          id: iptId,
-          ordrId: orderId,
-          context: 'IPT',
-          itemId,
-          description: 'In-process testing',
-          mustPreweigh: 0,
-          isOpen: true,
-        });
-        for (const t of tests) {
-          testData.push({
-            id: (otId += 1),
-            ordDetailId: iptId,
-            test: t.test,
-            qualifier: t.qualifier,
-            min: t.min,
-            max: t.max,
-            target: t.target,
-            testGroup: t.testGroup,
-            grade: t.grade,
-            specification: t.specification,
-            comment: t.comment,
-            line: t.line,
-          });
-        }
-      }
-
-      await tx.ordDetail.createMany({ data: lineData });
-      if (testData.length) await tx.ordDetailTest.createMany({ data: testData });
-
-      // Mint the finished-good lot(s) at creation, per the plant convention
-      // YYMMDD### — ### is the next lot sequence for the day, SHARED across all
-      // production lots (MFBA + MFPP), verified against live data. One lot per
-      // produced (PK) line, linked via Lot.OrdDetail; the batch lot is the lot of
-      // record (see [[genealogy-data-reality]]). The day prefix uses UTC date
-      // components (the app's plant-wall-clock convention, [[datetime-timezone-handling]]).
-      // Same advisory lock as the id allocation serializes the daily sequence.
-      const pkLines = lineData.filter((l) => l.context === 'PK' && l.itemId != null);
-      let firstLot: string | null = null;
-      if (pkLines.length) {
-        const prefix = fgLotPrefix(at);
-        const sameDay = await tx.lot.findMany({ where: { lot: { startsWith: prefix } }, select: { lot: true } });
-        let seq = sameDay.reduce((m, r) => {
-          const n = Number.parseInt(r.lot.slice(prefix.length), 10);
-          return Number.isFinite(n) && n > m ? n : m;
-        }, 0);
-        for (const pk of pkLines) {
-          const lotNumber = `${prefix}${String((seq += 1)).padStart(3, '0')}`;
-          await tx.lot.create({
-            data: {
-              lot: lotNumber,
-              context: 'LOT',
-              itemId: pk.itemId ?? null,
-              ordDetailId: pk.id,
-              manfDate: at,
-              // The batch lot's manufacturer lot IS itself (legacy MFBA); a
-              // packaging lot carries none.
-              manfLot: isBatch ? lotNumber : null,
-            },
-          });
-          if (!firstLot) firstLot = lotNumber;
-        }
-        if (firstLot) await tx.ordr.update({ where: { id: orderId }, data: { manfLot: firstLot } });
-      }
-
-      await this.audit.record(
-        {
-          action: 'order.create',
-          actorUserId: actor.id,
-          actorLabel: actor.label,
-          program: 'orders.create',
-          summary:
-            `${isBatch ? 'Batch' : 'Packaging'} order #${orderId} created from recipe ` +
-            `${recipe.recipeNumber ?? recipe.id} (batch size ${dto.batchSize}, ${lineData.length} lines, ` +
-            `${testData.length} QC specs)` +
-            (firstLot ? `, lot ${firstLot}` : ''),
-          changes: [
-            { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Context', oldValue: null, newValue: orderContext },
-            { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Status', oldValue: null, newValue: 'NST' },
-            { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Recipe', oldValue: null, newValue: String(recipe.id) },
-            ...(firstLot
-              ? [{ tableName: 'Lot', recordId: firstLot, fieldName: 'Lot', oldValue: null, newValue: firstLot }]
-              : []),
-            ...(isBatch
-              ? [{ tableName: 'Ordr', recordId: String(orderId), fieldName: 'ActualBatchSize', oldValue: null, newValue: String(dto.batchSize) }]
-              : []),
-          ],
-        },
-        tx,
-      );
-
-      return { id: orderId, status: 'NST', lines: lineData.length, tests: testData.length, lot: firstLot };
+    await tx.ordr.create({
+      data: {
+        id: orderId,
+        context: orderContext,
+        status: 'NST',
+        recipeId: recipe.id,
+        ownerId: recipe.ownerId,
+        // Batch orders record the planned size in ActualBatchSize (legacy does);
+        // packaging orders leave it null and carry the scale on the lines.
+        actualBatchSize: isBatch ? dto.batchSize : null,
+        dateOrdered: at,
+        dateRequired,
+        reference: dto.reference ?? null,
+        placedBy: actor.label ?? null,
+        isQuote: false,
+      },
     });
+
+    const lineData: Prisma.OrdDetailCreateManyInput[] = rdLines.map((rd) => {
+      const scalable = SCALABLE_CONTEXTS.has(rd.context ?? '');
+      return {
+      id: (odId += 1),
+      ordrId: orderId,
+      context: rd.context,
+      itemId: rd.itemId,
+      qtyReqd: rd.qtyReqd != null && scalable ? rd.qtyReqd * dto.batchSize : rd.qtyReqd,
+      // StdQty preserves the per-unit-batch base (so scale = QtyReqd / StdQty),
+      // matching legacy and giving variance analysis a reference later.
+      stdQty: scalable ? rd.qtyReqd : null,
+      entityUnit: rd.entityUnit,
+      phase: rd.phase,
+      execOrder: rd.execOrder,
+      batchType: rd.batchType,
+      qualifier: rd.qualifier,
+      description: rd.description,
+      comment: rd.comment,
+      mustPreweigh: rd.mustPreweigh ?? 0,
+      percentUnder: rd.percentUnder,
+      percentOver: rd.percentOver,
+      itemNameId: rd.itemNameId,
+      pkgTypeId: rd.pkgTypeId,
+      manufacturerId: rd.manufacturerId,
+      yieldPercent: rd.yieldPercent,
+      baseQty: rd.baseQty,
+      recipeDetailReference: rd.id,
+      isOpen: true,
+      };
+    });
+
+    // One IPT line per produced item carries that product's production tests
+    // (mirrors how legacy hangs an order's OrdDetailTest off an IPT line). For
+    // the normal single-product recipe this is exactly one IPT line.
+    const testData: Prisma.OrdDetailTestCreateManyInput[] = [];
+    for (const itemId of productItemIds) {
+      const tests = testsByItem.get(itemId);
+      if (!tests?.length) continue;
+      const iptId = (odId += 1);
+      lineData.push({
+        id: iptId,
+        ordrId: orderId,
+        context: 'IPT',
+        itemId,
+        description: 'In-process testing',
+        mustPreweigh: 0,
+        isOpen: true,
+      });
+      for (const t of tests) {
+        testData.push({
+          id: (otId += 1),
+          ordDetailId: iptId,
+          test: t.test,
+          qualifier: t.qualifier,
+          min: t.min,
+          max: t.max,
+          target: t.target,
+          testGroup: t.testGroup,
+          grade: t.grade,
+          specification: t.specification,
+          comment: t.comment,
+          line: t.line,
+        });
+      }
+    }
+
+    await tx.ordDetail.createMany({ data: lineData });
+    if (testData.length) await tx.ordDetailTest.createMany({ data: testData });
+
+    // Mint the finished-good lot(s) at creation, per the plant convention
+    // YYMMDD### — ### is the next lot sequence for the day, SHARED across all
+    // production lots (MFBA + MFPP), verified against live data. One lot per
+    // produced (PK) line, linked via Lot.OrdDetail; the batch lot is the lot of
+    // record (see [[genealogy-data-reality]]). The day prefix uses UTC date
+    // components (the app's plant-wall-clock convention, [[datetime-timezone-handling]]).
+    // Same advisory lock as the id allocation serializes the daily sequence.
+    const pkLines = lineData.filter((l) => l.context === 'PK' && l.itemId != null);
+    let firstLot: string | null = null;
+    if (pkLines.length) {
+      const prefix = fgLotPrefix(at);
+      const sameDay = await tx.lot.findMany({ where: { lot: { startsWith: prefix } }, select: { lot: true } });
+      let seq = sameDay.reduce((m, r) => {
+        const n = Number.parseInt(r.lot.slice(prefix.length), 10);
+        return Number.isFinite(n) && n > m ? n : m;
+      }, 0);
+      for (const pk of pkLines) {
+        const lotNumber = `${prefix}${String((seq += 1)).padStart(3, '0')}`;
+        await tx.lot.create({
+          data: {
+            lot: lotNumber,
+            context: 'LOT',
+            itemId: pk.itemId ?? null,
+            ordDetailId: pk.id,
+            manfDate: at,
+            // The batch lot's manufacturer lot IS itself (legacy MFBA); a
+            // packaging lot carries none.
+            manfLot: isBatch ? lotNumber : null,
+          },
+        });
+        if (!firstLot) firstLot = lotNumber;
+      }
+      if (firstLot) await tx.ordr.update({ where: { id: orderId }, data: { manfLot: firstLot } });
+    }
+
+    await this.audit.record(
+      {
+        action: 'order.create',
+        actorUserId: actor.id,
+        actorLabel: actor.label,
+        program: 'orders.create',
+        summary:
+          `${isBatch ? 'Batch' : 'Packaging'} order #${orderId} created from recipe ` +
+          `${recipe.recipeNumber ?? recipe.id} (batch size ${dto.batchSize}, ${lineData.length} lines, ` +
+          `${testData.length} QC specs)` +
+          (firstLot ? `, lot ${firstLot}` : ''),
+        changes: [
+          { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Context', oldValue: null, newValue: orderContext },
+          { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Status', oldValue: null, newValue: 'NST' },
+          { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Recipe', oldValue: null, newValue: String(recipe.id) },
+          ...(firstLot
+            ? [{ tableName: 'Lot', recordId: firstLot, fieldName: 'Lot', oldValue: null, newValue: firstLot }]
+            : []),
+          ...(isBatch
+            ? [{ tableName: 'Ordr', recordId: String(orderId), fieldName: 'ActualBatchSize', oldValue: null, newValue: String(dto.batchSize) }]
+            : []),
+        ],
+      },
+      tx,
+    );
+
+    return { id: orderId, lineCount: lineData.length, testCount: testData.length, lot: firstLot, lineData };
   }
 
   /**
@@ -811,6 +840,500 @@ export class OrdersService {
       select: { id: true, recipeNumber: true, context: true },
     });
     return { rows };
+  }
+
+  // --- packouts (UG §6.4 specify-what-to-packout; 7.22 packaging lookup) ----
+
+  /**
+   * Packout options from the ItemPackagedProduct bindings, either for one bulk
+   * item (`itemId` — the §6.4 New Requirements list for a batch order's
+   * product) or matching a search on the bulk/packout item codes (`q` — the
+   * 7.22-style packaging-order product lookup, which offers only items with a
+   * packout binding). The bound recipe is offered while it is still the active
+   * published revision; otherwise the active revision packing the same product
+   * is resolved at read time (the legacy tool rewrote bindings on republish —
+   * every live row points at an active recipe; ERP1's recipe publish does not
+   * edit bindings, so resolution happens here instead). `bulkPerUnit` is the
+   * resolved recipe's bulk-ingredient quantity per unit of packout — the
+   * factor the bulk-demand math scales by.
+   */
+  async packoutOptions(opts: { itemId?: number; q?: string }) {
+    const term = opts.q?.trim();
+    let bindingWhere: Prisma.ItemPackagedProductWhereInput = { NOT: { inactive: true } };
+    if (opts.itemId != null) {
+      bindingWhere = { ...bindingWhere, itemId: opts.itemId };
+    } else if (term) {
+      const matches = await this.prisma.item.findMany({
+        where: {
+          OR: [
+            { itemCode: { contains: term, mode: 'insensitive' } },
+            { description: { contains: term, mode: 'insensitive' } },
+          ],
+        },
+        select: { id: true },
+        take: 200,
+      });
+      const ids = matches.map((m) => m.id);
+      if (!ids.length) return { rows: [] };
+      bindingWhere = { ...bindingWhere, OR: [{ itemId: { in: ids } }, { packagedProductId: { in: ids } }] };
+    } else {
+      return { rows: [] };
+    }
+
+    const bindings = await this.prisma.itemPackagedProduct.findMany({
+      where: bindingWhere,
+      orderBy: [{ altId: 'asc' }, { id: 'asc' }],
+      take: 50,
+    });
+    return { rows: await this.enrichPackoutBindings(bindings) };
+  }
+
+  /**
+   * Enrich packout bindings into option rows: resolve each binding's orderable
+   * recipe (the bound one while it is still an ACTIVE published RMPP recipe,
+   * else the active published RMPP revision whose product (PK line) is the
+   * binding's packaged product — single-active makes that unique in practice,
+   * ties break to the newest) and its bulk-ingredient line. Shared by the
+   * option list (capped) and specifyPackout (its exact binding) — the
+   * resolution must be identical in both paths.
+   */
+  private async enrichPackoutBindings(
+    bindings: Array<{
+      id: number; itemId: number; packagingPrototypeId: number; packagedProductId: number;
+      recipeId: number | null; qty: number;
+    }>,
+  ) {
+    if (!bindings.length) return [];
+
+    const itemIds = [
+      ...new Set(bindings.flatMap((b) => [b.itemId, b.packagedProductId, b.packagingPrototypeId])),
+    ];
+    const items = new Map(
+      (
+        await this.prisma.item.findMany({
+          where: { id: { in: itemIds } },
+          select: { id: true, itemCode: true, description: true, unit: true },
+        })
+      ).map((i) => [i.id, i]),
+    );
+
+    const boundRecipeIds = [...new Set(bindings.map((b) => b.recipeId).filter((v): v is number => v != null))];
+    const boundRecipes = new Map(
+      (
+        await this.prisma.recipe.findMany({
+          where: { id: { in: boundRecipeIds } },
+          select: { id: true, recipeNumber: true, context: true, isPublished: true, inactive: true },
+        })
+      ).map((r) => [r.id, r]),
+    );
+    const packedIds = [...new Set(bindings.map((b) => b.packagedProductId))];
+    const pkLines = await this.prisma.recipeDetail.findMany({
+      where: { context: 'PK', itemId: { in: packedIds }, NOT: { inactive: true } },
+      select: { recipeId: true, itemId: true },
+    });
+    const candidateRecipeIds = [...new Set(pkLines.map((l) => l.recipeId).filter((v): v is number => v != null))];
+    const activeRecipes = new Map(
+      (
+        await this.prisma.recipe.findMany({
+          where: { id: { in: candidateRecipeIds }, context: 'RMPP', isPublished: true, NOT: { inactive: true } },
+          select: { id: true, recipeNumber: true },
+        })
+      ).map((r) => [r.id, r]),
+    );
+    const activeByProduct = new Map<number, { id: number; recipeNumber: string | null }>();
+    for (const l of pkLines) {
+      if (l.itemId == null || l.recipeId == null) continue;
+      const r = activeRecipes.get(l.recipeId);
+      if (!r) continue;
+      const prev = activeByProduct.get(l.itemId);
+      if (!prev || r.id > prev.id) activeByProduct.set(l.itemId, r);
+    }
+
+    // The bound recipe counts only while it is an active published PACKAGING
+    // recipe — a binding pointed at anything else must fall through to the
+    // active-revision resolution (a non-RMPP recipe would otherwise mint the
+    // wrong ORDER TYPE from a "packout").
+    const boundIsActive = (b: (typeof bindings)[number]) => {
+      const bound = b.recipeId != null ? boundRecipes.get(b.recipeId) : undefined;
+      return !!bound && bound.context === 'RMPP' && bound.isPublished === true && bound.inactive !== true;
+    };
+
+    const resolvedIds = new Set<number>();
+    for (const b of bindings) {
+      const resolved = boundIsActive(b) ? boundRecipes.get(b.recipeId!) : activeByProduct.get(b.packagedProductId);
+      if (resolved) resolvedIds.add(resolved.id);
+    }
+    // The bulk-ingredient line(s) (UI, item = the binding's bulk item) of each
+    // resolved recipe — the per-unit quantity the bulk-demand math scales by.
+    const bulkLines = await this.prisma.recipeDetail.findMany({
+      where: { recipeId: { in: [...resolvedIds] }, context: 'UI', NOT: { inactive: true } },
+      select: { recipeId: true, itemId: true, qtyReqd: true },
+    });
+
+    return bindings.map((b) => {
+      const bound = b.recipeId != null ? boundRecipes.get(b.recipeId) : undefined;
+      const boundActive = boundIsActive(b);
+      const resolved = boundActive
+        ? { id: bound!.id, recipeNumber: bound!.recipeNumber }
+        : activeByProduct.get(b.packagedProductId) ?? null;
+      // Every live recipe carries the bulk on exactly ONE UI line; a recipe
+      // splitting it across several would under-count the requirement if we
+      // picked one, so it is explicitly not orderable.
+      const matchingBulk = resolved
+        ? bulkLines.filter((l) => l.recipeId === resolved.id && l.itemId === b.itemId)
+        : [];
+      const bulkLine = matchingBulk.length === 1 ? matchingBulk[0] : undefined;
+      const item = (id: number | null) => {
+        const it = id != null ? items.get(id) : undefined;
+        return it ? { id: it.id, itemCode: it.itemCode, description: it.description, unit: it.unit } : null;
+      };
+      let reason: string | null = null;
+      if (!resolved) reason = 'No active published packaging recipe for this packout.';
+      else if (matchingBulk.length > 1) {
+        reason = 'The packaging recipe splits the bulk item across multiple lines; packouts need a single bulk-ingredient line.';
+      } else if (!bulkLine || !(bulkLine.qtyReqd != null && bulkLine.qtyReqd > 0)) {
+        reason = 'The packaging recipe has no bulk-ingredient line for this item.';
+      }
+      return {
+        id: b.id,
+        bulkItem: item(b.itemId),
+        packagedProduct: item(b.packagedProductId),
+        prototype: item(b.packagingPrototypeId),
+        qty: b.qty,
+        boundRecipe: bound ? { id: bound.id, recipeNumber: bound.recipeNumber, active: boundActive } : null,
+        recipe: resolved ? { id: resolved.id, recipeNumber: resolved.recipeNumber } : null,
+        bulkPerUnit: reason == null ? bulkLine!.qtyReqd : null,
+        orderable: reason == null,
+        reason,
+      };
+    });
+  }
+
+  /**
+   * The packout/demand picture of a production order (UG §6.4):
+   * - MFBA: the existing-demand table (packaging orders allocated to this
+   *   order's product line via OrdDetailCommit), the yield totals (total /
+   *   allocated / remaining — negative remaining is the vendor's over-packout
+   *   warning, never an error), and the product's packout options with
+   *   can-make math.
+   * - MFPP: the supply side — which batch order(s) feed this packaging order.
+   */
+  async packouts(id: number) {
+    const order = await this.prisma.ordr.findUnique({
+      where: { id },
+      select: { id: true, context: true, status: true, actualBatchSize: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.context !== 'MFBA' && order.context !== 'MFPP') {
+      throw new BadRequestException('Packouts apply to production orders (MFBA/MFPP).');
+    }
+
+    if (order.context === 'MFPP') {
+      // Supply view: commitments on this order's ingredient lines back to the
+      // batch order(s) whose bulk feeds it.
+      const uiLines = await this.prisma.ordDetail.findMany({
+        where: { ordrId: id, context: 'UI' },
+        select: { id: true, itemId: true },
+      });
+      const commits = uiLines.length
+        ? await this.prisma.ordDetailCommit.findMany({
+            where: { ordDetailId: { in: uiLines.map((l) => l.id) } },
+            orderBy: { id: 'asc' },
+          })
+        : [];
+      const srcLines = commits.length
+        ? await this.prisma.ordDetail.findMany({
+            where: { id: { in: commits.map((c) => c.srcOrdDetailId).filter((v): v is number => v != null) } },
+            select: { id: true, ordrId: true, itemId: true },
+          })
+        : [];
+      const srcOrders = srcLines.length
+        ? await this.prisma.ordr.findMany({
+            where: { id: { in: [...new Set(srcLines.map((l) => l.ordrId).filter((v): v is number => v != null))] } },
+            select: { id: true, context: true, status: true, manfLot: true },
+          })
+        : [];
+      const srcLineById = new Map(srcLines.map((l) => [l.id, l]));
+      const srcOrderById = new Map(srcOrders.map((o) => [o.id, o]));
+      const itemsById = await this.itemMap(srcLines.map((l) => l.itemId));
+      const supply = commits.map((c) => {
+        const src = c.srcOrdDetailId != null ? srcLineById.get(c.srcOrdDetailId) : undefined;
+        const srcOrder = src?.ordrId != null ? srcOrderById.get(src.ordrId) : undefined;
+        const it = src?.itemId != null ? itemsById.get(src.itemId) : undefined;
+        return {
+          commitId: c.id,
+          qty: c.qty,
+          batchOrderId: srcOrder?.id ?? src?.ordrId ?? null,
+          batchStatus: srcOrder?.status ?? null,
+          batchLot: srcOrder?.manfLot ?? null,
+          item: it ? { id: it.id, itemCode: it.itemCode, description: it.description } : null,
+        };
+      });
+      return { kind: 'MFPP' as const, order, supply };
+    }
+
+    // MFBA: the demand table + options.
+    const pkLines = await this.prisma.ordDetail.findMany({
+      where: { ordrId: id, context: 'PK' },
+      select: { id: true, itemId: true, qtyReqd: true },
+      orderBy: { id: 'asc' },
+    });
+    const productId = pkLines.find((l) => l.itemId != null)?.itemId ?? null;
+    const itemsById = await this.itemMap([productId]);
+    // Total Yield: the batch size (ActualBatchSize holds the planned size
+    // until completion, the actual after) — product-line qty as fallback.
+    const totalYield = order.actualBatchSize ?? pkLines.reduce((s, l) => s + (l.qtyReqd ?? 0), 0);
+
+    const commits = pkLines.length
+      ? await this.prisma.ordDetailCommit.findMany({
+          where: { srcOrdDetailId: { in: pkLines.map((l) => l.id) } },
+          orderBy: { id: 'asc' },
+        })
+      : [];
+    const demandLines = commits.length
+      ? await this.prisma.ordDetail.findMany({
+          where: { id: { in: commits.map((c) => c.ordDetailId).filter((v): v is number => v != null) } },
+          select: { id: true, ordrId: true },
+        })
+      : [];
+    const demandOrders = demandLines.length
+      ? await this.prisma.ordr.findMany({
+          where: { id: { in: [...new Set(demandLines.map((l) => l.ordrId).filter((v): v is number => v != null))] } },
+          select: { id: true, context: true, status: true, dateRequired: true, manfLot: true },
+        })
+      : [];
+    const demandLineById = new Map(demandLines.map((l) => [l.id, l]));
+    const demandOrderById = new Map(demandOrders.map((o) => [o.id, o]));
+    // What each demand order MAKES (its PK-line item) is the packout shown.
+    const demandPkLines = demandOrders.length
+      ? await this.prisma.ordDetail.findMany({
+          where: { ordrId: { in: demandOrders.map((o) => o.id) }, context: 'PK' },
+          select: { ordrId: true, itemId: true },
+        })
+      : [];
+    const demandProductByOrder = new Map<number, number>();
+    for (const l of demandPkLines) {
+      if (l.ordrId != null && l.itemId != null && !demandProductByOrder.has(l.ordrId)) {
+        demandProductByOrder.set(l.ordrId, l.itemId);
+      }
+    }
+    const demandItems = await this.itemMap([...demandProductByOrder.values()]);
+
+    let allocated = 0;
+    const demand = commits.map((c) => {
+      allocated += c.qty ?? 0;
+      const line = c.ordDetailId != null ? demandLineById.get(c.ordDetailId) : undefined;
+      const dOrder = line?.ordrId != null ? demandOrderById.get(line.ordrId) : undefined;
+      const prodItemId = dOrder ? demandProductByOrder.get(dOrder.id) : undefined;
+      const it = prodItemId != null ? demandItems.get(prodItemId) : undefined;
+      return {
+        commitId: c.id,
+        qty: c.qty,
+        orderId: dOrder?.id ?? line?.ordrId ?? null,
+        orderContext: dOrder?.context ?? null,
+        orderStatus: dOrder?.status ?? null,
+        dateRequired: dOrder?.dateRequired ?? null,
+        lot: dOrder?.manfLot ?? null,
+        product: it ? { id: it.id, itemCode: it.itemCode, description: it.description } : null,
+      };
+    });
+    const remaining = totalYield - allocated;
+
+    const options =
+      productId != null
+        ? (await this.packoutOptions({ itemId: productId })).rows.map((o) => ({
+            ...o,
+            canMake:
+              o.orderable && o.bulkPerUnit != null && o.bulkPerUnit > 0
+                ? Math.max(0, remaining) / o.bulkPerUnit
+                : null,
+          }))
+        : [];
+
+    const productItem = productId != null ? itemsById.get(productId) : undefined;
+    return {
+      kind: 'MFBA' as const,
+      order,
+      product: productItem
+        ? { id: productItem.id, itemCode: productItem.itemCode, description: productItem.description }
+        : null,
+      totals: { yield: totalYield, allocated, remaining },
+      demand,
+      options,
+    };
+  }
+
+  private async itemMap(ids: Array<number | null | undefined>) {
+    const clean = [...new Set(ids.filter((v): v is number => v != null))];
+    if (!clean.length) return new Map<number, { id: number; itemCode: string | null; description: string | null }>();
+    const rows = await this.prisma.item.findMany({
+      where: { id: { in: clean } },
+      select: { id: true, itemCode: true, description: true },
+    });
+    return new Map(rows.map((r) => [r.id, r]));
+  }
+
+  /**
+   * Specify a packout on a batch order (UG §6.4 New Requirements): create a
+   * packaging (MFPP) order for `makeQty` units of the chosen packout and
+   * allocate this batch's bulk to it via an OrdDetailCommit (demand side = the
+   * new order's bulk-ingredient UI line; supply side = this order's PK line) —
+   * the exact linkage every live commitment uses. One atomic transaction: the
+   * batch order's row lock is taken first (re-asserting it is still open for
+   * demand edits — the vendor allows them "at any time prior to marking it
+   * complete"), then the creation's native-id allocation lock (the global
+   * row-lock -> advisory-lock order). Over-allocating the batch's yield warns,
+   * never blocks (vendor: negative Remaining Yield is a planning warning).
+   */
+  async specifyPackout(id: number, dto: SpecifyPackoutDto, actor: Actor) {
+    // Pre-tx reads are advisory (context never changes); everything the
+    // write depends on is re-read under the row lock inside the transaction.
+    const order = await this.prisma.ordr.findUnique({
+      where: { id },
+      select: { id: true, context: true, status: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.context !== 'MFBA') {
+      throw new BadRequestException('Packouts are specified on batch (MFBA) orders.');
+    }
+
+    const binding = await this.prisma.itemPackagedProduct.findUnique({
+      where: { id: dto.itemPackagedProductId },
+    });
+    if (!binding) throw new NotFoundException('Packout option not found');
+    if (binding.inactive === true) throw new BadRequestException('That packout option is inactive.');
+
+    const srcPk = await this.prisma.ordDetail.findFirst({
+      where: { ordrId: id, context: 'PK', itemId: binding.itemId },
+      orderBy: { id: 'asc' },
+      select: { id: true, qtyReqd: true },
+    });
+    if (!srcPk) {
+      throw new BadRequestException('That packout is for a different bulk product than this order makes.');
+    }
+
+    // Resolve the packout's orderable recipe (bound-if-active, else the active
+    // revision) through the same read-time logic the options list uses —
+    // enriching THIS binding directly, so the option list's result cap can
+    // never hide it.
+    const [opt] = await this.enrichPackoutBindings([binding]);
+    if (!opt || !opt.orderable || !opt.recipe || opt.bulkPerUnit == null) {
+      throw new BadRequestException(opt?.reason ?? 'That packout option is not orderable.');
+    }
+    const recipeRef = opt.recipe;
+
+    const bulkRequired = opt.bulkPerUnit * dto.makeQty;
+    const supplied = dto.suppliedQty ?? bulkRequired;
+    // A hair of float tolerance so "allocate exactly what it needs" round-trips.
+    if (supplied > bulkRequired * (1 + 1e-9)) {
+      throw new BadRequestException(
+        `Supplied quantity ${supplied} exceeds the bulk the packaging order needs (${bulkRequired}).`,
+      );
+    }
+
+    const createDto: CreateOrderDto = {
+      recipeId: recipeRef.id,
+      batchSize: dto.makeQty,
+      dateRequired: dto.dateRequired,
+      reference: dto.reference,
+    };
+    const prep = await this.prepareOrderCreate(createDto);
+
+    return this.prisma.$transaction(async (tx) => {
+      // Row lock first (then createOrderTx's advisory lock): re-assert the
+      // batch is still open for demand edits — not completed/closed under us.
+      // The absent-row case must be explicit: curStatus(null) reads as 'NST',
+      // so a batch deleted mid-flight (import sync propagating a legacy
+      // delete) would otherwise sail through and leave a dangling commit.
+      await this.lockOrdr(tx, id);
+      const cur = await tx.ordr.findUnique({ where: { id }, select: { status: true, actualBatchSize: true } });
+      if (!cur) throw new NotFoundException('Order not found');
+      const curStat = curStatus(cur.status ?? null);
+      if (curStat !== 'NST' && curStat !== 'RLS') {
+        throw new BadRequestException(
+          `Order #${id} is ${STATUS_LABEL[curStat] ?? curStat}; packouts can only be specified before completion.`,
+        );
+      }
+      // Re-read the product lines under the lock too: an order edit rescales
+      // them (and ActualBatchSize) under this same row lock, and the totals /
+      // over-allocation verdict below land in the immutable audit record — a
+      // stale pre-tx snapshot would record the wrong verdict. Also re-asserts
+      // the supply line still exists.
+      const curPkLines = await tx.ordDetail.findMany({
+        where: { ordrId: id, context: 'PK' },
+        select: { id: true, qtyReqd: true },
+      });
+      if (!curPkLines.some((l) => l.id === srcPk.id)) {
+        throw new BadRequestException('The batch order’s product line changed under this packout; retry.');
+      }
+
+      const created = await this.createOrderTx(tx, prep, createDto, actor);
+
+      // The new order's bulk-ingredient line — the demand side of the commit.
+      // enrichPackoutBindings guaranteed exactly one; if the recipe changed
+      // between that read and this transaction, fail the whole thing rather
+      // than mint an unallocated (or mis-allocated) packaging order.
+      const bulkUiLines = created.lineData.filter((l) => l.context === 'UI' && l.itemId === binding.itemId);
+      if (bulkUiLines.length !== 1) {
+        throw new BadRequestException('The packaging recipe’s bulk-ingredient line changed; retry.');
+      }
+      const bulkLine = bulkUiLines[0];
+
+      const commitId =
+        ((await tx.ordDetailCommit.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max
+          .id ?? NATIVE_ID_BASE) + 1;
+      await tx.ordDetailCommit.create({
+        data: {
+          id: commitId,
+          ordDetailId: bulkLine.id as number,
+          srcOrdDetailId: srcPk.id,
+          qty: supplied,
+          packagingReady: false,
+        },
+      });
+
+      // Over-allocation is the vendor's negative-Remaining-Yield warning.
+      // Computed entirely from the in-tx reads (and across ALL product lines,
+      // matching the packouts() view) — never the pre-tx snapshots.
+      const agg = await tx.ordDetailCommit.aggregate({
+        _sum: { qty: true },
+        where: { srcOrdDetailId: { in: curPkLines.map((l) => l.id) } },
+      });
+      const totalYield = cur.actualBatchSize ?? curPkLines.reduce((s, l) => s + (l.qtyReqd ?? 0), 0);
+      const allocated = agg._sum.qty ?? 0;
+      const remaining = totalYield - allocated;
+
+      await this.audit.record(
+        {
+          action: 'order.packout',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.create',
+          summary:
+            `Packout specified on batch order #${id}: packaging order #${created.id} for ` +
+            `${dto.makeQty} × ${opt.packagedProduct?.itemCode ?? binding.packagedProductId} ` +
+            `(recipe ${recipeRef.recipeNumber ?? recipeRef.id}), ${supplied} bulk allocated` +
+            (remaining < 0 ? ` — OVER-ALLOCATED by ${-remaining}` : ''),
+          changes: [
+            { tableName: 'OrdDetailCommit', recordId: String(commitId), fieldName: 'OrdDetail', oldValue: null, newValue: String(bulkLine.id) },
+            { tableName: 'OrdDetailCommit', recordId: String(commitId), fieldName: 'SrcOrdDetail', oldValue: null, newValue: String(srcPk.id) },
+            { tableName: 'OrdDetailCommit', recordId: String(commitId), fieldName: 'Qty', oldValue: null, newValue: String(supplied) },
+          ],
+        },
+        tx,
+      );
+
+      return {
+        orderId: created.id,
+        lot: created.lot,
+        commitId,
+        makeQty: dto.makeQty,
+        suppliedQty: supplied,
+        bulkRequired,
+        totals: { yield: totalYield, allocated, remaining },
+        overAllocated: remaining < 0,
+      };
+    });
   }
 
   // --- lifecycle (mutating; RBAC + atomic audit) ---------------------------
@@ -1992,7 +2515,11 @@ export class OrdersService {
   private async lockAndRequireStatus(tx: Prisma.TransactionClient, orderId: number, status: string) {
     await this.lockOrdr(tx, orderId);
     const ord = await tx.ordr.findUnique({ where: { id: orderId }, select: { status: true } });
-    if (curStatus(ord?.status ?? null) !== status) {
+    // Explicit absence check: curStatus(null) reads as 'NST', so a row deleted
+    // mid-flight (import sync propagating a legacy delete) would otherwise
+    // PASS an 'NST' requirement instead of failing it.
+    if (!ord) throw new NotFoundException(`Order #${orderId} not found.`);
+    if (curStatus(ord.status ?? null) !== status) {
       throw new BadRequestException(`Order #${orderId} is no longer ${STATUS_LABEL[status] ?? status}.`);
     }
   }

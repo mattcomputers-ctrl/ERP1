@@ -140,8 +140,9 @@ describe('full import (run) — watermark foundation', () => {
     fake.setTable('dbo.Item', ITEM_COLS, [itemRow(1, 'A')]);
 
     await importer(fake).run('tester');
-    // The 39 fetchAll calls advanced maxLog well past 1000 — the watermark
-    // must be the PRE-copy capture so those overlapping ops get re-synced.
+    // The per-table fetchAll calls advanced maxLog well past 1000 — the
+    // watermark must be the PRE-copy capture so those overlapping ops get
+    // re-synced.
     expect(await watermark()).toBe('1000');
     expect(fake.maxLog).toBeGreaterThan(1000);
   });
@@ -152,6 +153,32 @@ describe('full import (run) — watermark foundation', () => {
     fake.setTable('dbo.Item', ITEM_COLS, [itemRow(1, 'A')]);
     await importer(fake).run('tester', ['Item']);
     expect(await watermark()).toBeNull();
+  });
+
+  it('mirrors ItemPackagedProduct (packout bindings) and syncs a touched binding', async () => {
+    const IPP_COLS = ['ItemPackagedProduct', 'Item', 'PackagingPrototype', 'PackagedProduct', 'Recipe', 'Qty', 'Inactive', 'AltID', 'DateUpdated', 'Label', 'UPC'];
+    const ippRow = (id: number, recipe: number | null, inactive = false) => ({
+      ItemPackagedProduct: id, Item: 11, PackagingPrototype: 12, PackagedProduct: 13,
+      Recipe: recipe, Qty: 1, Inactive: inactive, AltID: 1, DateUpdated: null, Label: null, UPC: null,
+    });
+    const fake = new FakeLegacy();
+    fake.maxLog = 1000;
+    fake.setTable('dbo.ItemPackagedProduct', IPP_COLS, [ippRow(45, 1129)]);
+    const imp = importer(fake);
+    await imp.run('tester');
+
+    const mirrored = await prisma.itemPackagedProduct.findUnique({ where: { id: 45 } });
+    expect(mirrored).toMatchObject({
+      itemId: 11, packagingPrototypeId: 12, packagedProductId: 13, recipeId: 1129, qty: 1, inactive: false, altId: 1,
+    });
+
+    // Legacy re-points the binding at a new recipe revision — the log walk
+    // picks it up (LogResult keys these rows by their PK, verified live).
+    fake.maxLog = 1010;
+    fake.setTable('dbo.ItemPackagedProduct', IPP_COLS, [ippRow(45, 2000)]);
+    fake.touches = [{ log: 1005, tableName: 'ItemPackagedProduct', fieldName: 'ItemPackagedProduct', fieldValue: '45' }];
+    await imp.sync('tester');
+    expect((await prisma.itemPackagedProduct.findUnique({ where: { id: 45 } }))!.recipeId).toBe(2000);
   });
 
   it('never overwrites an ERP1-native row, even when the source claims its id', async () => {

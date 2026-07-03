@@ -299,6 +299,15 @@ export function Orders() {
             lifeState(detail.data.status) !== 'NST' && (
               <VariancePanel key={`var-${detail.data.id}`} orderId={detail.data.id} />
             )}
+          {(detail.data.context === 'MFBA' || detail.data.context === 'MFPP') && (
+            <PackoutsPanel
+              key={`pko-${detail.data.id}`}
+              orderId={detail.data.id}
+              status={lifeState(detail.data.status)}
+              onDone={refresh}
+              onOpen={(oid) => setSelected(oid)}
+            />
+          )}
           {detail.data.context === 'MFBA' && (
             <>
               <ConsumeLots orderId={detail.data.id} onDone={refresh} />
@@ -385,6 +394,15 @@ function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
       api.get<{ rows: RecipeOption[] }>(`/orders/recipe-options?q=${encodeURIComponent(search)}`),
     enabled: !picked && search.trim().length >= 1,
   });
+  // 7.22-style packaging lookup: the same search also surfaces packaged
+  // products (ItemPackagedProduct bindings by bulk/packout item code) — picking
+  // one selects its packaging recipe.
+  const packoutMatches = useQuery({
+    queryKey: ['packout-options', search],
+    queryFn: () =>
+      api.get<{ rows: PackoutOptionRow[] }>(`/orders/packout-options?q=${encodeURIComponent(search)}`),
+    enabled: !picked && search.trim().length >= 2,
+  });
 
   const m = useMutation({
     mutationFn: () =>
@@ -432,9 +450,12 @@ function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
         {!picked && search.trim().length >= 1 && (
           <div className="max-h-48 overflow-y-auto rounded-md border border-slate-200">
             {recipes.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
-            {!recipes.isLoading && recipes.data?.rows.length === 0 && (
-              <div className="px-3 py-2 text-sm text-slate-400">No published production recipes match.</div>
-            )}
+            {!recipes.isLoading &&
+              !packoutMatches.isLoading &&
+              recipes.data?.rows.length === 0 &&
+              (packoutMatches.data?.rows.length ?? 0) === 0 && (
+                <div className="px-3 py-2 text-sm text-slate-400">No published production recipes or packaged products match.</div>
+              )}
             {recipes.data?.rows.map((r) => (
               <button
                 type="button"
@@ -446,6 +467,40 @@ function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
                 <span className="text-xs text-slate-400">{recipeKind(r.context)}</span>
               </button>
             ))}
+            {(packoutMatches.data?.rows.length ?? 0) > 0 && (
+              <>
+                <div className="border-t border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-500">
+                  Packaged products
+                </div>
+                {packoutMatches.data!.rows.map((o) => {
+                  const usable = o.orderable && o.recipe;
+                  return (
+                    <button
+                      type="button"
+                      key={`pko-${o.id}`}
+                      disabled={!usable}
+                      title={usable ? undefined : o.reason ?? undefined}
+                      onClick={() =>
+                        usable && setPicked({ id: o.recipe!.id, recipeNumber: o.recipe!.recipeNumber, context: 'RMPP' })
+                      }
+                      className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-sm ${
+                        usable ? 'hover:bg-slate-50' : 'cursor-not-allowed text-slate-400'
+                      }`}
+                    >
+                      <span>
+                        {o.packagedProduct?.itemCode ?? `#${o.id}`}
+                        <span className="ml-2 text-xs text-slate-400">
+                          {o.bulkItem?.itemCode ? `packs out ${o.bulkItem.itemCode}` : ''}
+                          {o.prototype?.itemCode ? ` · ${o.prototype.itemCode}` : ''}
+                          {usable ? '' : ' — unavailable'}
+                        </span>
+                      </span>
+                      <span className="text-xs text-slate-400">Packaging</span>
+                    </button>
+                  );
+                })}
+              </>
+            )}
           </div>
         )}
 
@@ -455,6 +510,269 @@ function CreateOrder({ onDone }: { onDone: (newId: number) => void }) {
           <span className="text-xs text-slate-400">Quantities scale by batch size; batch orders also pull QC specs from the product&apos;s tests.</span>
         </div>
       </form>
+    </Card>
+  );
+}
+
+// UG §6.4 "Specifying what to Packout": a batch order's demand picture — the
+// packaging orders already allocated to its bulk (via OrdDetailCommit), the
+// yield totals, and the product's packout options (ItemPackagedProduct) with a
+// create-new-requirement form. On a packaging order the same panel shows the
+// supply side: which batch order(s) feed its bulk.
+type ItemRef = { id: number; itemCode: string | null; description: string | null; unit?: string | null };
+type PackoutOptionRow = {
+  id: number;
+  bulkItem: ItemRef | null;
+  packagedProduct: ItemRef | null;
+  prototype: ItemRef | null;
+  qty: number;
+  boundRecipe: { id: number; recipeNumber: string | null; active: boolean } | null;
+  recipe: { id: number; recipeNumber: string | null } | null;
+  bulkPerUnit: number | null;
+  orderable: boolean;
+  reason: string | null;
+  canMake?: number | null;
+};
+type PackoutsModel =
+  | {
+      kind: 'MFBA';
+      product: ItemRef | null;
+      totals: { yield: number; allocated: number; remaining: number };
+      demand: {
+        commitId: number; qty: number | null; orderId: number | null; orderContext: string | null;
+        orderStatus: string | null; dateRequired: string | null; lot: string | null; product: ItemRef | null;
+      }[];
+      options: PackoutOptionRow[];
+    }
+  | {
+      kind: 'MFPP';
+      supply: {
+        commitId: number; qty: number | null; batchOrderId: number | null;
+        batchStatus: string | null; batchLot: string | null; item: ItemRef | null;
+      }[];
+    };
+type PackoutResult = {
+  orderId: number; lot: string | null; suppliedQty: number;
+  totals: { yield: number; allocated: number; remaining: number };
+  overAllocated: boolean;
+};
+
+const fmtN = (v: number | null | undefined) =>
+  v == null ? '' : Number.isInteger(v) ? String(v) : v.toFixed(3).replace(/\.?0+$/, '');
+
+function PackoutsPanel({ orderId, status, onDone, onOpen }: {
+  orderId: number; status: string; onDone: () => void; onOpen: (id: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const qc = useQueryClient();
+  const model = useQuery({
+    queryKey: ['order-packouts', orderId],
+    queryFn: () => api.get<PackoutsModel>(`/orders/${orderId}/packouts`),
+    enabled: open,
+  });
+  const [optionId, setOptionId] = useState('');
+  const [makeQty, setMakeQty] = useState('');
+  const [suppliedQty, setSuppliedQty] = useState('');
+  const [result, setResult] = useState<PackoutResult | null>(null);
+  const m = useMutation({
+    mutationFn: () =>
+      api.post<PackoutResult>(`/orders/${orderId}/packouts`, {
+        itemPackagedProductId: Number(optionId),
+        makeQty: Number(makeQty),
+        suppliedQty: suppliedQty ? Number(suppliedQty) : undefined,
+      }),
+    onSuccess: (r) => {
+      setResult(r);
+      setMakeQty('');
+      setSuppliedQty('');
+      qc.invalidateQueries({ queryKey: ['order-packouts', orderId] });
+      onDone();
+    },
+  });
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mb-4 mr-4 text-sm font-medium text-indigo-600 hover:underline">
+        Packouts
+      </button>
+    );
+  }
+  const d = model.data;
+  const editable = status === 'NST' || status === 'RLS';
+  const picked = d?.kind === 'MFBA' ? d.options.find((o) => String(o.id) === optionId) : undefined;
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-medium text-slate-700">
+          Packouts
+          <span className="ml-2 font-normal text-slate-400">
+            {d?.kind === 'MFPP' ? '— bulk supplied by' : '— how this batch is packaged out'}
+          </span>
+        </div>
+        <button type="button" onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+      </div>
+      {model.isLoading && <div className="text-sm text-slate-400">Loading…</div>}
+      {model.isError && <div className="text-sm text-red-600">{(model.error as Error).message}</div>}
+
+      {d?.kind === 'MFPP' && (
+        d.supply.length === 0 ? (
+          <div className="text-sm text-slate-400">No batch-order supply is allocated to this packaging order.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="border-b border-slate-200 bg-slate-50 text-left text-slate-500">
+              <tr>
+                <th className="px-3 py-2 font-medium">Batch order</th>
+                <th className="px-3 py-2 font-medium">Status</th>
+                <th className="px-3 py-2 font-medium">Bulk item</th>
+                <th className="px-3 py-2 font-medium">Batch lot</th>
+                <th className="px-3 py-2 font-medium text-right">Bulk allocated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.supply.map((s) => (
+                <tr key={s.commitId} className="border-b border-slate-100 last:border-0">
+                  <td className="px-3 py-1.5">
+                    {s.batchOrderId != null ? (
+                      <button type="button" onClick={() => onOpen(s.batchOrderId!)} className="text-indigo-600 hover:underline">
+                        #{s.batchOrderId}
+                      </button>
+                    ) : ''}
+                  </td>
+                  <td className="px-3 py-1.5">{STATUS_LABEL[lifeState(s.batchStatus)] ?? s.batchStatus}</td>
+                  <td className="px-3 py-1.5">{s.item?.itemCode}</td>
+                  <td className="px-3 py-1.5">{s.batchLot}</td>
+                  <td className="px-3 py-1.5 text-right">{fmtN(s.qty)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )
+      )}
+
+      {d?.kind === 'MFBA' && (
+        <>
+          <div className="mb-3 text-sm text-slate-600">
+            Total yield <span className="font-medium">{fmtN(d.totals.yield)}</span>
+            <span className="mx-1 text-slate-300">·</span>
+            allocated <span className="font-medium">{fmtN(d.totals.allocated)}</span>
+            <span className="mx-1 text-slate-300">·</span>
+            remaining{' '}
+            <span className={`font-medium ${d.totals.remaining < 0 ? 'text-amber-700' : ''}`}>{fmtN(d.totals.remaining)}</span>
+            {d.totals.remaining < 0 && (
+              <span className="ml-2 rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">
+                Over-allocated — packing out more than this batch makes
+              </span>
+            )}
+          </div>
+
+          {d.demand.length > 0 ? (
+            <table className="mb-3 w-full text-sm">
+              <thead className="border-b border-slate-200 bg-slate-50 text-left text-slate-500">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Order</th>
+                  <th className="px-3 py-2 font-medium">Type</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 font-medium">Packout</th>
+                  <th className="px-3 py-2 font-medium">Lot</th>
+                  <th className="px-3 py-2 font-medium text-right">Bulk allocated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.demand.map((r) => (
+                  <tr key={r.commitId} className="border-b border-slate-100 last:border-0">
+                    <td className="px-3 py-1.5">
+                      {r.orderId != null ? (
+                        <button type="button" onClick={() => onOpen(r.orderId!)} className="text-indigo-600 hover:underline">
+                          #{r.orderId}
+                        </button>
+                      ) : ''}
+                    </td>
+                    <td className="px-3 py-1.5">{typeLabel(r.orderContext)}</td>
+                    <td className="px-3 py-1.5">{STATUS_LABEL[lifeState(r.orderStatus)] ?? r.orderStatus}</td>
+                    <td className="px-3 py-1.5">
+                      {r.product?.itemCode}
+                      {r.product?.description && <span className="ml-1 text-slate-400">{r.product.description}</span>}
+                    </td>
+                    <td className="px-3 py-1.5">{r.lot}</td>
+                    <td className="px-3 py-1.5 text-right">{fmtN(r.qty)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="mb-3 text-sm text-slate-400">No packaging demand is allocated to this batch yet.</div>
+          )}
+
+          {editable && (
+            d.options.length === 0 ? (
+              <div className="text-sm text-slate-400">
+                No packout options are defined for {d.product?.itemCode ?? 'this product'} (Item Update → Packaged Products).
+              </div>
+            ) : (
+              <form
+                className="rounded-md bg-slate-50 px-3 py-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (optionId && makeQty && Number(makeQty) > 0) m.mutate();
+                }}
+              >
+                <div className="mb-1 text-sm font-medium text-slate-700">New packout requirement</div>
+                <div className="flex flex-wrap items-end gap-3">
+                  <Field label="Packout">
+                    <select
+                      value={optionId}
+                      onChange={(e) => setOptionId(e.target.value)}
+                      className="rounded-md border border-slate-300 px-2 py-1.5 text-sm"
+                    >
+                      <option value="">Choose…</option>
+                      {d.options.map((o) => (
+                        <option key={o.id} value={o.id} disabled={!o.orderable} title={o.reason ?? undefined}>
+                          {o.packagedProduct?.itemCode ?? `#${o.id}`}
+                          {o.prototype?.itemCode ? ` (${o.prototype.itemCode})` : ''}
+                          {o.orderable ? '' : ' — unavailable'}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Make qty">
+                    <Input type="number" min="0" step="any" value={makeQty} onChange={(e) => setMakeQty(e.target.value)} className="w-28" />
+                  </Field>
+                  <Field label="Bulk to supply (optional)">
+                    <Input type="number" min="0" step="any" value={suppliedQty} onChange={(e) => setSuppliedQty(e.target.value)} className="w-32" placeholder="full requirement" />
+                  </Field>
+                  <Button type="submit" disabled={!optionId || !makeQty || Number(makeQty) <= 0 || m.isPending}>
+                    {m.isPending ? 'Creating…' : 'Create packaging order'}
+                  </Button>
+                </div>
+                {picked && (
+                  <div className="mt-1 text-xs text-slate-500">
+                    Recipe {picked.recipe?.recipeNumber ?? ''}
+                    {picked.bulkPerUnit != null && <> · bulk per unit {fmtN(picked.bulkPerUnit)}</>}
+                    {picked.canMake != null && <> · can make ≈ {fmtN(picked.canMake)} from the remaining yield</>}
+                    {makeQty && picked.bulkPerUnit != null && Number(makeQty) > 0 && (
+                      <> · bulk required {fmtN(picked.bulkPerUnit * Number(makeQty))}</>
+                    )}
+                  </div>
+                )}
+                {m.isError && <div className="mt-1 text-sm text-red-600">{(m.error as Error).message}</div>}
+              </form>
+            )
+          )}
+          {!editable && (
+            <div className="text-xs text-slate-400">Demand is editable until the batch is completed.</div>
+          )}
+          {result && (
+            <div className="mt-2 text-sm text-emerald-700">
+              Packaging order{' '}
+              <button type="button" onClick={() => onOpen(result.orderId)} className="font-medium text-indigo-600 hover:underline">
+                #{result.orderId}
+              </button>{' '}
+              created{result.lot ? ` (lot ${result.lot})` : ''} — {fmtN(result.suppliedQty)} bulk allocated
+              {result.overAllocated && <span className="ml-1 text-amber-700">(over-allocated)</span>}.
+            </div>
+          )}
+        </>
+      )}
     </Card>
   );
 }

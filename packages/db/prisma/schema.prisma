@@ -981,6 +981,31 @@ model ItemTest {
   @@map("ItemTest")
 }
 
+// Packout binding (mirrors legacy): bulk item + packaging prototype (container
+// format) -> the packaged-product item and the RMPP recipe that packs it.
+// Drives UG §6.4 "specify packouts" on batch orders and the 7.22-style
+// packaging-order product lookup. In this install every row's recipe points at
+// the packout's active revision (the legacy tool rewrote the binding on
+// republish; ERP1 instead resolves the active revision at read time), Qty is
+// always 1.0 and Label/UPC are unused.
+model ItemPackagedProduct {
+  id                   Int       @id @default(autoincrement()) @map("ItemPackagedProduct")
+  itemId               Int       @map("Item")
+  packagingPrototypeId Int       @map("PackagingPrototype")
+  packagedProductId    Int       @map("PackagedProduct")
+  recipeId             Int?      @map("Recipe")
+  qty                  Float     @map("Qty")
+  inactive             Boolean?  @map("Inactive")
+  altId                Int?      @map("AltID")
+  dateUpdated          DateTime? @map("DateUpdated")
+  labelId              Int?      @map("Label")
+  upc                  String?   @map("UPC") @db.VarChar(20)
+
+  @@index([itemId])
+  @@index([packagedProductId])
+  @@map("ItemPackagedProduct")
+}
+
 // Commitment link (mirrors legacy): ties a consumption line (OrdDetail, the
 // "use ingredient" UI line) to the source production line it drew from
 // (SrcOrdDetail, a "PK" packaged-product line). Resolved through Lot.OrdDetail

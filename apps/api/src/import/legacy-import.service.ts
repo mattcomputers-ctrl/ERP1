@@ -249,6 +249,17 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    // Packout bindings (bulk item + prototype -> packaged product + RMPP
+    // recipe) — after Recipe/Item so a same-sync new recipe lands first.
+    name: 'ItemPackagedProduct', legacyTable: 'dbo.ItemPackagedProduct', delegate: 'itemPackagedProduct', idColumn: 'ItemPackagedProduct',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.ItemPackagedProduct, itemId: r.Item, packagingPrototypeId: r.PackagingPrototype,
+      packagedProductId: r.PackagedProduct, recipeId: r.Recipe, qty: r.Qty, inactive: b(r.Inactive),
+      altId: r.AltID, dateUpdated: r.DateUpdated, labelId: r.Label, upc: r.UPC,
+    }),
+  },
+  {
     name: 'Ordr', legacyTable: 'dbo.Ordr', delegate: 'ordr', idColumn: 'Ordr',
     where: (d) => ({ id: d.id }),
     map: (r) => ({

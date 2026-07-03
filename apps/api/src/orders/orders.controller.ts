@@ -14,6 +14,7 @@ import { RecordLineDto } from './dto/record-line.dto';
 import { RejectEditApprovalDto } from './dto/edit-approval.dto';
 import { ReverseOrderDto } from './dto/reverse-order.dto';
 import { ShipLotsDto } from './dto/ship-lots.dto';
+import { SpecifyPackoutDto } from './dto/specify-packout.dto';
 import { OrdersService, type OrdersListQuery } from './orders.service';
 
 @UseGuards(SessionAuthGuard, ProgramGuard)
@@ -57,6 +58,19 @@ export class OrdersController {
     return this.orders.consumeItemOptions(q);
   }
 
+  // Packout options (ItemPackagedProduct bindings): the packaging-order
+  // product lookup (?q=) and a bulk item's packaging options (?itemId=).
+  // Gated by orders.create like the recipe picker — it drives order creation.
+  @Get('packout-options')
+  @RequireProgram('orders.create')
+  packoutOptions(@Query('itemId') itemId?: string, @Query('q') q?: string) {
+    const parsed = itemId != null && itemId !== '' ? Number(itemId) : undefined;
+    return this.orders.packoutOptions({
+      itemId: parsed != null && Number.isInteger(parsed) ? parsed : undefined,
+      q,
+    });
+  }
+
   // E-signature requirements for completing an order (drives the complete form).
   @Get('complete-requirement')
   @RequireProgram('orders.complete')
@@ -86,6 +100,21 @@ export class OrdersController {
   @Get(':id/batch-sheet')
   batchSheet(@Param('id', ParseIntPipe) id: number) {
     return this.orders.batchSheet(id);
+  }
+
+  // The packout/demand picture of a production order (UG §6.4): demand table +
+  // yield totals + packout options (MFBA), or the bulk-supply links (MFPP).
+  @Get(':id/packouts')
+  packouts(@Param('id', ParseIntPipe) id: number) {
+    return this.orders.packouts(id);
+  }
+
+  // Specify a packout (UG §6.4 New Requirements): create a packaging order for
+  // the chosen packout and allocate this batch's bulk to it, atomically.
+  @Post(':id/packouts')
+  @RequireProgram('orders.create')
+  specifyPackout(@Param('id', ParseIntPipe) id: number, @Body() dto: SpecifyPackoutDto, @CurrentUser() actor: Actor) {
+    return this.orders.specifyPackout(id, dto, actor);
   }
 
   // Edit a not-yet-released order (rescale to a new batch size / header fields).

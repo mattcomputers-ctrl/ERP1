@@ -328,3 +328,61 @@ aggregated), 2026-07-02.
    expected legacy-vs-mirror deficit (their legacy rows are deliberately not
    mirrored) — read Inventory drift with that in mind during parallel
    running.
+
+## Packouts — specify-what-to-packout + packaging lookup (§5/§6, built 2026-07-03)
+
+Discovery (live DB + UG §6.4/§8.1 + 7.22 release notes):
+`ItemPackagedProduct` (7,136 rows) binds bulk item + packaging prototype
+(container format: 33 distinct, codes like `50`/`3G`/`41`) → the packaged
+product item (`<bulk>-<container>` codes, unique per row) + the RMPP recipe
+that packs it. Every live row: `Qty` = 1.0, `Label`/`UPC` null, `Inactive` 0,
+and the recipe pointer is the packout's ACTIVE revision (the legacy tool
+rewrote bindings on republish). Demand allocation is `OrdDetailCommit`:
+all 27,866 live rows are exactly {demand = an MFPP order's bulk UI line,
+supply = an MFBA order's PK line, qty = the demand line's full bulk
+requirement}. `Ordr.Parent` is never used; MFPK (packout via packaging
+recipe without a packaged product) does not occur in this install.
+
+1. **Mirror**: `ItemPackagedProduct` mirrored verbatim + imported (full +
+   incremental — it IS a logged table, LogResult keys it by PK). Native rows
+   are protected by the standard id-range guard.
+2. **Recipe resolution is read-time, not write-time.** ERP1's recipe publish
+   does NOT rewrite bindings (legacy's tool did). `packoutOptions` offers the
+   bound recipe while it is still active-published; otherwise it resolves the
+   active published RMPP revision whose PK line makes the same packaged
+   product (single-active makes it unique; ties break to newest). A packout
+   with no active recipe is listed but not orderable (with the reason).
+3. **Specify packout** (`POST /orders/:id/packouts`, program `orders.create`)
+   = create the MFPP order from the resolved recipe at `makeQty` (the shared
+   create engine: scaled lines, minted lot, audit) + a native-id
+   `OrdDetailCommit` linking its bulk UI line ← this batch's PK line, in ONE
+   transaction (batch row lock first, then the id-allocation advisory lock —
+   the global order). `suppliedQty` (vendor's editable Supplied Qty) defaults
+   to the full bulk requirement and may not exceed it.
+4. **Demand is editable until completion** (vendor: "at any time prior to
+   marking it complete"): allowed on NST and RLS batches, refused after.
+   Works on imported batches too (the commit row is native-id, sync-safe).
+5. **Over-allocation warns, never blocks** — the vendor's negative Remaining
+   Yield ("you are planning to packout more than you are going to make!").
+   Totals use `ActualBatchSize` (planned until completion) as Total Yield.
+6. **The packout demand table on the batch** lists OrdDetailCommit rows
+   against its PK line (packaging order, status, packout product, allocated
+   bulk); the MFPP side shows the inverse supply view. SH-order demand rows
+   (vendor Existing Demand includes shipping) don't occur in the live data
+   and are deferred with §10 supply/demand.
+7. **7.22 product lookup**: the create-order search also surfaces packout
+   bindings by bulk/packout item code; picking one orders the resolved
+   active packaging recipe (matches the 7.22 fix: only items with an active
+   packaging recipe / Packaged Products entry are offered).
+8. **Review hardening (multi-agent, 2026-07-03)**: totals + the audited
+   over-allocation verdict are computed from IN-TX re-reads under the row
+   lock (a concurrent NST order edit rescales ActualBatchSize/PK lines under
+   the same lock — pre-tx snapshots would record a wrong verdict in the
+   immutable audit chain); an absent order row inside the tx throws (the
+   `curStatus(null)`='NST' default would otherwise let a sync-deleted batch
+   pass an NST gate — same guard added to `lockAndRequireStatus`);
+   specifyPackout enriches ITS binding directly (never through the capped
+   option list); a recipe splitting the bulk item across multiple UI lines
+   is explicitly non-orderable; a bound recipe that is not an active
+   published RMPP recipe (incl. wrong context) falls through to
+   active-revision resolution; binding ids are validated to the int4 domain.
