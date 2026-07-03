@@ -129,6 +129,7 @@ export function Recipes() {
   const [sort, setSort] = useState('recipeNumber:asc');
   const [selected, setSelected] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
+  const [replacing, setReplacing] = useState(false);
 
   const params = new URLSearchParams({ page: String(page), pageSize: '25', sort });
   if (q) params.set('q', q);
@@ -175,9 +176,14 @@ export function Recipes() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-slate-900">Recipes</h1>
-        <Button onClick={() => { setCreating((v) => !v); setSelected(null); }}>
-          {creating ? 'Close' : 'New recipe'}
-        </Button>
+        <div className="flex gap-2">
+          <Button onClick={() => { setReplacing((v) => !v); setCreating(false); }}>
+            {replacing ? 'Close replacement' : 'Replace ingredient'}
+          </Button>
+          <Button onClick={() => { setCreating((v) => !v); setReplacing(false); setSelected(null); }}>
+            {creating ? 'Close' : 'New recipe'}
+          </Button>
+        </div>
       </div>
 
       {creating && (
@@ -189,6 +195,8 @@ export function Recipes() {
           }}
         />
       )}
+
+      {replacing && <ReplacementPanel onChanged={() => void qc.invalidateQueries({ queryKey: ['recipes'] })} />}
 
       <DataGrid
         columns={columns}
@@ -835,6 +843,189 @@ function PublishDialog({ id, recipeNumber, onDone, onCancel }: {
         {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
       </div>
     </div>
+  );
+}
+
+// --- ingredient replacement (the legacy Recipe Replacement tool) ------------
+
+interface ReplacementPreviewRow {
+  recipeId: number;
+  recipeNumber: string | null;
+  context: string | null;
+  comment: string | null;
+  productCode: string | null;
+  qtyPerUnit: number;
+}
+interface ReplacementResultRow {
+  recipeId: number;
+  recipeNumber: string | null;
+  newRecipeId: number | null;
+  newRecipeNumber: string | null;
+  published: boolean;
+  replacedLines: number;
+  error: string | null;
+}
+
+function ReplacementPanel({ onChanged }: { onChanged: () => void }) {
+  const [from, setFrom] = useState<ItemOpt | null>(null);
+  const [to, setTo] = useState<ItemOpt | null>(null);
+  const [checked, setChecked] = useState<Set<number>>(new Set());
+  const [description, setDescription] = useState('');
+  const [publish, setPublish] = useState(true);
+  const [password, setPassword] = useState('');
+  const [results, setResults] = useState<ReplacementResultRow[] | null>(null);
+
+  const preview = useQuery({
+    queryKey: ['replacement-preview', from?.id],
+    queryFn: () => api.get<{ rows: ReplacementPreviewRow[] }>(`/recipes/replacement/preview?fromItemId=${from!.id}`),
+    enabled: from != null,
+  });
+  useEffect(() => {
+    // Default the selection to every affected recipe when the preview loads.
+    if (preview.data) setChecked(new Set(preview.data.rows.map((r) => r.recipeId)));
+  }, [preview.data]);
+
+  const run = useMutation({
+    mutationFn: () =>
+      api.post<{ results: ReplacementResultRow[] }>('/recipes/replacement', {
+        fromItemId: from!.id,
+        toItemId: to!.id,
+        recipeIds: [...checked],
+        ...(description.trim() ? { description: description.trim() } : {}),
+        publish,
+        ...(password ? { password } : {}),
+      }),
+    onSuccess: (r) => {
+      setResults(r.results);
+      onChanged();
+    },
+  });
+
+  const toggle = (id: number) =>
+    setChecked((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  return (
+    <Card>
+      <h2 className="mb-1 font-medium">Replace an ingredient across recipes</h2>
+      <p className="mb-3 text-xs text-slate-500">
+        For each selected active recipe this creates the next
+        <span className="mx-1 font-mono">.NN</span>revision with the ingredient swapped (same quantities)
+        {publish ? ' and publishes it, deactivating the old revision.' : ' as a DRAFT for review.'}
+      </p>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <Field label="Replace (from)">
+          {from ? (
+            <div className="flex items-center gap-2 text-sm">
+              <span className="rounded bg-indigo-50 px-2 py-1 font-medium text-indigo-700">{from.itemCode}</span>
+              <button type="button" onClick={() => { setFrom(null); setResults(null); }} className="text-slate-500 hover:text-slate-800">change</button>
+            </div>
+          ) : (
+            <ItemPicker onPick={(i) => { setFrom(i); setResults(null); }} />
+          )}
+        </Field>
+        <Field label="With (to)">
+          {to ? (
+            <div className="flex items-center gap-2 text-sm">
+              <span className="rounded bg-green-50 px-2 py-1 font-medium text-green-700">{to.itemCode}</span>
+              <button type="button" onClick={() => setTo(null)} className="text-slate-500 hover:text-slate-800">change</button>
+            </div>
+          ) : (
+            <ItemPicker onPick={setTo} />
+          )}
+        </Field>
+        <Field label="Revision note (job description)">
+          <Input value={description} onChange={(e) => setDescription(e.target.value)} maxLength={500} placeholder="e.g. VEC4724 to VEC4748" />
+        </Field>
+      </div>
+
+      {from && preview.data && (
+        <div className="mt-3">
+          <div className="mb-1 text-sm text-slate-600">
+            {preview.data.rows.length} active recipe{preview.data.rows.length === 1 ? '' : 's'} use{preview.data.rows.length === 1 ? 's' : ''} {from.itemCode} — {checked.size} selected
+          </div>
+          <div className="max-h-64 overflow-y-auto rounded-md border border-slate-200">
+            <table className="w-full text-sm">
+              <tbody>
+                {preview.data.rows.map((r) => (
+                  <tr key={r.recipeId} className="border-b border-slate-100 last:border-0">
+                    <td className="w-8 px-2 py-1.5">
+                      <input type="checkbox" checked={checked.has(r.recipeId)} onChange={() => toggle(r.recipeId)} />
+                    </td>
+                    <td className="px-2 py-1.5 font-medium">{r.recipeNumber}</td>
+                    <td className="px-2 py-1.5 text-slate-500">{typeName(r.context)}</td>
+                    <td className="px-2 py-1.5">{r.productCode}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-slate-500">{qty3(r.qtyPerUnit * 100)} / 100 lb</td>
+                  </tr>
+                ))}
+                {!preview.data.rows.length && (
+                  <tr><td className="px-3 py-2 text-slate-400">No active recipes use this ingredient.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-sm text-slate-700">
+          <input type="checkbox" checked={publish} onChange={(e) => setPublish(e.target.checked)} />
+          Publish the new revisions immediately
+        </label>
+        {publish && (
+          <Input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Password (if e-signature required)"
+            className="w-64"
+            autoComplete="current-password"
+          />
+        )}
+        <Button
+          onClick={() => run.mutate()}
+          disabled={!from || !to || !checked.size || run.isPending}
+        >
+          {run.isPending ? 'Running…' : `Replace in ${checked.size} recipe${checked.size === 1 ? '' : 's'}`}
+        </Button>
+        {run.isError && <span className="text-sm text-red-600">{(run.error as Error).message}</span>}
+      </div>
+
+      {results && (
+        <div className="mt-3 overflow-x-auto rounded-md border border-slate-200">
+          <table className="w-full text-sm">
+            <thead className="border-b border-slate-200 bg-slate-50 text-left text-slate-500">
+              <tr>
+                <th className="px-3 py-2 font-medium">Recipe</th>
+                <th className="px-3 py-2 font-medium">New revision</th>
+                <th className="px-3 py-2 font-medium">Lines</th>
+                <th className="px-3 py-2 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {results.map((r) => (
+                <tr key={r.recipeId} className="border-b border-slate-100 last:border-0">
+                  <td className="px-3 py-2 font-medium">{r.recipeNumber}</td>
+                  <td className="px-3 py-2">{r.newRecipeNumber ?? '—'}</td>
+                  <td className="px-3 py-2 tabular-nums">{r.replacedLines || ''}</td>
+                  <td className="px-3 py-2">
+                    {r.error
+                      ? <span className="text-red-600">{r.error}</span>
+                      : r.published
+                        ? <span className="text-green-700">Published</span>
+                        : <span className="text-slate-600">Draft created</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 

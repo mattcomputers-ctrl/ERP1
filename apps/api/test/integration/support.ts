@@ -13,6 +13,7 @@ import { InventoryService } from '../../src/inventory/inventory.service';
 import { MiscReceiptService } from '../../src/inventory/misc-receipt.service';
 import { ValuationService } from '../../src/inventory/valuation.service';
 import { RecipeEditorService } from '../../src/manufacturing/recipe-editor.service';
+import { RecipeReplacementService } from '../../src/manufacturing/recipe-replacement.service';
 import { RecipesService } from '../../src/manufacturing/recipes.service';
 import { OrdersService } from '../../src/orders/orders.service';
 import type { PrismaService } from '../../src/prisma/prisma.service';
@@ -84,6 +85,7 @@ export function services(prisma: PrismaClient) {
   const salesPricing = new SalesPricingService(p, audit, party);
   const approvalPolicy = new ApprovalPolicyService(p, audit);
   const approvalRequests = new ApprovalRequestService(p);
+  const recipeEditor = new RecipeEditorService(p, audit, esign, auth, permissions);
   return {
     settings,
     audit,
@@ -105,7 +107,8 @@ export function services(prisma: PrismaClient) {
     securedItems: new SecuredItemsService(p, audit),
     itemTests: new ItemTestsService(p, audit),
     recipes: new RecipesService(p, settings),
-    recipeEditor: new RecipeEditorService(p, audit, esign, auth, permissions),
+    recipeEditor,
+    recipeReplacement: new RecipeReplacementService(p, audit, recipeEditor),
   };
 }
 

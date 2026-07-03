@@ -24,6 +24,5 @@ default was chosen and recorded in ASSUMPTIONS.md).
   recipes using ingredient X, clone+replace with Y, republish).
 
 ## Platform
-- **install.sh** still references the docker-compose hostname `db:5432` —
-  the native-Ubuntu installer path needs a verification pass against the
-  brief's deployment spec.
+- (none currently — the native installer is validated in a container;
+  a real Proxmox-VM install pass is still worth doing before cutover)

@@ -9,7 +9,9 @@ import {
   CloneRecipeDto, CreateRecipeDto, PublishRecipeDto, SaveProcedureDto,
   SetRecipeActiveDto, UpdateRecipeHeaderDto,
 } from './dto/recipe-editor.dto';
+import { RunReplacementDto } from './dto/recipe-replacement.dto';
 import { RecipeEditorService } from './recipe-editor.service';
+import { RecipeReplacementService } from './recipe-replacement.service';
 import { RecipesService } from './recipes.service';
 
 @UseGuards(SessionAuthGuard, ProgramGuard)
@@ -19,6 +21,7 @@ export class RecipesController {
   constructor(
     private readonly recipes: RecipesService,
     private readonly editor: RecipeEditorService,
+    private readonly replacement: RecipeReplacementService,
   ) {}
 
   @Get()
@@ -31,6 +34,22 @@ export class RecipesController {
   @RequireProgram('recipe.editor')
   itemOptions(@Query('q') q?: string) {
     return this.recipes.itemOptions(q);
+  }
+
+  // --- ingredient replacement (the legacy Recipe Replacement tool) ---------
+
+  /** Active published recipes an ingredient replacement would touch. */
+  @Get('replacement/preview')
+  @RequireProgram('recipe.editor')
+  replacementPreview(@Query('fromItemId', ParseIntPipe) fromItemId: number) {
+    return this.replacement.preview(fromItemId);
+  }
+
+  /** Run a replacement job: per selected recipe, clone → swap → (publish). */
+  @Post('replacement')
+  @RequireProgram('recipe.editor')
+  runReplacement(@Body() dto: RunReplacementDto, @CurrentUser() actor: Actor) {
+    return this.replacement.run(dto, actor);
   }
 
   @Get(':id')
