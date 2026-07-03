@@ -10,6 +10,7 @@ import { PermissionService } from '../../src/auth/permission.service';
 import { GenealogyService } from '../../src/genealogy/genealogy.service';
 import { ItemTestsService } from '../../src/qa/item-tests.service';
 import { InventoryService } from '../../src/inventory/inventory.service';
+import { LotTrackingService } from '../../src/lot-tracking/lot-tracking.service';
 import { MiscReceiptService } from '../../src/inventory/misc-receipt.service';
 import { ValuationService } from '../../src/inventory/valuation.service';
 import { RecipeEditorService } from '../../src/manufacturing/recipe-editor.service';
@@ -101,6 +102,7 @@ export function services(prisma: PrismaClient) {
     shipping: new ShippingService(p, audit, party, salesPricing, approvalPolicy, approvalRequests),
     genealogy: new GenealogyService(p, party),
     inventory: new InventoryService(p, audit),
+    lotTracking: new LotTrackingService(p, audit),
     miscReceipt: new MiscReceiptService(p, audit, valuation),
     approvalPolicy,
     releases: new ReleasesService(p, audit, esign, auth, permissions, approvalPolicy, approvalRequests),

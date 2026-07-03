@@ -295,6 +295,31 @@ describe('incremental sync', () => {
     expect(lot!.itemId).toBeNull(); // NOT overwritten with legacy item 77
   });
 
+  it('never mirrors Inventory rows of a lot-tracked item (enablement made ERP1 the on-hand of record)', async () => {
+    const fake = new FakeLegacy();
+    fake.maxLog = 1000;
+    const INV_COLS = ['Inventory', 'Sublot', 'Location', 'OrdDetail', 'Item', 'Status', 'Qty'];
+    fake.setTable('dbo.Inventory', INV_COLS, [
+      { Inventory: 900, Sublot: null, Location: 1, OrdDetail: null, Item: 1, Status: null, Qty: 5 }, // untracked item
+      { Inventory: 901, Sublot: null, Location: 1, OrdDetail: null, Item: 2, Status: null, Qty: 7 }, // TRACKED item
+    ]);
+    await prisma.item.create({ data: { id: 1, itemCode: 'UNTRACKED', lotTracked: false } });
+    await prisma.item.create({ data: { id: 2, itemCode: 'TRACKED', lotTracked: true } });
+    const imp = importer(fake);
+
+    // Full import: the tracked item's legacy stock must NOT come back (it
+    // would resurrect the on-hand the enablement wipe replaced).
+    await imp.run('tester');
+    expect(await prisma.inventory.findUnique({ where: { id: 900 } })).not.toBeNull();
+    expect(await prisma.inventory.findUnique({ where: { id: 901 } })).toBeNull();
+
+    // And the sync's proxy-gated Inventory re-copy honors the same rule.
+    fake.maxLog = 1010;
+    fake.touches = [{ tableName: 'InvMovement', fieldName: 'InvMovement', fieldValue: '9', log: 1005 }];
+    await imp.sync('tester');
+    expect(await prisma.inventory.findUnique({ where: { id: 901 } })).toBeNull();
+  });
+
   it('resolves the AddressRef alias and composite keys; skips unmirrored tables', async () => {
     const fake = new FakeLegacy();
     fake.maxLog = 1000;

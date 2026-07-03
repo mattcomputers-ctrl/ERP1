@@ -491,18 +491,22 @@ export class LegacyImportService {
 
   /**
    * Chunked idempotent upsert of legacy rows through a table spec, with the
-   * native-row guard: a mirror row ERP1 itself created must never be
+   * native/owned-row guard: mirror state ERP1 itself owns must never be
    * overwritten by legacy data. Rows whose numeric key lands in the native
    * range are dropped outright (legacy ids never reach it — such a row is
    * bogus or a collision); Lot rows whose mirror row belongs to a native
    * production order (ordDetailId >= NATIVE_ID_BASE) are dropped too — the
    * plant's YYMMDD### lot numbering is shared between legacy and ERP1, so a
-   * same-day lot code CAN collide during parallel running.
+   * same-day lot code CAN collide during parallel running. And Inventory
+   * rows for a lot-TRACKED item are dropped wholesale: enabling lot tracking
+   * wipes the item's legacy on-hand and makes ERP1 the on-hand of record, so
+   * mirroring legacy's rows back would resurrect the wiped stock on the next
+   * sync/import (found by adversarial review of the lock-alignment change).
    */
   private async upsertRows(spec: TableSpec, rows: Record<string, any>[]) {
     let processed = 0;
     let rejected = 0;
-    let skippedNative = 0;
+    let skippedOwned = 0;
     const delegate = (this.prisma as unknown as Record<string, any>)[spec.delegate];
 
     // Native produced lots to protect (prefetched — the guard must not read
@@ -519,6 +523,13 @@ export class LegacyImportService {
         for (const l of found) nativeLots.add(l.lot);
       }
     }
+    // Items whose on-hand ERP1 owns (lot tracking enabled) — their legacy
+    // Inventory rows are never mirrored.
+    let trackedItems: Set<number> | null = null;
+    if (spec.name === 'Inventory' && rows.length) {
+      const tracked = await this.prisma.item.findMany({ where: { lotTracked: true }, select: { id: true } });
+      trackedItems = new Set(tracked.map((i) => i.id));
+    }
     const numericKey = spec.idColumn ? 'id' : NATURAL_NUMERIC_KEY[spec.name];
 
     const CONCURRENCY = 16;
@@ -527,11 +538,15 @@ export class LegacyImportService {
       const guarded = chunk.filter((row) => {
         const data = spec.map(row);
         if (numericKey != null && Number(data[numericKey]) >= NATIVE_ID_BASE) {
-          skippedNative++;
+          skippedOwned++;
           return false;
         }
         if (nativeLots?.has(row.Lot)) {
-          skippedNative++;
+          skippedOwned++;
+          return false;
+        }
+        if (trackedItems?.size && trackedItems.has(Number(row.Item))) {
+          skippedOwned++;
           return false;
         }
         return true;
@@ -551,10 +566,10 @@ export class LegacyImportService {
         }
       }
     }
-    if (skippedNative > 0) {
-      this.logger.warn(`${spec.name}: ${skippedNative} source row(s) skipped — they would overwrite ERP1-native rows`);
+    if (skippedOwned > 0) {
+      this.logger.warn(`${spec.name}: ${skippedOwned} source row(s) skipped — they would overwrite ERP1-owned state`);
     }
-    return { processed, rejected, skippedNative };
+    return { processed, rejected, skippedOwned };
   }
 
   private async getWatermark(): Promise<number | null> {

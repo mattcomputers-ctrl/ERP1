@@ -122,8 +122,23 @@ export class LotTrackingService {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
 
       // Wipe the item's prior (legacy / non-lot) on-hand; the entered lots become
-      // the on-hand of record.
-      await tx.inventory.deleteMany({ where: { itemId } });
+      // the on-hand of record. The parcels are locked FIRST in one ascending-id
+      // scan — the system-wide parcel lock order (see ValuationService.
+      // depleteSpecificMany): a bare DELETE acquires its row locks in plan
+      // order and could invert against a concurrent depleter's ascending scan
+      // over the same item. New parcels can't appear between the scan and the
+      // delete — every IN-APP parcel creator serializes on the advisory lock
+      // held above, and the legacy import skips Inventory rows of lot-tracked
+      // items entirely (ERP1 owns their on-hand from this moment — see
+      // legacy-import upsertRows).
+      const parcels = await tx.$queryRaw<{ id: number }[]>`
+        SELECT "Inventory" AS id FROM "Inventory"
+        WHERE "Item" = ${itemId}
+        ORDER BY "Inventory" ASC
+        FOR UPDATE`;
+      if (parcels.length) {
+        await tx.inventory.deleteMany({ where: { id: { in: parcels.map((p) => p.id) } } });
+      }
 
       let subId =
         (await tx.sublot.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ??

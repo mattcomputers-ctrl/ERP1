@@ -1,7 +1,7 @@
 import type { PrismaClient } from '@erp1/db';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Actor } from '../../src/auth/current-user.decorator';
-import { addInventory, addItem, addLocation, addLot, addSublot, makePrisma, onHandForLot, resetDb, seedActor, services } from './support';
+import { addInventory, addItem, addLocation, addLot, addSublot, makePrisma, onHandForLot, resetDb, seedActor, services, valuationService } from './support';
 
 // Flow integration test: native inventory TRANSFER (§3 move). Moves a quantity of
 // an on-hand parcel to another location — deducts the source, merges into / mints
@@ -106,5 +106,27 @@ describe('InventoryService.transfer', () => {
     const { actor, invId, toLoc } = await setup(10);
     await expect(inventory.transfer({ inventoryId: 999999, toLocationId: toLoc, qty: 1 }, actor)).rejects.toThrow(/parcel not found/i);
     await expect(inventory.transfer({ inventoryId: invId, toLocationId: 888888, qty: 1 }, actor)).rejects.toThrow(/location not found/i);
+  });
+
+  it('a transfer racing a depletion of the same stock loses neither update (locked ascending scan)', async () => {
+    // The transfer reads its quantities from the same single ascending-id
+    // FOR UPDATE scan the depleters use — whatever the commit order, both
+    // movements must land: 100 - 30 (moved, conserved) - 50 (depleted) and
+    // the source ends at exactly 20 in EITHER interleaving. Before the fix
+    // the transfer's unlocked read-modify-write could silently overwrite the
+    // concurrent depletion (and its two-row lock order could deadlock
+    // against an ascending scan).
+    const { inventory } = services(prisma);
+    const v = valuationService(prisma);
+    const { actor, invId, toLoc } = await setup(100);
+
+    const [, depletion] = await Promise.all([
+      inventory.transfer({ inventoryId: invId, toLocationId: toLoc, qty: 30 }, actor),
+      prisma.$transaction((tx) => v.depleteSpecific(tx, 'L1', 50)),
+    ]);
+    expect(depletion.depleted).toBe(50);
+    expect(depletion.shortfall).toBe(0);
+    expect((await prisma.inventory.findUnique({ where: { id: invId } }))!.qty).toBe(20);
+    expect(await onHandForLot(prisma, 'L1')).toBe(50); // 100 - 50 depleted; the moved 30 conserved
   });
 });

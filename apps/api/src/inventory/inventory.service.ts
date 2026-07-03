@@ -129,24 +129,44 @@ export class InventoryService {
 
     return this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
-      const cur = await tx.inventory.findUnique({ where: { id: src.id }, select: { qty: true } });
-      if (!cur) throw new NotFoundException('Inventory parcel not found');
-      const sourceQty = cur.qty ?? 0;
+
+      // Identify the destination merge candidate BEFORE locking: a same-item +
+      // same-lot + same-STATUS parcel at the destination (status is part of
+      // the match so released stock never silently coalesces into a hold/
+      // quarantine parcel, or vice-versa). Parcel identity keys never change
+      // and every IN-APP parcel creator serializes on the advisory lock held
+      // above, so the candidate set is stable; only QUANTITIES move
+      // concurrently, and those are read from the locked scan below. (The
+      // legacy-import mirror writer is the one exception — the qtyById guard
+      // below degrades that race to minting a separate parcel, exactly the
+      // pre-alignment behavior.)
+      const existing = await tx.inventory.findFirst({
+        where: { itemId: src.itemId, sublotId: src.sublotId, locationId: dto.toLocationId, status: src.status },
+        select: { id: true },
+      });
+
+      // ONE ascending-id locked scan over every parcel this transfer touches —
+      // the system-wide lock order (see ValuationService.depleteSpecificMany).
+      // Depleters don't take the advisory lock, so this both prevents a
+      // source-then-destination lock inversion against their single ascending
+      // scans AND makes the quantity reads race-free (the previous unlocked
+      // read-modify-write could overwrite a concurrent depletion).
+      const ids = existing ? [src.id, existing.id] : [src.id];
+      const locked = await tx.$queryRaw<{ id: number; qty: number | null }[]>`
+        SELECT "Inventory" AS id, "Qty" AS qty FROM "Inventory"
+        WHERE "Inventory" = ANY(${ids})
+        ORDER BY "Inventory" ASC
+        FOR UPDATE`;
+      const qtyById = new Map(locked.map((r) => [r.id, r.qty ?? 0]));
+      if (!qtyById.has(src.id)) throw new NotFoundException('Inventory parcel not found');
+      const sourceQty = qtyById.get(src.id)!;
       if (dto.qty > sourceQty) throw new BadRequestException(`Cannot transfer ${dto.qty} — only ${sourceQty} on hand.`);
 
       await tx.inventory.update({ where: { id: src.id }, data: { qty: sourceQty - dto.qty } });
 
-      // Merge into an existing same-item + same-lot + same-STATUS parcel at the
-      // destination, else mint a new one (native id) carrying the source status.
-      // Status is part of the match so released stock never silently coalesces
-      // into a hold/quarantine parcel (or vice-versa).
-      const existing = await tx.inventory.findFirst({
-        where: { itemId: src.itemId, sublotId: src.sublotId, locationId: dto.toLocationId, status: src.status },
-        select: { id: true, qty: true },
-      });
       let targetInventoryId: number;
-      if (existing) {
-        await tx.inventory.update({ where: { id: existing.id }, data: { qty: (existing.qty ?? 0) + dto.qty } });
+      if (existing && qtyById.has(existing.id)) {
+        await tx.inventory.update({ where: { id: existing.id }, data: { qty: qtyById.get(existing.id)! + dto.qty } });
         targetInventoryId = existing.id;
       } else {
         targetInventoryId = ((await tx.inventory.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;

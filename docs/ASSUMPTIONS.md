@@ -234,7 +234,15 @@ aggregated), 2026-07-02.
    40P01 deadlock between the reversal's single scan and the previous
    per-lot lexical-order depletion loops — two different total orders — so
    the loops were replaced with the single-scan batch forms; the lock order
-   and the FIFO draw order are independent concerns.)
+   and the FIFO draw order are independent concerns.) The two residual
+   spots that predated the convention are now aligned too (2026-07-03):
+   `InventoryService.transfer` locks its source + merge-destination parcels
+   in one ascending scan — which also fixed its unlocked read-modify-write,
+   where a concurrent depletion could be silently overwritten (depleters
+   don't take the advisory lock that serializes transfers) — and
+   lot-tracking enablement locks the parcels it wipes in one ascending scan
+   before its DELETE (a bare DELETE acquires row locks in plan order). Both
+   are pinned by race integration tests.
 
 ## Incremental import sync (§0, built 2026-07-03)
 
@@ -311,3 +319,12 @@ aggregated), 2026-07-02.
    exclusive in-process (single-node deployment) — a full import racing a
    scheduled sync could resurrect legacy-deleted rows from its stale
    snapshot.
+7. **Imports never mirror Inventory rows of a lot-TRACKED item.** Enabling
+   lot tracking wipes the item's legacy on-hand and makes ERP1 the on-hand
+   of record — a full import or the sync's Inventory re-copy would otherwise
+   resurrect the wiped legacy parcels on the next run (found by adversarial
+   review of the parcel lock-order alignment). Consequence for the
+   reconciliation report: once items are enabled, the Inventory row shows an
+   expected legacy-vs-mirror deficit (their legacy rows are deliberately not
+   mirrored) — read Inventory drift with that in mind during parallel
+   running.
