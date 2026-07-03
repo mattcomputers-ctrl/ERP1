@@ -2,12 +2,15 @@ import { Body, Controller, Get, Param, ParseIntPipe, Post, Query, UseGuards } fr
 import { CurrentUser, type Actor } from '../auth/current-user.decorator';
 import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
+import { AddExecutionLineDto } from './dto/add-execution-line.dto';
 import { CloseOrderDto } from './dto/close-order.dto';
 import { CompleteOrderDto } from './dto/complete-order.dto';
 import { ConsumeLotsDto } from './dto/consume-lots.dto';
 import { ConsumeQtyDto } from './dto/consume-qty.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { EditOrderDto } from './dto/edit-order.dto';
+import { IptResultsDto } from './dto/ipt-results.dto';
+import { RecordLineDto } from './dto/record-line.dto';
 import { RejectEditApprovalDto } from './dto/edit-approval.dto';
 import { ShipLotsDto } from './dto/ship-lots.dto';
 import { OrdersService, type OrdersListQuery } from './orders.service';
@@ -42,6 +45,14 @@ export class OrdersController {
   @Get('consume-item-options')
   @RequireProgram('orders.consume')
   consumeItemOptions(@Query('q') q?: string) {
+    return this.orders.consumeItemOptions(q);
+  }
+
+  // The same picker for the batch-addition form — gated by orders.execute so an
+  // execution operator doesn't also need the order-level consume program.
+  @Get('execution-item-options')
+  @RequireProgram('orders.execute')
+  executionItemOptions(@Query('q') q?: string) {
     return this.orders.consumeItemOptions(q);
   }
 
@@ -109,6 +120,53 @@ export class OrdersController {
   @RequireProgram('orders.close')
   close(@Param('id', ParseIntPipe) id: number, @Body() dto: CloseOrderDto, @CurrentUser() actor: Actor) {
     return this.orders.close(id, dto, actor);
+  }
+
+  // --- guided batch execution (dispense/weigh per line, batch additions, IPT) ---
+
+  // The execution panel: procedure lines with planned vs actual + per-line
+  // status, dispense lot options for traced items, and IPT tests + results.
+  @Get(':id/execution')
+  @RequireProgram('orders.execute')
+  execution(@Param('id', ParseIntPipe) id: number) {
+    return this.orders.execution(id);
+  }
+
+  // Record one line's execution: actual dispensed qty (+ lots when traced) on a
+  // material line, or a plain check-off on an instruction line.
+  @Post(':id/lines/:lineId/record')
+  @RequireProgram('orders.execute')
+  recordLine(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('lineId', ParseIntPipe) lineId: number,
+    @Body() dto: RecordLineDto,
+    @CurrentUser() actor: Actor,
+  ) {
+    return this.orders.recordLine(id, lineId, dto, actor);
+  }
+
+  // A batch addition: an ingredient added during execution beyond the recipe.
+  @Post(':id/execution/lines')
+  @RequireProgram('orders.execute')
+  addExecutionLine(@Param('id', ParseIntPipe) id: number, @Body() dto: AddExecutionLineDto, @CurrentUser() actor: Actor) {
+    return this.orders.addExecutionLine(id, dto, actor);
+  }
+
+  // Record in-process test results during execution (ERP1 extension — legacy
+  // results were handwritten on the paper ticket).
+  @Post(':id/ipt-results')
+  @RequireProgram('orders.execute')
+  recordIptResults(@Param('id', ParseIntPipe) id: number, @Body() dto: IptResultsDto, @CurrentUser() actor: Actor) {
+    return this.orders.recordIptResults(id, dto, actor);
+  }
+
+  // Material-variance report: planned vs actual per material line + yield.
+  // Own program (not the controller's orders.browser default): the report
+  // carries unit costs / purchase prices a browse-only user shouldn't see.
+  @Get(':id/variance')
+  @RequireProgram('orders.variance')
+  variance(@Param('id', ParseIntPipe) id: number) {
+    return this.orders.variance(id);
   }
 
   // Record the raw-material lots a batch consumed (lineage for recall).

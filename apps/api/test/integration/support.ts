@@ -276,7 +276,11 @@ export async function addOrder(
 
 export async function addOrdDetail(
   prisma: PrismaClient,
-  data: { id: number; ordrId: number; context: string; itemId?: number | null; qtyReqd?: number | null; price?: number | null; entityUnit?: string | null },
+  data: {
+    id: number; ordrId: number; context: string; itemId?: number | null; qtyReqd?: number | null;
+    price?: number | null; entityUnit?: string | null; execStatus?: string | null;
+    percentUnder?: number | null; percentOver?: number | null; description?: string | null;
+  },
 ): Promise<number> {
   await prisma.ordDetail.create({
     data: {
@@ -287,6 +291,27 @@ export async function addOrdDetail(
       qtyReqd: data.qtyReqd ?? null,
       price: data.price ?? null,
       entityUnit: data.entityUnit ?? null,
+      execStatus: data.execStatus ?? null,
+      percentUnder: data.percentUnder ?? null,
+      percentOver: data.percentOver ?? null,
+      description: data.description ?? null,
+    },
+  });
+  return data.id;
+}
+
+export async function addOrdDetailTest(
+  prisma: PrismaClient,
+  data: { id: number; ordDetailId: number; test: string; min?: number | null; max?: number | null; specification?: string | null },
+): Promise<number> {
+  await prisma.ordDetailTest.create({
+    data: {
+      id: data.id,
+      ordDetailId: data.ordDetailId,
+      test: data.test,
+      min: data.min ?? null,
+      max: data.max ?? null,
+      specification: data.specification ?? null,
     },
   });
   return data.id;

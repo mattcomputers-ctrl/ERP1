@@ -19,6 +19,9 @@ interface ProcedureLine {
 interface TestRow {
   test: string | null;
   specification: string;
+  // Recorded during guided execution (ERP1 extension); blank on the printed
+  // sheet when unrecorded, for hand-writing — exactly like the legacy ticket.
+  result?: string | null;
 }
 export interface BatchSheetModel {
   header: {
@@ -167,7 +170,7 @@ export function BatchSheetView({ data, toolbar, banner }: { data: BatchSheetMode
               <tr key={i}>
                 <Td className="font-medium uppercase">{t.test}</Td>
                 <Td>{t.specification}</Td>
-                <Td>&nbsp;</Td>
+                <Td>{t.result || ' '}</Td>
               </tr>
             ))
           )}

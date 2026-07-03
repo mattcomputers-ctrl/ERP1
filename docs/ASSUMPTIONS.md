@@ -89,3 +89,68 @@ Evidence base: live-DB sweep + User Guide ch.5 + release notes 7.16–7.22
    moment the editor creates drafts/revisions this becomes load-bearing).
 10. **RMPR recipes (36 rows) and the RMBAL library row are view-only** — not
     editable, not orderable, unexplained context; left as imported.
+
+## Guided batch execution (§5/§6, built 2026-07)
+
+Evidence base: live-DB sweep of executed MFBA orders (`OrdDetail` quantities /
+`ExecStatus`, order 189170 walked line-by-line, 27.6K completed orders
+aggregated), 2026-07-02.
+
+1. **Actuals live on the legacy columns.** On executed batches each material
+   (UI) line stores the planned quantity in `QtyReqd` and the operator's
+   actual in `QtyUsed` (they genuinely differ — e.g. 16 planned / 20 actual),
+   with per-line `ExecStatus` NST → CMP; `QtyEntered` is just a display string
+   ("16 lb"). ERP1's record-line endpoint writes exactly these columns. The
+   product (PK) line is stamped `ExecStatus='STD'` at completion and the
+   actual yield lives on `Ordr.ActualBatchSize` (PK `QtyUsed` is usually NULL
+   in legacy), which ERP1 mirrors.
+2. **The executed lifecycle ends at CMP.** 27,591 of 27,745 MFBA orders sit at
+   Status `CMP`; the 83 `CLS` orders have *all* lines NST — Closed was an
+   administrative cancel of never-executed orders, not a post-completion
+   state. ERP1 keeps its NST→RLS→CMP→CLS lifecycle but treats per-line
+   execution as an RLS-only activity. The one-row `BAT` status (mid-execution)
+   is not adopted — a released order is simply executable.
+3. **Batch additions are appended at actuals.** Legacy added extra UI lines to
+   released orders with `QtyReqd = QtyUsed = StdQty =` the actual quantity
+   added, at the end of the procedure. ERP1's batch-addition endpoint mirrors
+   that shape (native id ≥ 1e9, next Line/ExecOrder), born already-executed.
+4. **In-process test RESULTS are an ERP1 extension.** `OrdDetailTest` has no
+   result column anywhere in the legacy schema — IPT results were handwritten
+   on the paper ticket (electronic results exist only at release level via
+   LIMS `LocationSampleTest`). ERP1 adds native `erp1_result/erp1_passed/
+   erp1_result_by/erp1_result_at` columns; pass/fail is computed against the
+   line's own Min/Max (same semantics as LIMS result entry); recording is
+   allowed while Released or Completed (QC writes up results after close-out);
+   the batch sheet prints recorded results and stays blank for hand-writing
+   otherwise. Recall/CofA continue to read the release-level LIMS results.
+5. **Per-line lot capture is the forward-lineage extension.** Legacy never
+   recorded WHICH raw lots a batch consumed (OrdDetailCommit is packaging-only
+   in this install). Recording a lot-traced line requires the specific lots
+   (summing to the actual); they deplete on-hand, write consumption genealogy
+   edges, and re-roll the produced lot's real cost — the same engine as the
+   order-level consume-lots, now per line. Not-traced items deplete FIFO.
+6. **Tolerances warn, never block.** `PercentUnder/PercentOver` are unset on
+   the live recipe lines; where present ERP1 computes the bounds and returns a
+   warning with the recorded actual (the plant records what actually
+   happened). Re-recording a recorded line is refused — corrections go through
+   the audited inventory adjust, preserving the as-executed record.
+7. **Material variance = QtyUsed vs QtyReqd, costed at real consumed cost.**
+   The variance report prices each line at the weighted unit cost of what the
+   order actually consumed (its consumption genealogy edges), falling back to
+   `Item.PurchasePrice`; yield = ActualBatchSize vs PK QtyReqd, reported only
+   once the order is Completed/Closed (ActualBatchSize is seeded with the
+   PLANNED size at creation, so before completion there is no actual). The
+   report exposes unit costs, so it is gated by its own `orders.variance`
+   program rather than the browse program. Legacy's InventoryUsed/
+   InventoryCost graph is a costing artifact, not mirrored — ERP1's valuation
+   engine owns costing.
+8. **Concurrent stock movement serializes on locked parcel reads.** The
+   valuation depleters read Inventory parcels `SELECT … FOR UPDATE` in
+   ascending-id order (multi-agent review finding: the prior plain reads were
+   a lost-update race once two operators could dispense the same lot from two
+   orders at once), dispensed lots are consumed in sorted order (no lock-order
+   deadlocks), the order-level consume endpoints take the same Ordr row lock
+   as the per-line writers (cost roll-ups never race on partial edge sets),
+   and completion re-rolls each produced lot's per-unit cost at the ACTUAL
+   yield (during execution the divisor is necessarily the planned size).
+   Proven by a concurrent-dispense integration test (conservation of stock).

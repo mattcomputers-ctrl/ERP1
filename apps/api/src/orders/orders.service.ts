@@ -13,13 +13,16 @@ import { ValuationService } from '../inventory/valuation.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
-import { fgLotPrefix, formatSpec } from './order-format';
+import { computePassed, fgLotPrefix, formatSpec, toleranceWarning } from './order-format';
+import type { AddExecutionLineDto } from './dto/add-execution-line.dto';
 import type { CompleteOrderDto } from './dto/complete-order.dto';
 import type { CloseOrderDto } from './dto/close-order.dto';
 import type { ConsumeLotsDto } from './dto/consume-lots.dto';
 import type { ConsumeQtyDto } from './dto/consume-qty.dto';
 import type { CreateOrderDto } from './dto/create-order.dto';
 import type { EditOrderDto } from './dto/edit-order.dto';
+import type { IptResultsDto } from './dto/ipt-results.dto';
+import type { RecordLineDto } from './dto/record-line.dto';
 import type { ShipLotsDto } from './dto/ship-lots.dto';
 
 const LB_TO_GRAMS = 453.59237;
@@ -194,7 +197,7 @@ export class OrdersService {
       this.prisma.ordDetailTest.findMany({
         where: { ordDetailId: { in: lineIds } },
         orderBy: [{ line: 'asc' }, { id: 'asc' }],
-        select: { test: true, min: true, max: true, target: true, specification: true },
+        select: { test: true, min: true, max: true, target: true, specification: true, result: true },
       }),
     ]);
     const itemById = new Map(items.map((i) => [i.id, i]));
@@ -274,7 +277,7 @@ export class OrdersService {
         customer: order.entityId != null ? (entities.get(order.entityId) ?? null) : null,
       },
       procedure,
-      tests: tests.map((t) => ({ test: t.test, specification: formatSpec(t.min, t.max, t.specification) })),
+      tests: tests.map((t) => ({ test: t.test, specification: formatSpec(t.min, t.max, t.specification), result: t.result })),
     };
   }
 
@@ -898,6 +901,28 @@ export class OrdersService {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       const minted = await this.mintProducedLots(tx, order, effectiveBatch);
 
+      // Legacy convention on executed production orders: the product (PK) line
+      // is stamped ExecStatus='STD' at completion (the actual yield itself lives
+      // on Ordr.ActualBatchSize, not the line).
+      if (order.context === 'MFBA' || order.context === 'MFPP') {
+        await tx.ordDetail.updateMany({ where: { ordrId: id, context: 'PK' }, data: { execStatus: 'STD' } });
+        // The actual yield is now known — re-roll each produced lot's per-unit
+        // cost at the effective batch size. During execution the divisor was
+        // ActualBatchSize as seeded at creation (the PLANNED size), so a yield
+        // differing from plan would otherwise leave the cost mis-divided while
+        // the on-hand minted above uses the actual quantity.
+        const pks = await tx.ordDetail.findMany({
+          where: { ordrId: id, context: 'PK' },
+          select: { id: true, qtyReqd: true },
+        });
+        for (const pk of pks) {
+          const lotRow = await tx.lot.findFirst({ where: { ordDetailId: pk.id }, select: { lot: true } });
+          if (!lotRow) continue;
+          const producedQty = order.context === 'MFBA' ? (effectiveBatch ?? pk.qtyReqd ?? 0) : (pk.qtyReqd ?? 0);
+          if (producedQty > 0) await this.valuation.rollUpProducedCost(tx, lotRow.lot, producedQty);
+        }
+      }
+
       const changes = [
         { tableName: 'Ordr', recordId: String(id), fieldName: 'Status', oldValue: order.status, newValue: 'CMP' },
         { tableName: 'Ordr', recordId: String(id), fieldName: 'DateCompleted', oldValue: null, newValue: at.toISOString() },
@@ -1038,20 +1063,7 @@ export class OrdersService {
     }
 
     // The produced lot (child) = the batch order's PK-line lot of record.
-    const pkLines = await this.prisma.ordDetail.findMany({
-      where: { ordrId: id, context: 'PK' },
-      select: { id: true, qtyReqd: true },
-    });
-    const producedLot = pkLines.length
-      ? await this.prisma.lot.findFirst({
-          where: { ordDetailId: { in: pkLines.map((l) => l.id) } },
-          select: { lot: true },
-        })
-      : null;
-    if (!producedLot) {
-      throw new BadRequestException(`Order #${id} has no produced lot yet — it must be created/released first.`);
-    }
-    const childLot = producedLot.lot;
+    const { childLot, pkLines } = await this.producedLotOf(id);
 
     const lotCodes = [...new Set(dto.lots.map((l) => l.lot.trim()))];
     const existing = await this.prisma.lot.findMany({ where: { lot: { in: lotCodes } }, select: { lot: true } });
@@ -1067,8 +1079,14 @@ export class OrdersService {
     const producedQty = order.actualBatchSize ?? pkLines[0]?.qtyReqd ?? 0;
 
     return this.prisma.$transaction(async (tx) => {
+      // Serialize with the per-line execution writers (and other consumes) on
+      // this order — without it, two concurrent cost roll-ups read partial edge
+      // sets and the last commit wins with a wrong produced-lot unitCost.
+      await this.lockOrdr(tx, id);
       const shortfalls: { lot: string; shortfall: number }[] = [];
-      for (const l of dto.lots) {
+      // Deterministic lot order (parcel row locks; see consumeLineTx).
+      const ordered = [...dto.lots].sort((a, b) => a.lot.trim().localeCompare(b.lot.trim()));
+      for (const l of ordered) {
         const lotCode = l.lot.trim();
         // Accumulate qty if the same input lot is recorded against this batch again.
         await tx.$executeRaw`
@@ -1125,17 +1143,7 @@ export class OrdersService {
       throw new BadRequestException('Only batch (MFBA) orders consume materials.');
     }
 
-    const pkLines = await this.prisma.ordDetail.findMany({
-      where: { ordrId: id, context: 'PK' },
-      select: { id: true, qtyReqd: true },
-    });
-    const producedLot = pkLines.length
-      ? await this.prisma.lot.findFirst({ where: { ordDetailId: { in: pkLines.map((l) => l.id) } }, select: { lot: true } })
-      : null;
-    if (!producedLot) {
-      throw new BadRequestException(`Order #${id} has no produced lot yet — it must be created/released first.`);
-    }
-    const childLot = producedLot.lot;
+    const { childLot, pkLines } = await this.producedLotOf(id);
 
     // Items must exist and be NOT lot-traced (FIFO is for not-traced items; a
     // lot-traced item's specific lots are recorded via consume-lots).
@@ -1157,6 +1165,8 @@ export class OrdersService {
     const producedQty = order.actualBatchSize ?? pkLines[0]?.qtyReqd ?? 0;
 
     return this.prisma.$transaction(async (tx) => {
+      // Serialize with the per-line execution writers on this order (see consumeLots).
+      await this.lockOrdr(tx, id);
       const results: { itemId: number; picks: { lot: string; qty: number }[]; shortfall: number }[] = [];
       for (const it of dto.items) {
         const { picks, shortfall } = await this.valuation.depleteFifo(tx, it.itemId, it.qty);
@@ -1418,6 +1428,687 @@ export class OrdersService {
   }
 
   /** Load an order and assert it is in the expected state for a transition. */
+  // --- guided batch execution (§5/§6) ---------------------------------------
+  //
+  // How the plant actually executed batches (proven against the live data):
+  // each material (UI) line carries the planned quantity in QtyReqd and the
+  // operator's ACTUAL dispensed quantity in QtyUsed, with a per-line ExecStatus
+  // NST -> CMP; extra "batch addition" UI lines were appended to released orders
+  // with the actual quantity added; the PK line is stamped ExecStatus='STD' and
+  // the actual yield lives on Ordr.ActualBatchSize. Legacy never recorded WHICH
+  // raw lots were dispensed — the per-line lot capture below is ERP1's
+  // forward-lineage extension (consistent with consume-lots).
+
+  /** Contexts of production orders that are executed line-by-line. */
+  private static readonly EXEC_CONTEXTS = new Set(['MFBA', 'MFPP']);
+
+  /**
+   * Resolve a production order's produced lot (the PK line's lot of record) —
+   * the genealogy child every consumption is recorded against and the lot whose
+   * unit cost the consumed inputs roll into — plus the PK lines themselves
+   * (their QtyReqd is the planned-batch fallback for the produced quantity).
+   */
+  private async producedLotOf(orderId: number) {
+    const pkLines = await this.prisma.ordDetail.findMany({
+      where: { ordrId: orderId, context: 'PK' },
+      select: { id: true, qtyReqd: true },
+    });
+    const producedLot = pkLines.length
+      ? await this.prisma.lot.findFirst({
+          where: { ordDetailId: { in: pkLines.map((l) => l.id) } },
+          select: { lot: true },
+        })
+      : null;
+    if (!producedLot) {
+      throw new BadRequestException(`Order #${orderId} has no produced lot yet — it must be created/released first.`);
+    }
+    return { childLot: producedLot.lot, pkLines };
+  }
+
+  /**
+   * Validate the dispensed lots for a lot-traced item: every lot must exist, be
+   * a lot OF that item, not be the batch's own produced lot, appear once, and
+   * their quantities must sum to the recorded actual.
+   */
+  private async validateDispenseLots(
+    item: { id: number; itemCode: string | null },
+    childLot: string,
+    actualQty: number,
+    lots: { lot: string; qty: number }[] | undefined,
+  ) {
+    if (!lots?.length) {
+      throw new BadRequestException(`Item ${item.itemCode ?? item.id} is lot-traced — specify the lot(s) dispensed.`);
+    }
+    const codes = lots.map((l) => l.lot.trim());
+    if (new Set(codes).size !== codes.length) throw new BadRequestException('The same lot is listed more than once.');
+    const rows = await this.prisma.lot.findMany({
+      where: { lot: { in: codes } },
+      select: { lot: true, itemId: true },
+    });
+    const byCode = new Map(rows.map((r) => [r.lot, r]));
+    for (const code of codes) {
+      const row = byCode.get(code);
+      if (!row) throw new BadRequestException(`Lot ${code} not found.`);
+      if (row.itemId !== item.id) {
+        throw new BadRequestException(`Lot ${code} is not a lot of item ${item.itemCode ?? item.id}.`);
+      }
+      if (code === childLot) throw new BadRequestException(`A batch can't consume its own produced lot ${childLot}.`);
+    }
+    const sum = lots.reduce((s, l) => s + l.qty, 0);
+    if (Math.abs(sum - actualQty) > 1e-6) {
+      throw new BadRequestException(`The dispensed lot quantities (${sum}) must sum to the actual quantity (${actualQty}).`);
+    }
+  }
+
+  /**
+   * Consume the material for one executed line, inside the caller's transaction:
+   * records consumed-lot -> produced-lot genealogy edges, depletes on-hand
+   * (specific lots for a traced item, FIFO oldest-first otherwise), and re-rolls
+   * the produced lot's unit cost from the full edge set. Shortfalls are
+   * recorded, not blocked — the plant records what it actually consumed.
+   */
+  private async consumeLineTx(
+    tx: Prisma.TransactionClient,
+    orderId: number,
+    childLot: string,
+    producedQty: number,
+    item: { id: number; itemCode: string | null; lotTracked: boolean | null },
+    qty: number,
+    lots: { lot: string; qty: number }[] | undefined,
+  ) {
+    const consumed: { lot: string; qty: number }[] = [];
+    const shortfalls: { lot: string; shortfall: number }[] = [];
+    if (item.lotTracked) {
+      // Deterministic lot order: concurrent dispensers that list the same lots
+      // in different orders would otherwise acquire the parcel row locks in
+      // opposite order and deadlock.
+      const ordered = [...(lots ?? [])].sort((a, b) => a.lot.trim().localeCompare(b.lot.trim()));
+      for (const l of ordered) {
+        const lotCode = l.lot.trim();
+        await tx.$executeRaw`
+          INSERT INTO lot_genealogy (child_lot, parent_lot, via_ordr, qty, source)
+          VALUES (${childLot}, ${lotCode}, ${orderId}, ${l.qty}, 'consumption')
+          ON CONFLICT (child_lot, parent_lot, via_ordr)
+          DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
+        const { shortfall } = await this.valuation.depleteSpecific(tx, lotCode, l.qty);
+        if (shortfall > 0) shortfalls.push({ lot: lotCode, shortfall });
+        consumed.push({ lot: lotCode, qty: l.qty });
+      }
+    } else {
+      const { picks, shortfall } = await this.valuation.depleteFifo(tx, item.id, qty);
+      for (const p of picks) {
+        if (p.lot === childLot) continue; // never self-edge the produced lot
+        await tx.$executeRaw`
+          INSERT INTO lot_genealogy (child_lot, parent_lot, via_ordr, qty, source)
+          VALUES (${childLot}, ${p.lot}, ${orderId}, ${p.qty}, 'consumption')
+          ON CONFLICT (child_lot, parent_lot, via_ordr)
+          DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
+        consumed.push(p);
+      }
+      if (shortfall > 0) shortfalls.push({ lot: item.itemCode ?? `item ${item.id}`, shortfall });
+    }
+    const unitCost = await this.valuation.rollUpProducedCost(tx, childLot, producedQty);
+    return { consumed, shortfalls, unitCost };
+  }
+
+  /**
+   * Lock the order's row (SELECT ... FOR UPDATE) inside a transaction — the
+   * serialization point for everything that mutates one order's execution/
+   * consumption state (record-line, batch additions, IPT results, and the
+   * order-level consume endpoints), and the same Ordr -> OrdDetail lock order
+   * as the line editors, so no deadlock between them.
+   */
+  private async lockOrdr(tx: Prisma.TransactionClient, orderId: number) {
+    await tx.$queryRaw`SELECT "Ordr" FROM "Ordr" WHERE "Ordr" = ${orderId} FOR UPDATE`;
+  }
+
+  /**
+   * Lock the order row and re-assert it is still a Released production order,
+   * INSIDE the transaction — so the RLS precondition and the execution writes
+   * are atomic.
+   */
+  private async lockAndRequireReleased(tx: Prisma.TransactionClient, orderId: number) {
+    await this.lockOrdr(tx, orderId);
+    const ord = await tx.ordr.findUnique({ where: { id: orderId }, select: { status: true } });
+    if (curStatus(ord?.status ?? null) !== 'RLS') {
+      throw new BadRequestException(`Order #${orderId} is no longer Released.`);
+    }
+  }
+
+  /**
+   * The guided-execution panel for a production order: every procedure line in
+   * execution sequence with its planned vs recorded-actual quantity and per-line
+   * status, the on-hand lots available to dispense for each lot-traced item (the
+   * dispense picker), and the in-process tests with any recorded results.
+   */
+  async execution(id: number) {
+    const order = await this.prisma.ordr.findUnique({
+      where: { id },
+      select: { id: true, context: true, status: true, actualBatchSize: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!OrdersService.EXEC_CONTEXTS.has(order.context ?? '')) {
+      throw new BadRequestException('Only production (MFBA/MFPP) orders are executed.');
+    }
+
+    const lines = await this.prisma.ordDetail.findMany({
+      where: { ordrId: id },
+      orderBy: [{ execOrder: 'asc' }, { sortOrder: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true, context: true, itemId: true, description: true, comment: true,
+        qtyReqd: true, qtyUsed: true, execStatus: true, entityUnit: true,
+        percentUnder: true, percentOver: true, line: true, execOrder: true,
+      },
+    });
+    const lineIds = lines.map((l) => l.id);
+    const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is number => v != null))];
+    const [items, tests] = await Promise.all([
+      this.prisma.item.findMany({
+        where: { id: { in: itemIds } },
+        select: { id: true, itemCode: true, description: true, unit: true, lotTracked: true },
+      }),
+      this.prisma.ordDetailTest.findMany({
+        where: { ordDetailId: { in: lineIds } },
+        orderBy: [{ line: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true, test: true, min: true, max: true, target: true, specification: true,
+          result: true, passed: true, resultBy: true, resultAt: true,
+        },
+      }),
+    ]);
+    const itemById = new Map(items.map((i) => [i.id, i]));
+
+    // On-hand lots per lot-traced item — the dispense picker. Excludes the
+    // batch's own produced lot (it can't consume itself).
+    const tracedIds = items.filter((i) => i.lotTracked).map((i) => i.id);
+    const lotsByItem = new Map<number, { lot: string; onHand: number }[]>();
+    if (tracedIds.length) {
+      const producedLot = await this.prisma.lot.findFirst({
+        where: { ordDetailId: { in: lines.filter((l) => l.context === 'PK').map((l) => l.id) } },
+        select: { lot: true },
+      });
+      const lotRows = await this.prisma.lot.findMany({
+        where: { itemId: { in: tracedIds }, ...(producedLot ? { lot: { not: producedLot.lot } } : {}) },
+        select: { lot: true, itemId: true },
+      });
+      const subs = await this.prisma.sublot.findMany({
+        where: { lot: { in: lotRows.map((l) => l.lot) } },
+        select: { id: true, lot: true },
+      });
+      const lotBySub = new Map(subs.map((s) => [s.id, s.lot]));
+      const inv = await this.prisma.inventory.groupBy({
+        by: ['sublotId'],
+        where: { sublotId: { in: subs.map((s) => s.id) }, qty: { gt: 0 } },
+        _sum: { qty: true },
+      });
+      const onHandByLot = new Map<string, number>();
+      for (const g of inv) {
+        const lot = g.sublotId != null ? lotBySub.get(g.sublotId) : undefined;
+        if (lot) onHandByLot.set(lot, (onHandByLot.get(lot) ?? 0) + (g._sum.qty ?? 0));
+      }
+      for (const l of lotRows) {
+        const onHand = onHandByLot.get(l.lot) ?? 0;
+        if (onHand <= 0 || l.itemId == null) continue;
+        const arr = lotsByItem.get(l.itemId) ?? [];
+        arr.push({ lot: l.lot, onHand });
+        lotsByItem.set(l.itemId, arr);
+      }
+      for (const arr of lotsByItem.values()) arr.sort((a, b) => a.lot.localeCompare(b.lot));
+    }
+
+    return {
+      orderId: id,
+      context: order.context,
+      status: order.status,
+      executable: curStatus(order.status) === 'RLS',
+      lines: lines
+        .filter((l) => ['UI', 'INSTR'].includes(l.context ?? ''))
+        .map((l) => {
+          const item = l.itemId != null ? itemById.get(l.itemId) : undefined;
+          return {
+            id: l.id,
+            kind: l.context === 'UI' ? 'material' : 'instruction',
+            line: l.line != null ? Number(l.line) : null,
+            itemId: l.itemId,
+            itemCode: item?.itemCode ?? null,
+            description: l.context === 'UI'
+              ? [item?.description ?? l.description, l.comment].filter(Boolean).join(' ')
+              : (l.description ?? l.comment ?? ''),
+            unit: l.entityUnit ?? item?.unit ?? null,
+            plannedQty: l.qtyReqd,
+            actualQty: l.qtyUsed,
+            recorded: l.execStatus === 'CMP',
+            lotTracked: item?.lotTracked ?? false,
+            lotOptions: l.itemId != null ? (lotsByItem.get(l.itemId) ?? []) : [],
+          };
+        }),
+      tests: tests.map((t) => ({
+        id: t.id,
+        test: t.test,
+        specification: formatSpec(t.min, t.max, t.specification),
+        target: t.target,
+        result: t.result,
+        passed: t.passed,
+        resultBy: t.resultBy,
+        resultAt: t.resultAt,
+      })),
+    };
+  }
+
+  /**
+   * Record execution of one line of a Released production order — the guided
+   * "dispense/weigh" step. A material (UI) line records the ACTUAL quantity
+   * dispensed (legacy QtyUsed; 0 = skipped) and consumes it: specific lots for a
+   * lot-traced item (forward lineage for recall), FIFO by quantity otherwise —
+   * depleting on-hand and re-rolling the produced lot's real cost. An
+   * instruction line is a plain check-off. Either way the line's ExecStatus
+   * flips NST -> CMP (re-record is refused — fix mistakes via inventory adjust).
+   * Tolerance (PercentUnder/Over) violations warn but never block. Atomic,
+   * hash-chain audited.
+   */
+  async recordLine(orderId: number, lineId: number, dto: RecordLineDto, actor: Actor) {
+    const order = await this.requireTransition(orderId, 'RLS', 'record execution on');
+    if (!OrdersService.EXEC_CONTEXTS.has(order.context ?? '')) {
+      throw new BadRequestException('Only production (MFBA/MFPP) orders are executed.');
+    }
+    const line = await this.prisma.ordDetail.findFirst({
+      where: { id: lineId, ordrId: orderId },
+      select: {
+        id: true, context: true, itemId: true, qtyReqd: true, execStatus: true,
+        percentUnder: true, percentOver: true, line: true,
+      },
+    });
+    if (!line) throw new NotFoundException('Order line not found');
+    if (line.execStatus === 'CMP') {
+      throw new BadRequestException('This line is already recorded — correct stock via an inventory adjust instead of re-recording.');
+    }
+    const isMaterial = line.context === 'UI';
+    if (!isMaterial && line.context !== 'INSTR') {
+      throw new BadRequestException(`Only material (UI) and instruction lines are recorded (this is a ${line.context} line).`);
+    }
+
+    const at = new Date();
+
+    // Instruction check-off: no quantities, no consumption.
+    if (!isMaterial) {
+      if (dto.actualQty !== undefined || dto.lots?.length) {
+        throw new BadRequestException('An instruction line takes no quantity or lots — it is a check-off.');
+      }
+      return this.prisma.$transaction(async (tx) => {
+        await this.lockAndRequireReleased(tx, orderId);
+        const cur = await tx.ordDetail.findUnique({ where: { id: lineId }, select: { execStatus: true } });
+        if (cur?.execStatus === 'CMP') throw new BadRequestException('This line is already recorded.');
+        await tx.ordDetail.update({ where: { id: lineId }, data: { execStatus: 'CMP', dateUpdated: at } });
+        await this.audit.record(
+          {
+            action: 'order.execution.record',
+            actorUserId: actor.id,
+            actorLabel: actor.label,
+            program: 'orders.execute',
+            summary: `Order #${orderId}: instruction line ${lineId} checked off${dto.reason ? ` — ${dto.reason}` : ''}`,
+            changes: [
+              { tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'ExecStatus', oldValue: line.execStatus, newValue: 'CMP' },
+            ],
+          },
+          tx,
+        );
+        return { orderId, lineId, recorded: true };
+      });
+    }
+
+    // Material line: actual quantity required (0 = skipped, consumes nothing).
+    if (dto.actualQty === undefined) throw new BadRequestException('actualQty is required for a material line.');
+    const actualQty = dto.actualQty;
+    if (line.itemId == null) throw new BadRequestException('This material line has no item.');
+    const item = await this.prisma.item.findUnique({
+      where: { id: line.itemId },
+      select: { id: true, itemCode: true, lotTracked: true },
+    });
+    if (!item) throw new BadRequestException(`Item ${line.itemId} not found.`);
+
+    const { childLot, pkLines } = await this.producedLotOf(orderId);
+    if (actualQty > 0 && item.lotTracked) {
+      await this.validateDispenseLots(item, childLot, actualQty, dto.lots);
+    } else if (dto.lots?.length) {
+      throw new BadRequestException(
+        actualQty === 0
+          ? 'A skipped line (actual 0) consumes nothing — omit lots.'
+          : `Item ${item.itemCode} is not lot-traced — it is consumed FIFO by quantity (omit lots).`,
+      );
+    }
+
+    const producedQty = order.actualBatchSize ?? pkLines[0]?.qtyReqd ?? 0;
+    const warning = toleranceWarning(actualQty, line.qtyReqd, line.percentUnder, line.percentOver);
+
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockAndRequireReleased(tx, orderId);
+      // Re-assert unrecorded under the order lock (two concurrent records of the
+      // same line — or a record racing another — must enact exactly once).
+      const cur = await tx.ordDetail.findUnique({ where: { id: lineId }, select: { execStatus: true } });
+      if (cur?.execStatus === 'CMP') throw new BadRequestException('This line is already recorded.');
+
+      const { consumed, shortfalls, unitCost } =
+        actualQty > 0
+          ? await this.consumeLineTx(tx, orderId, childLot, producedQty, item, actualQty, dto.lots)
+          : { consumed: [] as { lot: string; qty: number }[], shortfalls: [] as { lot: string; shortfall: number }[], unitCost: null };
+
+      await tx.ordDetail.update({
+        where: { id: lineId },
+        data: { qtyUsed: actualQty, execStatus: 'CMP', dateUpdated: at },
+      });
+
+      await this.audit.record(
+        {
+          action: 'order.execution.record',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.execute',
+          summary:
+            `Order #${orderId}: line ${lineId} (${item.itemCode}) recorded actual ${actualQty}` +
+            ` (planned ${line.qtyReqd ?? '—'})${warning ? ' — OUT OF TOLERANCE' : ''}` +
+            `${shortfalls.length ? `; ${shortfalls.length} short on-hand` : ''}${dto.reason ? ` — ${dto.reason}` : ''}`,
+          changes: [
+            { tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'QtyUsed', oldValue: null, newValue: String(actualQty) },
+            { tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'ExecStatus', oldValue: line.execStatus, newValue: 'CMP' },
+            ...consumed.map((c) => ({
+              tableName: 'lot_genealogy', recordId: childLot, fieldName: 'consumed',
+              oldValue: null, newValue: `${c.lot} (qty ${c.qty})`,
+            })),
+          ],
+        },
+        tx,
+      );
+      return { orderId, lineId, qtyUsed: actualQty, recorded: true, consumed, shortfalls, unitCost, toleranceWarning: warning };
+    });
+  }
+
+  /**
+   * A batch addition: append an ingredient that wasn't on the recipe to a
+   * Released production order, recorded already-executed with the actual
+   * quantity added (exactly what legacy did — extra UI lines with
+   * QtyReqd = QtyUsed = actual, StdQty = the actual, appended at the end of the
+   * procedure) and consumed immediately (lots / FIFO like recordLine). Native
+   * id under the shared allocation lock; atomic hash-chained audit.
+   */
+  async addExecutionLine(orderId: number, dto: AddExecutionLineDto, actor: Actor) {
+    const order = await this.requireTransition(orderId, 'RLS', 'add a batch addition to');
+    if (!OrdersService.EXEC_CONTEXTS.has(order.context ?? '')) {
+      throw new BadRequestException('Only production (MFBA/MFPP) orders take batch additions.');
+    }
+    const item = await this.prisma.item.findUnique({
+      where: { id: dto.itemId },
+      select: { id: true, itemCode: true, lotTracked: true },
+    });
+    if (!item) throw new BadRequestException(`Item ${dto.itemId} not found.`);
+    const { childLot, pkLines } = await this.producedLotOf(orderId);
+    if (item.lotTracked) {
+      await this.validateDispenseLots(item, childLot, dto.qty, dto.lots);
+    } else if (dto.lots?.length) {
+      throw new BadRequestException(`Item ${item.itemCode} is not lot-traced — it is consumed FIFO by quantity (omit lots).`);
+    }
+    const producedQty = order.actualBatchSize ?? pkLines[0]?.qtyReqd ?? 0;
+    const at = new Date();
+
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockAndRequireReleased(tx, orderId);
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const odId =
+        ((await tx.ordDetail.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+      const agg = await tx.ordDetail.aggregate({ _max: { line: true, execOrder: true }, where: { ordrId: orderId } });
+      const lineNo = Number(agg._max.line ?? 0) + 1;
+      const execOrder = (agg._max.execOrder ?? 0) + 1;
+
+      await tx.ordDetail.create({
+        data: {
+          id: odId,
+          ordrId: orderId,
+          context: 'UI',
+          itemId: item.id,
+          qtyReqd: dto.qty,
+          stdQty: dto.qty,
+          qtyUsed: dto.qty,
+          execStatus: 'CMP',
+          line: lineNo,
+          execOrder,
+          dateUpdated: at,
+        },
+      });
+      const { consumed, shortfalls, unitCost } = await this.consumeLineTx(
+        tx, orderId, childLot, producedQty, item, dto.qty, dto.lots,
+      );
+
+      await this.audit.record(
+        {
+          action: 'order.execution.addLine',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.execute',
+          summary:
+            `Order #${orderId}: batch addition ${item.itemCode} qty ${dto.qty} (line ${lineNo})` +
+            `${shortfalls.length ? `; ${shortfalls.length} short on-hand` : ''}${dto.reason ? ` — ${dto.reason}` : ''}`,
+          changes: [
+            { tableName: 'OrdDetail', recordId: String(odId), fieldName: 'created', oldValue: null, newValue: `UI ${item.itemCode} qty ${dto.qty}` },
+            ...consumed.map((c) => ({
+              tableName: 'lot_genealogy', recordId: childLot, fieldName: 'consumed',
+              oldValue: null, newValue: `${c.lot} (qty ${c.qty})`,
+            })),
+          ],
+        },
+        tx,
+      );
+      return { orderId, lineId: odId, line: lineNo, consumed, shortfalls, unitCost };
+    });
+  }
+
+  /**
+   * Record in-process test results during execution. Legacy stored NO result on
+   * the order line (results were handwritten on the paper ticket, then LIMS
+   * captured release-level results) — the erp1_* result columns are ERP1's
+   * native extension so the electronic ticket is complete. Pass/fail is
+   * computed against the line's own Min/Max spec (same semantics as LIMS
+   * result entry); a blank result clears. Allowed while Released or Completed
+   * (QC often writes up results right after the batch closes out).
+   */
+  async recordIptResults(orderId: number, dto: IptResultsDto, actor: Actor) {
+    const order = await this.prisma.ordr.findUnique({
+      where: { id: orderId },
+      select: { id: true, context: true, status: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.context !== 'MFBA') {
+      throw new BadRequestException('Only batch (MFBA) orders carry in-process tests.');
+    }
+    const st = curStatus(order.status);
+    if (st !== 'RLS' && st !== 'CMP') {
+      throw new BadRequestException(`Cannot record IPT results: order is ${label(order.status)} (must be Released or Completed).`);
+    }
+
+    const ids = [...new Set(dto.results.map((r) => r.testId))];
+    if (ids.length !== dto.results.length) throw new BadRequestException('The same test is listed more than once.');
+    const lineIds = (await this.prisma.ordDetail.findMany({ where: { ordrId: orderId }, select: { id: true } })).map((l) => l.id);
+    const rows = await this.prisma.ordDetailTest.findMany({
+      where: { id: { in: ids }, ordDetailId: { in: lineIds } },
+      select: { id: true, test: true, min: true, max: true, result: true },
+    });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    for (const r of dto.results) {
+      if (!byId.has(r.testId)) throw new BadRequestException(`Test ${r.testId} does not belong to order #${orderId}.`);
+    }
+
+    const at = new Date();
+    const resultBy = actor.label ?? actor.id;
+    return this.prisma.$transaction(async (tx) => {
+      // Re-assert the RLS/CMP gate under the order row lock — a concurrent
+      // close() must not race results onto a Closed order (and the audit
+      // oldValues below must reflect the locked state, not a stale pre-tx read).
+      await this.lockOrdr(tx, orderId);
+      const cur = await tx.ordr.findUnique({ where: { id: orderId }, select: { status: true } });
+      const curSt = curStatus(cur?.status ?? null);
+      if (curSt !== 'RLS' && curSt !== 'CMP') {
+        throw new BadRequestException(`Cannot record IPT results: order is ${label(cur?.status ?? null)} (must be Released or Completed).`);
+      }
+      const lockedRows = await tx.ordDetailTest.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, test: true, min: true, max: true, result: true },
+      });
+      const lockedById = new Map(lockedRows.map((r) => [r.id, r]));
+      const changes: FieldChange[] = [];
+      for (const entry of dto.results) {
+        const row = lockedById.get(entry.testId) ?? byId.get(entry.testId)!;
+        const result = entry.result?.trim() ? entry.result.trim() : null;
+        const passed = computePassed(result, { min: row.min, max: row.max });
+        await tx.ordDetailTest.update({
+          where: { id: row.id },
+          data: {
+            result,
+            passed,
+            resultBy: result ? resultBy : null,
+            resultAt: result ? at : null,
+          },
+        });
+        changes.push({
+          tableName: 'OrdDetailTest', recordId: String(row.id),
+          fieldName: `Result:${row.test}`, oldValue: row.result, newValue: result,
+        });
+      }
+      await this.audit.record(
+        {
+          action: 'order.iptResults',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.execute',
+          summary: `Order #${orderId}: recorded ${changes.length} in-process test result(s)`,
+          changes,
+        },
+        tx,
+      );
+      return { orderId, updated: changes.length };
+    });
+  }
+
+  /**
+   * Material-variance report: per material (UI) line, the planned (QtyReqd) vs
+   * recorded-actual (QtyUsed) quantity with the absolute and percent variance,
+   * costed at the line item's REAL consumed unit cost on this order (from the
+   * consumption genealogy edges — Σ qty×lot.unitCost / Σ qty per item), falling
+   * back to the item's purchase price when nothing priced was consumed. Plus
+   * the yield line: planned batch (PK QtyReqd) vs actual (Ordr.ActualBatchSize).
+   * Readable at any point — unrecorded lines simply show no actual yet.
+   */
+  async variance(id: number) {
+    const order = await this.prisma.ordr.findUnique({
+      where: { id },
+      select: { id: true, context: true, status: true, actualBatchSize: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (!OrdersService.EXEC_CONTEXTS.has(order.context ?? '')) {
+      throw new BadRequestException('Only production (MFBA/MFPP) orders have material variance.');
+    }
+
+    const [lines, pk] = await Promise.all([
+      this.prisma.ordDetail.findMany({
+        where: { ordrId: id, context: 'UI' },
+        orderBy: [{ execOrder: 'asc' }, { sortOrder: 'asc' }, { id: 'asc' }],
+        select: { id: true, itemId: true, qtyReqd: true, qtyUsed: true, execStatus: true, entityUnit: true, line: true },
+      }),
+      this.prisma.ordDetail.findFirst({
+        where: { ordrId: id, context: 'PK' },
+        select: { qtyReqd: true, qtyUsed: true },
+      }),
+    ]);
+    const itemIds = [...new Set(lines.map((l) => l.itemId).filter((v): v is number => v != null))];
+    const items = await this.prisma.item.findMany({
+      where: { id: { in: itemIds } },
+      select: { id: true, itemCode: true, description: true, unit: true, purchasePrice: true },
+    });
+    const itemById = new Map(items.map((i) => [i.id, i]));
+
+    // Real consumed unit cost per item on THIS order, from the consumption
+    // edges: Σ(edge qty × parent lot unitCost) / Σ(edge qty), priced edges only.
+    const edges = await this.prisma.lotGenealogy.findMany({
+      where: { viaOrdrId: id, source: 'consumption' },
+      select: { parentLot: true, qty: true },
+    });
+    const parentLots = [...new Set(edges.map((e) => e.parentLot))];
+    const lotRows = parentLots.length
+      ? await this.prisma.lot.findMany({
+          where: { lot: { in: parentLots } },
+          select: { lot: true, itemId: true, unitCost: true },
+        })
+      : [];
+    const lotByCode = new Map(lotRows.map((l) => [l.lot, l]));
+    const costAgg = new Map<number, { cost: number; qty: number }>();
+    for (const e of edges) {
+      const lot = lotByCode.get(e.parentLot);
+      if (!lot || lot.itemId == null || lot.unitCost == null || e.qty == null) continue;
+      const agg = costAgg.get(lot.itemId) ?? { cost: 0, qty: 0 };
+      agg.cost += e.qty * Number(lot.unitCost);
+      agg.qty += e.qty;
+      costAgg.set(lot.itemId, agg);
+    }
+
+    let totalPlanned = 0;
+    let totalActual = 0;
+    let totalCostVariance = 0;
+    const rows = lines.map((l) => {
+      const item = l.itemId != null ? itemById.get(l.itemId) : undefined;
+      const planned = l.qtyReqd ?? 0;
+      const recorded = l.execStatus === 'CMP';
+      const actual = recorded ? (l.qtyUsed ?? 0) : null;
+      const delta = actual != null ? actual - planned : null;
+      const pct = delta != null && planned > 0 ? (delta / planned) * 100 : null;
+      const agg = l.itemId != null ? costAgg.get(l.itemId) : undefined;
+      const unitCost =
+        agg && agg.qty > 0
+          ? agg.cost / agg.qty
+          : item?.purchasePrice != null
+            ? Number(item.purchasePrice)
+            : null;
+      const costVariance = delta != null && unitCost != null ? delta * unitCost : null;
+      totalPlanned += planned;
+      if (actual != null) totalActual += actual;
+      if (costVariance != null) totalCostVariance += costVariance;
+      return {
+        lineId: l.id,
+        line: l.line != null ? Number(l.line) : null,
+        itemCode: item?.itemCode ?? null,
+        description: item?.description ?? null,
+        unit: l.entityUnit ?? item?.unit ?? null,
+        planned,
+        actual,
+        delta,
+        pct,
+        unitCost,
+        costVariance,
+        recorded,
+      };
+    });
+
+    const plannedBatch = pk?.qtyReqd ?? null;
+    // ActualBatchSize is seeded with the PLANNED size at creation and only
+    // becomes the actual yield at completion — before then there is no actual.
+    const st = curStatus(order.status);
+    const actualBatch = st === 'CMP' || st === 'CLS' ? (order.actualBatchSize ?? pk?.qtyUsed ?? null) : null;
+    return {
+      orderId: id,
+      context: order.context,
+      status: order.status,
+      lines: rows,
+      totals: {
+        planned: totalPlanned,
+        actual: totalActual,
+        costVariance: totalCostVariance,
+        recordedLines: rows.filter((r) => r.recorded).length,
+        totalLines: rows.length,
+      },
+      yield: {
+        planned: plannedBatch,
+        actual: actualBatch,
+        pct: plannedBatch && actualBatch != null && plannedBatch > 0 ? (actualBatch / plannedBatch) * 100 : null,
+      },
+    };
+  }
+
   private async requireTransition(id: number, from: string, action: string) {
     const order = await this.prisma.ordr.findUnique({ where: { id } });
     if (!order) throw new NotFoundException('Order not found');

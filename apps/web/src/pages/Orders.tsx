@@ -4,6 +4,7 @@ import { DataGrid, type GridColumn } from '../components/DataGrid';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
 import { useMe } from '../lib/auth';
+import { ExecutionPanel, VariancePanel } from './OrderExecution';
 
 const lifeState = (status: string | null) => (status && status.trim() ? status : 'NST');
 const STATUS_LABEL: Record<string, string> = {
@@ -126,6 +127,10 @@ export function Orders() {
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['order', selected] });
     qc.invalidateQueries({ queryKey: ['orders'] });
+    // Lifecycle actions (complete/close) change what the execution + variance
+    // panels may show — keep them in sync too.
+    qc.invalidateQueries({ queryKey: ['order-execution', selected] });
+    qc.invalidateQueries({ queryKey: ['order-variance', selected] });
     setReason('');
   };
   const action = useMutation({
@@ -275,6 +280,17 @@ export function Orders() {
           </div>
 
           {lifeState(detail.data.status) === 'NST' && <EditOrder order={detail.data} onDone={refresh} />}
+          {/* key= isolates panel state per order — cached detail data means the
+              Card may never unmount when switching orders, and a stale draft
+              (e.g. a batch addition) must not post into the newly selected one. */}
+          {(detail.data.context === 'MFBA' || detail.data.context === 'MFPP') &&
+            ['RLS', 'CMP'].includes(lifeState(detail.data.status)) && (
+              <ExecutionPanel key={`exec-${detail.data.id}`} orderId={detail.data.id} onDone={refresh} />
+            )}
+          {(detail.data.context === 'MFBA' || detail.data.context === 'MFPP') &&
+            lifeState(detail.data.status) !== 'NST' && (
+              <VariancePanel key={`var-${detail.data.id}`} orderId={detail.data.id} />
+            )}
           {detail.data.context === 'MFBA' && (
             <>
               <ConsumeLots orderId={detail.data.id} onDone={refresh} />

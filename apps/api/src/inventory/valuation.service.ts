@@ -105,11 +105,16 @@ export class ValuationService {
     const subs = await tx.sublot.findMany({ where: { lot }, select: { id: true } });
     const subIds = subs.map((s) => s.id);
     if (!subIds.length) return { depleted: 0, shortfall: qty };
-    const rows = await tx.inventory.findMany({
-      where: { sublotId: { in: subIds }, qty: { gt: 0 } },
-      orderBy: { id: 'asc' },
-      select: { id: true, qty: true },
-    });
+    // Read the parcels LOCKED (SELECT ... FOR UPDATE) so two concurrent
+    // depletions of the same stock serialize on the rows: an unlocked read here
+    // is a read-modify-write that silently loses the other transaction's
+    // depletion (both write absolute quantities computed from the same stale
+    // read). Ascending-id order keeps concurrent depleters deadlock-free.
+    const rows = await tx.$queryRaw<{ id: number; qty: number | null }[]>`
+      SELECT "Inventory" AS id, "Qty" AS qty FROM "Inventory"
+      WHERE "Sublot" = ANY(${subIds}) AND "Qty" > 0
+      ORDER BY "Inventory" ASC
+      FOR UPDATE`;
     const { takes, depleted, shortfall } = greedyDeplete(rows.map((r) => ({ qty: r.qty ?? 0 })), qty);
     for (let i = 0; i < rows.length; i++) {
       if (takes[i] > 0) await tx.inventory.update({ where: { id: rows[i].id }, data: { qty: (rows[i].qty ?? 0) - takes[i] } });
@@ -168,10 +173,13 @@ export class ValuationService {
     itemId: number,
     qty: number,
   ): Promise<{ picks: { lot: string; qty: number }[]; depleted: number; shortfall: number }> {
-    const rows = await tx.inventory.findMany({
-      where: { itemId, qty: { gt: 0 }, sublotId: { not: null } },
-      select: { id: true, sublotId: true, qty: true },
-    });
+    // Locked read (see depleteSpecific) — ascending-id lock order across all
+    // depleters prevents both lost updates and lock-order deadlocks.
+    const rows = await tx.$queryRaw<{ id: number; sublotId: number | null; qty: number | null }[]>`
+      SELECT "Inventory" AS id, "Sublot" AS "sublotId", "Qty" AS qty FROM "Inventory"
+      WHERE "Item" = ${itemId} AND "Qty" > 0 AND "Sublot" IS NOT NULL
+      ORDER BY "Inventory" ASC
+      FOR UPDATE`;
     if (!rows.length) return { picks: [], depleted: 0, shortfall: qty };
 
     const subIds = [...new Set(rows.map((r) => r.sublotId).filter((v): v is number => v != null))];

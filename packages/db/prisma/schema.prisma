@@ -814,6 +814,14 @@ model OrdDetailTest {
   line          Int?    @map("Line")
   version       Int?    @map("Version")
 
+  // ERP1 extension (no legacy counterpart — legacy IPT results were handwritten
+  // on the paper ticket): the result recorded during batch execution, its
+  // computed pass/fail against this line's own Min/Max spec, and who/when.
+  result   String?   @map("erp1_result") @db.Text
+  passed   Boolean?  @map("erp1_passed")
+  resultBy String?   @map("erp1_result_by") @db.VarChar(120)
+  resultAt DateTime? @map("erp1_result_at")
+
   @@index([ordDetailId])
   @@map("OrdDetailTest")
 }
