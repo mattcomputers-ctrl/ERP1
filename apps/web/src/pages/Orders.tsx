@@ -8,7 +8,7 @@ import { ExecutionPanel, VariancePanel } from './OrderExecution';
 
 const lifeState = (status: string | null) => (status && status.trim() ? status : 'NST');
 const STATUS_LABEL: Record<string, string> = {
-  NST: 'Not started', RLS: 'Released', CMP: 'Completed', CLS: 'Closed',
+  NST: 'Not started', RLS: 'Released', EDT: 'Being edited', CMP: 'Completed', CLS: 'Closed',
 };
 
 // Ordr.Context discriminators -> friendly labels.
@@ -131,6 +131,7 @@ export function Orders() {
     // panels may show — keep them in sync too.
     qc.invalidateQueries({ queryKey: ['order-execution', selected] });
     qc.invalidateQueries({ queryKey: ['order-variance', selected] });
+    qc.invalidateQueries({ queryKey: ['order-revisions', selected] });
     setReason('');
   };
   const action = useMutation({
@@ -307,6 +308,9 @@ export function Orders() {
               onDone={refresh}
               onOpen={(oid) => setSelected(oid)}
             />
+          )}
+          {(detail.data.context === 'MFBA' || detail.data.context === 'MFPP') && (
+            <RevisionsPanel key={`rev-${detail.data.id}`} orderId={detail.data.id} orderContext={detail.data.context} onDone={refresh} />
           )}
           {detail.data.context === 'MFBA' && (
             <>
@@ -1600,6 +1604,552 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
         )}
         {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
       </div>
+    </div>
+  );
+}
+
+// --- §7 order-edit revisions -------------------------------------------------
+// Revise a RELEASED production order via a draft that only takes effect when
+// published (with e-signature). While a draft is open the order shows "Being
+// edited" (EDT) and execution/lifecycle actions are refused by the server.
+
+interface RevisionTest {
+  testId: number; test: string; qualifier: string | null;
+  min: number | null; max: number | null; target: number | null; comment: string | null;
+}
+interface RevisionLine {
+  lineId: number; sourceLineId: number | null; added: boolean; context: string | null;
+  itemId: number | null; itemCode: string | null; itemDescription: string | null; unit: string | null;
+  qtyReqd: number | null; qtyUsed: number | null; execStatus: string | null;
+  line: number | null; execOrder: number | null; phase: string | null;
+  description: string | null; comment: string | null; locked: boolean;
+  removed: boolean; committedQty: number | null; tests: RevisionTest[];
+}
+interface RevisionSummary {
+  editId: number; revision: number | null; revisionComment: string | null;
+  createdBy: string | null; createdAt: string | null; publishedBy: string | null; publishedAt: string | null;
+}
+interface RevisionsResp {
+  orderId: number; status: string; revision: number; canRevise: boolean;
+  history: RevisionSummary[];
+  draft: {
+    editId: number; revision: number | null; revisionComment: string | null;
+    createdBy: string | null; createdAt: string | null; updatedAt: string | null;
+    lines: RevisionLine[];
+  } | null;
+}
+
+function RevisionsPanel({ orderId, orderContext, onDone }: { orderId: number; orderContext: string | null; onDone: () => void }) {
+  const qc = useQueryClient();
+  const rev = useQuery({
+    queryKey: ['order-revisions', orderId],
+    queryFn: () => api.get<RevisionsResp>(`/orders/${orderId}/revisions`),
+  });
+  const refreshAll = () => {
+    qc.invalidateQueries({ queryKey: ['order-revisions', orderId] });
+    onDone();
+  };
+  const open = useMutation({
+    mutationFn: () => api.post(`/orders/${orderId}/revisions`),
+    onSuccess: refreshAll,
+  });
+
+  // A failed fetch must not silently hide the panel — it is the only place
+  // that explains the EDT lock and offers publish/cancel (queries don't retry).
+  if (rev.isError) {
+    return (
+      <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        Couldn’t load the order’s revisions.{' '}
+        <button type="button" onClick={() => rev.refetch()} className="underline">Retry</button>
+      </div>
+    );
+  }
+  const d = rev.data;
+  if (!d) return null;
+  if (!d.history.length && !d.draft && !d.canRevise) return null;
+
+  return (
+    <div className="mb-4 rounded-md border border-slate-200 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-medium text-slate-700">
+          Revisions (order edits)
+          {d.revision > 0 && (
+            <span className="ml-2 rounded-full bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700">Rev {d.revision}</span>
+          )}
+        </div>
+        {d.canRevise && (
+          <ActionButton pending={open.isPending} onClick={() => open.mutate()}>Revise order…</ActionButton>
+        )}
+      </div>
+      {open.isError && <div className="mb-2 text-sm text-red-600">{(open.error as Error).message}</div>}
+
+      {d.history.length > 0 && (
+        <div className="mb-3">
+          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-400">Revision history</div>
+          <table className="w-full text-sm">
+            <thead className="border-b border-slate-200 text-left text-slate-500">
+              <tr>
+                <th className="px-2 py-1 font-medium">Rev</th>
+                <th className="px-2 py-1 font-medium">Comment</th>
+                <th className="px-2 py-1 font-medium">Published by</th>
+                <th className="px-2 py-1 font-medium">Published</th>
+                <th className="px-2 py-1" />
+              </tr>
+            </thead>
+            <tbody>
+              {d.history.map((h) => (
+                <RevisionHistoryRow key={h.editId} orderId={orderId} rev={h} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {d.draft && (
+        <RevisionDraft
+          key={d.draft.editId}
+          orderId={orderId}
+          orderContext={orderContext}
+          draft={d.draft}
+          onChanged={() => qc.invalidateQueries({ queryKey: ['order-revisions', orderId] })}
+          onResolved={refreshAll}
+        />
+      )}
+    </div>
+  );
+}
+
+function RevisionHistoryRow({ orderId, rev }: { orderId: number; rev: RevisionSummary }) {
+  const [show, setShow] = useState(false);
+  const lines = useQuery({
+    queryKey: ['order-revision-lines', orderId, rev.editId],
+    queryFn: () => api.get<{ lines: RevisionLine[] }>(`/orders/${orderId}/revisions/${rev.editId}`),
+    enabled: show,
+  });
+  return (
+    <>
+      <tr className="border-b border-slate-100 last:border-0">
+        <td className="px-2 py-1">{rev.revision === 0 ? '0 (original)' : rev.revision}</td>
+        <td className="px-2 py-1">{rev.revisionComment}</td>
+        <td className="px-2 py-1">{rev.publishedBy}</td>
+        <td className="px-2 py-1">{fmtDate(rev.publishedAt)}</td>
+        <td className="px-2 py-1 text-right">
+          <button type="button" onClick={() => setShow((v) => !v)} className="text-xs text-indigo-600 hover:underline">
+            {show ? 'hide lines' : 'lines'}
+          </button>
+        </td>
+      </tr>
+      {show && (
+        <tr>
+          <td colSpan={5} className="bg-slate-50 px-2 py-1">
+            {lines.isLoading && <span className="text-xs text-slate-400">Loading…</span>}
+            {lines.data && (
+              <table className="w-full text-xs">
+                <tbody>
+                  {lines.data.lines.map((l) => (
+                    <tr key={l.lineId}>
+                      <td className="px-2 py-0.5">{l.context}</td>
+                      <td className="px-2 py-0.5">{l.itemCode}</td>
+                      <td className="px-2 py-0.5">{l.description ?? l.itemDescription}</td>
+                      <td className="px-2 py-0.5 text-right">{l.qtyReqd}</td>
+                      <td className="px-2 py-0.5">{l.unit}</td>
+                      <td className="px-2 py-0.5">{l.phase}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function RevisionDraft({ orderId, orderContext, draft, onChanged, onResolved }: {
+  orderId: number;
+  orderContext: string | null;
+  draft: NonNullable<RevisionsResp['draft']>;
+  onChanged: () => void;
+  onResolved: () => void;
+}) {
+  const [comment, setComment] = useState(draft.revisionComment ?? '');
+  const saveComment = useMutation({
+    mutationFn: () => api.post(`/orders/${orderId}/revisions/draft`, { revisionComment: comment }),
+    onSuccess: onChanged,
+  });
+  return (
+    <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-sm font-medium text-amber-800">
+          Draft revision {draft.revision} <span className="font-normal">— the order is locked (Being edited) until this is published or cancelled</span>
+        </span>
+      </div>
+      <div className="mb-2 flex items-center gap-2">
+        <input
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
+          maxLength={2000}
+          placeholder="Revision comment (required to publish)"
+          className="w-96 rounded border border-slate-300 px-2 py-1 text-sm"
+        />
+        <Button onClick={() => saveComment.mutate()} disabled={saveComment.isPending || comment === (draft.revisionComment ?? '')}>
+          Save comment
+        </Button>
+        {saveComment.isError && <span className="text-sm text-red-600">{(saveComment.error as Error).message}</span>}
+      </div>
+
+      <table className="mb-2 w-full bg-white text-sm">
+        <thead className="border-b border-slate-200 text-left text-slate-500">
+          <tr>
+            <th className="px-2 py-1 font-medium">Type</th>
+            <th className="px-2 py-1 font-medium">Phase</th>
+            <th className="px-2 py-1 font-medium">Item</th>
+            <th className="px-2 py-1 font-medium">Description</th>
+            <th className="px-2 py-1 font-medium text-right">Qty reqd</th>
+            <th className="px-2 py-1 font-medium">Unit</th>
+            <th className="px-2 py-1 font-medium">Status</th>
+            <th className="px-2 py-1" />
+          </tr>
+        </thead>
+        <tbody>
+          {draft.lines.map((l) => (
+            <DraftLineRow key={l.lineId} orderId={orderId} line={l} onChanged={onChanged} />
+          ))}
+        </tbody>
+      </table>
+
+      <AddRevisionLineForm orderId={orderId} orderContext={orderContext} onChanged={onChanged} />
+      <PublishRevisionControls
+        orderId={orderId}
+        editId={draft.editId}
+        draftUpdatedAt={draft.updatedAt}
+        draftRevision={draft.revision}
+        hasComment={!!(draft.revisionComment ?? '').trim()}
+        onDone={onResolved}
+      />
+    </div>
+  );
+}
+
+function DraftLineRow({ orderId, line, onChanged }: { orderId: number; line: RevisionLine; onChanged: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [qty, setQty] = useState('');
+  const [comment, setComment] = useState('');
+  // Seed the editor from the CURRENT row at open time (not mount time) — the
+  // draft refetches after every save and a mount-time seed would go stale.
+  const openEditor = () => {
+    setQty(line.qtyReqd != null ? String(line.qtyReqd) : '');
+    setComment(line.comment ?? '');
+    setEditing(true);
+  };
+  const save = useMutation({
+    mutationFn: () =>
+      api.post(`/orders/${orderId}/revisions/draft/lines/${line.lineId}`, {
+        ...(line.context === 'UI' && qty !== '' ? { qtyReqd: Number(qty) } : {}),
+        comment,
+      }),
+    onSuccess: () => { setEditing(false); onChanged(); },
+  });
+  const remove = useMutation({
+    mutationFn: () => api.post(`/orders/${orderId}/revisions/draft/lines/${line.lineId}/remove`),
+    onSuccess: onChanged,
+  });
+  const restore = useMutation({
+    mutationFn: () => api.post(`/orders/${orderId}/revisions/draft/lines/${line.lineId}/restore`),
+    onSuccess: onChanged,
+  });
+  const committed = (line.committedQty ?? 0) > 0;
+  return (
+    <>
+      <tr className={`border-b border-slate-100 last:border-0 ${line.added ? 'bg-emerald-50' : ''} ${line.removed ? 'bg-red-50 text-slate-400 line-through' : ''}`}>
+        <td className="px-2 py-1">
+          {line.context}
+          {line.added && <span className="ml-1 rounded-full bg-emerald-100 px-1.5 text-xs text-emerald-700 no-underline">new</span>}
+          {line.removed && <span className="ml-1 rounded-full bg-red-100 px-1.5 text-xs text-red-700">removed</span>}
+        </td>
+        <td className="px-2 py-1">{line.phase}</td>
+        <td className="px-2 py-1">{line.itemCode}</td>
+        <td className="px-2 py-1">
+          {line.description ?? line.itemDescription}
+          {line.tests.length > 0 && (
+            <span className="ml-1 text-xs text-slate-400">({line.tests.map((t) => t.test).join(', ')})</span>
+          )}
+          {committed && <span className="ml-1 text-xs text-amber-600">({line.committedQty} allocated to packouts)</span>}
+        </td>
+        <td className="px-2 py-1 text-right">{line.qtyReqd}</td>
+        <td className="px-2 py-1">{line.unit}</td>
+        <td className="px-2 py-1">{line.locked ? <span className="text-xs text-slate-400">locked{line.execStatus ? ` (${line.execStatus})` : ''}</span> : line.execStatus}</td>
+        <td className="px-2 py-1 text-right">
+          {!line.locked && line.removed && (
+            <button type="button" onClick={() => restore.mutate()} disabled={restore.isPending} className="text-xs text-indigo-600 hover:underline">
+              restore
+            </button>
+          )}
+          {!line.locked && !line.removed && (
+            <span className="space-x-2 whitespace-nowrap">
+              <button type="button" onClick={() => (editing ? setEditing(false) : openEditor())} className="text-xs text-indigo-600 hover:underline">
+                {editing ? 'close' : 'edit'}
+              </button>
+              {/* Removal is refused server-side for allocation-carrying lines — don't offer it. */}
+              {!committed && (
+                <button type="button" onClick={() => remove.mutate()} disabled={remove.isPending} className="text-xs text-red-600 hover:underline">
+                  remove
+                </button>
+              )}
+            </span>
+          )}
+        </td>
+      </tr>
+      {(remove.isError || save.isError || restore.isError) && (
+        <tr><td colSpan={8} className="px-2 py-1 text-xs text-red-600">{((remove.error ?? save.error ?? restore.error) as Error).message}</td></tr>
+      )}
+      {editing && !line.locked && !line.removed && (
+        <tr>
+          <td colSpan={8} className="bg-slate-50 px-2 py-1">
+            <div className="flex flex-wrap items-center gap-2">
+              {line.context === 'UI' && (
+                <input type="number" min="0" step="any" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty reqd" className="w-28 rounded border border-slate-300 px-2 py-1 text-right text-sm" />
+              )}
+              <input value={comment} onChange={(e) => setComment(e.target.value)} maxLength={2000} placeholder="Comment" className="w-72 rounded border border-slate-300 px-2 py-1 text-sm" />
+              <Button onClick={() => save.mutate()} disabled={save.isPending || (line.context === 'UI' && !(Number(qty) > 0))}>Save</Button>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function AddRevisionLineForm({ orderId, orderContext, onChanged }: { orderId: number; orderContext: string | null; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [context, setContext] = useState<'UI' | 'INSTR' | 'IPT'>('UI');
+  const [search, setSearch] = useState('');
+  const [picked, setPicked] = useState<{ id: number; itemCode: string | null; description: string | null; unit: string | null } | null>(null);
+  const [qty, setQty] = useState('');
+  const [phase, setPhase] = useState('');
+  const [description, setDescription] = useState('');
+  const [comment, setComment] = useState('');
+  const [tests, setTests] = useState<{ test: string; min: string; max: string; target: string }[]>([]);
+
+  const opts = useQuery({
+    queryKey: ['revise-item-options', search],
+    queryFn: () => api.get<{ rows: { id: number; itemCode: string | null; description: string | null; unit: string | null }[] }>(
+      `/orders/revise-item-options?q=${encodeURIComponent(search)}`,
+    ),
+    enabled: open && context === 'UI' && !picked && search.trim().length >= 1,
+  });
+  const m = useMutation({
+    mutationFn: () =>
+      api.post(`/orders/${orderId}/revisions/draft/lines`, {
+        context,
+        ...(context === 'UI' ? { itemId: picked!.id, qty: Number(qty) } : {}),
+        phase: phase || undefined,
+        description: description || undefined,
+        comment: comment || undefined,
+        ...(context === 'IPT' && tests.length
+          ? {
+              tests: tests
+                .filter((t) => t.test.trim())
+                .map((t) => ({
+                  test: t.test.trim(),
+                  min: t.min !== '' ? Number(t.min) : undefined,
+                  max: t.max !== '' ? Number(t.max) : undefined,
+                  target: t.target !== '' ? Number(t.target) : undefined,
+                })),
+            }
+          : {}),
+      }),
+    onSuccess: () => {
+      setPicked(null); setQty(''); setPhase(''); setDescription(''); setComment(''); setTests([]); setSearch('');
+      onChanged();
+    },
+  });
+
+  const valid =
+    context === 'UI' ? picked != null && Number(qty) > 0 :
+    context === 'INSTR' ? !!description.trim() :
+    true;
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mb-2 text-sm font-medium text-indigo-600 hover:underline">
+        + Add line (ingredient / instruction / in-process test)
+      </button>
+    );
+  }
+  return (
+    <div className="mb-2 rounded-md border border-dashed border-slate-300 bg-white p-3">
+      <div className="mb-2 flex items-center justify-between text-sm font-medium text-slate-700">
+        <span>Add line to revision</span>
+        <button type="button" onClick={() => { setOpen(false); m.reset(); }} className="text-slate-500 hover:text-slate-800">Close</button>
+      </div>
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
+        <select value={context} onChange={(e) => { setContext(e.target.value as 'UI' | 'INSTR' | 'IPT'); m.reset(); }} className="rounded-md border border-slate-300 px-2 py-1.5">
+          <option value="UI">Ingredient</option>
+          <option value="INSTR">Instruction</option>
+          {/* In-process tests exist only on batch orders (results are MFBA-only). */}
+          {orderContext === 'MFBA' && <option value="IPT">In-process test</option>}
+        </select>
+        <input value={phase} onChange={(e) => setPhase(e.target.value)} maxLength={50} placeholder="Phase (optional)" className="w-40 rounded border border-slate-300 px-2 py-1" />
+      </div>
+      {context === 'UI' && !picked && (
+        <>
+          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search item code / description…" className="max-w-sm" />
+          {search.trim().length >= 1 && (
+            <div className="mt-1 max-h-40 max-w-lg overflow-y-auto rounded-md border border-slate-200">
+              {opts.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
+              {opts.data?.rows.map((it) => (
+                <button type="button" key={it.id} onClick={() => setPicked(it)} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
+                  <span>{it.itemCode} <span className="text-slate-400">{it.description}</span></span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      {context === 'UI' && picked && (
+        <div className="mb-2 flex items-center gap-2 text-sm">
+          <span className="font-medium">{picked.itemCode}</span>
+          <span className="text-slate-400">{picked.description}</span>
+          <button type="button" onClick={() => setPicked(null)} className="text-xs text-slate-400 hover:text-slate-700">change</button>
+          <input type="number" min="0" step="any" value={qty} onChange={(e) => setQty(e.target.value)} placeholder={`Qty${picked.unit ? ` (${picked.unit})` : ''}`} className="w-28 rounded border border-slate-300 px-2 py-1 text-right" />
+        </div>
+      )}
+      {context !== 'UI' && (
+        <div className="mb-2">
+          <input value={description} onChange={(e) => setDescription(e.target.value)} maxLength={256} placeholder={context === 'INSTR' ? 'Instruction (required)' : 'Step description (optional)'} className="w-96 rounded border border-slate-300 px-2 py-1 text-sm" />
+        </div>
+      )}
+      {context === 'IPT' && (
+        <div className="mb-2 space-y-1">
+          <div className="text-xs text-slate-500">Tests to pass before continuing:</div>
+          {tests.map((t, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input value={t.test} onChange={(e) => setTests((p) => p.map((x, j) => (j === i ? { ...x, test: e.target.value } : x)))} maxLength={20} placeholder="Test name" className="w-40 rounded border border-slate-300 px-2 py-1 text-sm" />
+              <input type="number" step="any" value={t.min} onChange={(e) => setTests((p) => p.map((x, j) => (j === i ? { ...x, min: e.target.value } : x)))} placeholder="Min" className="w-20 rounded border border-slate-300 px-2 py-1 text-right text-sm" />
+              <input type="number" step="any" value={t.max} onChange={(e) => setTests((p) => p.map((x, j) => (j === i ? { ...x, max: e.target.value } : x)))} placeholder="Max" className="w-20 rounded border border-slate-300 px-2 py-1 text-right text-sm" />
+              <input type="number" step="any" value={t.target} onChange={(e) => setTests((p) => p.map((x, j) => (j === i ? { ...x, target: e.target.value } : x)))} placeholder="Target" className="w-20 rounded border border-slate-300 px-2 py-1 text-right text-sm" />
+              <button type="button" onClick={() => setTests((p) => p.filter((_, j) => j !== i))} className="text-xs text-slate-400 hover:text-red-600">remove</button>
+            </div>
+          ))}
+          <button type="button" onClick={() => setTests((p) => [...p, { test: '', min: '', max: '', target: '' }])} className="text-xs text-indigo-600 hover:underline">+ add test</button>
+        </div>
+      )}
+      <div className="flex items-center gap-2">
+        <input value={comment} onChange={(e) => setComment(e.target.value)} maxLength={2000} placeholder="Comment (optional)" className="w-72 rounded border border-slate-300 px-2 py-1 text-sm" />
+        <Button onClick={() => m.mutate()} disabled={!valid || m.isPending}>{m.isPending ? 'Adding…' : 'Add line'}</Button>
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
+    </div>
+  );
+}
+
+function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevision, hasComment, onDone }: {
+  orderId: number;
+  editId: number;
+  draftUpdatedAt: string | null;
+  draftRevision: number | null;
+  hasComment: boolean;
+  onDone: () => void;
+}) {
+  const me = useMe();
+  // Key by user: signature/witness requirements are resolved per-user server-side.
+  const req = useQuery({
+    queryKey: ['revise-requirement', me.data?.id],
+    queryFn: () =>
+      api.get<{ requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>(
+        '/orders/revise-requirement',
+      ),
+  });
+  const [reason, setReason] = useState('');
+  const [password, setPassword] = useState('');
+  const [showWitness, setShowWitness] = useState(false);
+  const [witnessEmail, setWitnessEmail] = useState('');
+  const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessExplanation, setWitnessExplanation] = useState('');
+  const [rejectReason, setRejectReason] = useState('');
+
+  const r = req.data;
+  const sig = !!r?.requireSignature;
+  const reasonRequired = !!r?.requireReason;
+  const witnessRequired = !!r?.requireWitness;
+  const witnessOpen = witnessRequired || showWitness;
+
+  const publish = useMutation({
+    mutationFn: () =>
+      api.post(`/orders/${orderId}/revisions/draft/publish`, {
+        // Pin the signature to the reviewed draft (id + content token): the
+        // server 409s if the draft was swapped or edited since this render.
+        editId,
+        draftUpdatedAt: draftUpdatedAt ?? undefined,
+        reason: reason || undefined,
+        password: password || undefined,
+        witnessEmail: witnessOpen && witnessEmail ? witnessEmail : undefined,
+        witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
+        witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
+      }),
+    onSuccess: onDone,
+  });
+  const reject = useMutation({
+    mutationFn: () => api.post(`/orders/${orderId}/revisions/draft/reject`, { editId, reason: rejectReason || undefined }),
+    onSuccess: onDone,
+  });
+
+  // Mirror the server's requirements so the button can't be clicked into a 400.
+  const canPublish =
+    !!r &&
+    hasComment &&
+    (!reasonRequired || !!reason.trim()) &&
+    (!sig || !!password) &&
+    (!witnessRequired || (!!witnessEmail && !!witnessPassword));
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-t border-amber-200 pt-2">
+      {req.isLoading && <span className="text-sm text-slate-400">Loading…</span>}
+      {req.isError && (
+        <span className="text-sm text-red-600">
+          Couldn’t load signing requirements.{' '}
+          <button type="button" onClick={() => req.refetch()} className="underline">Retry</button>
+        </span>
+      )}
+      {!req.isLoading && (
+        <>
+          {!hasComment && <span className="text-xs text-amber-700">Save a revision comment above to enable publishing.</span>}
+          {reasonRequired && (
+            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (required)" className="w-48 rounded border border-slate-300 px-2 py-1 text-sm" />
+          )}
+          {sig && (
+            <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password (sign)" className="w-44 rounded border border-slate-300 px-2 py-1 text-sm" />
+          )}
+          {sig && witnessOpen && (
+            <>
+              <input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} placeholder={`Witness email${witnessRequired ? ' (required)' : ''}`} className="w-48 rounded border border-slate-300 px-2 py-1 text-sm" />
+              <input type="password" autoComplete="off" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} placeholder="Witness password" className="w-44 rounded border border-slate-300 px-2 py-1 text-sm" />
+              <input value={witnessExplanation} onChange={(e) => setWitnessExplanation(e.target.value)} maxLength={500} placeholder="Witness note (optional)" className="w-48 rounded border border-slate-300 px-2 py-1 text-sm" />
+            </>
+          )}
+          {sig && !witnessRequired && !showWitness && (
+            <button type="button" onClick={() => setShowWitness(true)} className="text-xs text-indigo-600 hover:underline">+ add witness</button>
+          )}
+          <ActionButton pending={publish.isPending || !canPublish} onClick={() => publish.mutate()}>Publish revision</ActionButton>
+          <span className="mx-1 text-slate-300">|</span>
+          <input value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} maxLength={500} placeholder="Cancel reason (optional)" className="w-44 rounded border border-slate-300 px-2 py-1 text-sm" />
+          <button
+            onClick={() => {
+              if (window.confirm(`Cancel draft revision ${draftRevision ?? ''}? The drafted changes will be discarded.`)) {
+                reject.mutate();
+              }
+            }}
+            disabled={reject.isPending}
+            className="rounded-md bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+          >
+            Cancel draft
+          </button>
+        </>
+      )}
+      {publish.isError && <span className="text-sm text-red-600">{(publish.error as Error).message}</span>}
+      {reject.isError && <span className="text-sm text-red-600">{(reject.error as Error).message}</span>}
     </div>
   );
 }

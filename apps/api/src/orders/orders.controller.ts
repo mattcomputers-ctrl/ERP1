@@ -14,6 +14,13 @@ import { IptResultsDto } from './dto/ipt-results.dto';
 import { RecordLineDto } from './dto/record-line.dto';
 import { RejectEditApprovalDto } from './dto/edit-approval.dto';
 import { ReverseOrderDto } from './dto/reverse-order.dto';
+import {
+  AddRevisionLineDto,
+  PublishRevisionDto,
+  RejectRevisionDto,
+  UpdateRevisionDto,
+  UpdateRevisionLineDto,
+} from './dto/revision.dto';
 import { ShipLotsDto } from './dto/ship-lots.dto';
 import { SpecifyPackoutDto } from './dto/specify-packout.dto';
 import { OrdersService, type OrdersListQuery } from './orders.service';
@@ -93,6 +100,20 @@ export class OrdersController {
     return this.orders.listEditApprovals();
   }
 
+  // E-signature requirements for publishing a revision (static path before :id).
+  @Get('revise-requirement')
+  @RequireProgram('orders.revise')
+  reviseRequirement(@CurrentUser() actor: Actor) {
+    return this.orders.reviseRequirement(actor.id);
+  }
+
+  // Item picker for the revision add-ingredient form (same options as batch additions).
+  @Get('revise-item-options')
+  @RequireProgram('orders.revise')
+  reviseItemOptions(@Query('q') q?: string) {
+    return this.orders.consumeItemOptions(q);
+  }
+
   @Get(':id')
   get(@Param('id', ParseIntPipe) id: number) {
     return this.orders.get(id);
@@ -138,6 +159,90 @@ export class OrdersController {
   @RequireProgram('orders.edit')
   rejectEdit(@Param('requestId', ParseIntPipe) requestId: number, @Body() dto: RejectEditApprovalDto, @CurrentUser() actor: Actor) {
     return this.orders.rejectEdit(requestId, dto, actor);
+  }
+
+  // --- §7 order-edit revisions (edit a RELEASED order via a published draft) ---
+
+  // The revision picture: published history, open draft with lines, canRevise.
+  // Gated by the controller's orders.browser default — it is part of viewing.
+  @Get(':id/revisions')
+  revisions(@Param('id', ParseIntPipe) id: number) {
+    return this.orders.revisions(id);
+  }
+
+  // One revision's line set (a published snapshot or the open draft).
+  @Get(':id/revisions/:editId')
+  revisionLines(@Param('id', ParseIntPipe) id: number, @Param('editId', ParseIntPipe) editId: number) {
+    return this.orders.revisionLines(id, editId);
+  }
+
+  // Open a revision draft on a Released production order (order goes EDT).
+  @Post(':id/revisions')
+  @RequireProgram('orders.revise')
+  createRevision(@Param('id', ParseIntPipe) id: number, @CurrentUser() actor: Actor) {
+    return this.orders.createRevision(id, actor);
+  }
+
+  // Draft header (the revision comment — required before publish).
+  @Post(':id/revisions/draft')
+  @RequireProgram('orders.revise')
+  updateRevision(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateRevisionDto, @CurrentUser() actor: Actor) {
+    return this.orders.updateRevision(id, dto, actor);
+  }
+
+  // Add an ingredient / instruction / IPT line to the draft.
+  @Post(':id/revisions/draft/lines')
+  @RequireProgram('orders.revise')
+  addRevisionLine(@Param('id', ParseIntPipe) id: number, @Body() dto: AddRevisionLineDto, @CurrentUser() actor: Actor) {
+    return this.orders.addRevisionLine(id, dto, actor);
+  }
+
+  // Change a draft line (quantity on material lines, comment on any editable one).
+  @Post(':id/revisions/draft/lines/:lineId')
+  @RequireProgram('orders.revise')
+  updateRevisionLine(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('lineId', ParseIntPipe) lineId: number,
+    @Body() dto: UpdateRevisionLineDto,
+    @CurrentUser() actor: Actor,
+  ) {
+    return this.orders.updateRevisionLine(id, lineId, dto, actor);
+  }
+
+  // Remove a line from the draft (cancels an addition / marks a live line for removal).
+  @Post(':id/revisions/draft/lines/:lineId/remove')
+  @RequireProgram('orders.revise')
+  deleteRevisionLine(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('lineId', ParseIntPipe) lineId: number,
+    @CurrentUser() actor: Actor,
+  ) {
+    return this.orders.deleteRevisionLine(id, lineId, actor);
+  }
+
+  // Undo a mark-for-removal on a copied draft line.
+  @Post(':id/revisions/draft/lines/:lineId/restore')
+  @RequireProgram('orders.revise')
+  restoreRevisionLine(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('lineId', ParseIntPipe) lineId: number,
+    @CurrentUser() actor: Actor,
+  ) {
+    return this.orders.restoreRevisionLine(id, lineId, actor);
+  }
+
+  // Publish the draft — apply it to the order (e-signable; UG §7.1.8).
+  @Post(':id/revisions/draft/publish')
+  @RequireProgram('orders.revise')
+  publishRevision(@Param('id', ParseIntPipe) id: number, @Body() dto: PublishRevisionDto, @CurrentUser() actor: Actor) {
+    return this.orders.publishRevision(id, dto, actor);
+  }
+
+  // Cancel the draft (edit -> REJ, order back to Released; UG §7.1.7).
+  @Post(':id/revisions/draft/reject')
+  @RequireProgram('orders.revise')
+  rejectRevision(@Param('id', ParseIntPipe) id: number, @Body() dto: RejectRevisionDto, @CurrentUser() actor: Actor) {
+    return this.orders.rejectRevision(id, dto, actor);
   }
 
   // --- lifecycle transitions (each gated by its own program) ---------------

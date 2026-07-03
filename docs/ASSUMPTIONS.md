@@ -417,3 +417,89 @@ recipe without a packaged product) does not occur in this install.
    need (one packaging run fed by several batches) via specify-packouts'
    editable Supplied Qty. The Parent column stays mirrored; revisit only if
    the plant asks for parent/child batches.
+
+## Order-edit revisions (§5/§6, built 2026-07-03)
+
+Vendor UG §7 (Batching Order Edits) / §9 (Packaging Order Edits — "in the same
+way as the Batching Order Edit"). The legacy `OrdrEdit` / `OrdDetailEdit` /
+`OrdDetailTestEdit` tables are **0 rows** in this install and `Ordr.Revision`
+is 0/NULL on all 75K orders — the module was never used at this plant. ERP1
+therefore implements the manual's semantics as native design on the mirrored
+table names. Decisions:
+
+- **Eligibility = Released (RLS) production orders (MFBA + MFPP).** The vendor
+  allows RLS/STD/BAT; ERP1's lifecycle has no STD/BAT (execution happens under
+  RLS), so RLS is the whole eligible window. NST orders use edit-before-release
+  (rescale); CMP orders must be reversed first.
+- **EDT is a real order status** (`Ordr.Status`, UG §6.1 "Order is being
+  edited") entered at draft creation and left (back to RLS) at publish/reject.
+  Because every execution/lifecycle/packout writer re-asserts RLS under the
+  Ordr row lock, EDT blocks them all — and guarantees one open draft per order
+  — with no new locking machinery.
+- **The draft is the full intended state**: creation snapshots every OrdDetail
+  row into `OrdDetailEdit` (ref = source line id) and IPT specs into
+  `OrdDetailTestEdit` (ref = source test id); publish makes the order match the
+  draft (update changed, delete marked-removed, create ref-less). A copied row
+  the user removes is MARKED (`erp1_removed`, restorable), never deleted — the
+  draft keeps its full source-id baseline so publish can tell "the user removed
+  this line" apart from "this live line appeared after the snapshot" (a
+  parallel-running import write), which is REFUSED, never silently deleted.
+  Only rows the edit itself added may be hard-deleted (withdrawing the
+  addition) while the edit is STD; once CMP or REJ the edit rows are immutable
+  history.
+- **Revision numbering**: draft gets max(published)+1 at creation; rejected
+  numbers are reused (vendor §7.1.7); revision 0 is reserved for the snapshot
+  of the pre-edit order taken at first publish (vendor §7.1.8); `Ordr.Revision`
+  carries the latest published revision (matches the legacy 0-default).
+- **Editability**: UI (qty>0 + comment), INSTR (comment), IPT (comment) lines;
+  adds of all three (IPT adds carry tests validated against the `Test`
+  catalog, and are MFBA-only — recordIptResults and the execution panel's IPT
+  grid refuse packaging orders); removals of unexecuted ones. Locked: executed
+  lines (ExecStatus recorded or QtyUsed set — reversal resets to 'NST', so
+  both NULL and 'NST' read unexecuted), PK lines (the product; yield is
+  completion's business), UB bulk-use lines (`UseFrom` undecoded), IPT steps
+  with recorded results. Lines carrying `OrdDetailCommit` allocations cannot
+  be REMOVED (orphaned packout linkage) and their quantity cannot drop below
+  the summed committed qty (the demand floor) — comment edits and raises stay
+  legal (the vendor's demand-editable-until-complete semantics). Item codes on
+  existing lines are immutable (vendor rule: delete + add). All guards are
+  re-checked at publish in-tx under the row lock (drafts can outlive
+  assumptions; parallel-running imports can add allocations or lines).
+- **Publish** is e-signed via a new `order.revise` secured item (signature
+  required, reason optional by default — the mandatory RevisionComment is the
+  narrative; operator-tunable like order.complete). The signature is PINNED to
+  the reviewed draft: the DTO carries the `editId` (asserted under the row
+  lock, so a concurrent reject+reopen can't swap a different draft under the
+  signature; reject carries the same pin) and optionally the draft's
+  `erp1_updated_at` token (bumped by every draft mutation), so content edited
+  after the signer's review conflicts too. Added lines append to the procedure
+  (line/execOrder = live max+1) with fresh native ids and stdQty = the
+  published quantity (an addition's standard IS its quantity, like batch
+  additions); the published edit's added rows are back-pointed to the lines
+  they created.
+- **Not rebuilt** (vendor conveniences over the same mechanics, unused here):
+  the separate Express Edit program (§7.2 — its semantics: mark failed IPT
+  complete, add a Use Group + new IPT, are achievable in the editor),
+  Fix-Over-Dispense auto-scaling (§7.1.3 — ERP1 refuses over-recording at
+  execution time; quantities can be raised line-by-line), rework-after-packout
+  phase choreography (§7.1.6 — needs phase types ERP1's line model doesn't
+  carry), yield auto-recalculation on publish (weight-ratio math; the actual
+  yield is recorded at completion). Revisit on user ask.
+- **Batch-sheet reprint** after publish (vendor suggests it) is just the
+  existing `GET /orders/:id/batch-sheet` — it renders live lines, so a
+  published revision is reflected automatically.
+- **Parallel running caveat**: revising a legacy-IMPORTED order while the
+  legacy plant also executes it is inherently conflicted (the import sync
+  applies legacy changes to legacy-id rows regardless of ERP1 status) — same
+  exposure as executing imported orders natively; publish's live re-validation
+  refuses inconsistent drafts (stale line refs, executed-since-drafted lines,
+  appeared lines, allocation drift) rather than half-applying them.
+- **Review outcomes (2026-07-03 multi-agent review, 13 confirmed findings
+  fixed pre-commit)**: the e-sig draft pin + content token, the removed-marker
+  baseline (vs silently deleting import-appeared lines), the committed-qty
+  floor on quantity edits, MFBA-only IPT additions, stdQty kept equal to the
+  corrected quantity on added lines, one shared open-draft resolver (loud on
+  multiples), explicit-null quantity rejection (class-validator @IsOptional
+  skips null), and web fixes (error+retry state on the panel, editor state
+  reseeded at open, confirm on cancel-draft, remove hidden on allocated
+  lines).

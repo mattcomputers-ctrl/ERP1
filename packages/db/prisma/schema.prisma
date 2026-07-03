@@ -871,6 +871,92 @@ model OrdDetailTest {
   @@map("OrdDetailTest")
 }
 
+// Order-edit revisions (UG §7 Batching Order Edits / §9 Packaging Order Edits):
+// a draft edit of a RELEASED production order, saved separately from the order
+// and applied only when published. The legacy tables are 0-row in this install,
+// so the semantics are native design per UG §7 on the mirrored names:
+// OrdrEditStatus STD (draft in progress — the order itself shows Status EDT,
+// which blocks execution and lifecycle transitions) -> CMP (published, applied
+// to the order) or REJ (cancelled; its revision number is reused). At first
+// publish a snapshot of the pre-edit order is stored as revision 0 (CMP);
+// Ordr.Revision carries the latest published revision (0 on unrevised orders in
+// the legacy data).
+model OrdrEdit {
+  id              Int       @id @map("OrdrEdit")
+  ordrId          Int       @map("OrdrEditRef")
+  status          String    @map("OrdrEditStatus") @db.VarChar(6)
+  revision        Int?      @map("Revision")
+  revisionComment String?   @map("RevisionComment") @db.Text
+  context         String?   @map("Context") @db.VarChar(32)
+
+  // ERP1 extensions: who opened the draft and who resolved (published or
+  // rejected) it — the audit log holds the full narrative; these make the
+  // revision history listable without joining audit. updatedAt is bumped by
+  // every draft mutation and echoed back by the publish/reject client as an
+  // optimistic-concurrency token, so an e-signature can never be applied to
+  // draft content the signer didn't review.
+  createdBy  String?   @map("erp1_created_by") @db.VarChar(120)
+  createdAt  DateTime? @map("erp1_created_at")
+  updatedAt  DateTime? @map("erp1_updated_at")
+  resolvedBy String?   @map("erp1_resolved_by") @db.VarChar(120)
+  resolvedAt DateTime? @map("erp1_resolved_at")
+
+  @@index([ordrId])
+  @@map("OrdrEdit")
+}
+
+// One row per order line in a draft/published edit — the edit's full intended
+// state of the order (publish makes the order match the edit's lines).
+// OrdDetailEditRef points at the live OrdDetail the row mirrors; NULL = a line
+// added by this edit. Lines whose source was already executed (ExecStatus
+// recorded / QtyUsed set) and produced-product (PK) lines are locked: they are
+// snapshot-only and publish refuses changes to them. QtyUsed/ExecStatus here
+// are the snapshot taken at draft creation (display + revision history).
+model OrdDetailEdit {
+  id           Int     @id @map("OrdDetailEdit")
+  ordrEditId   Int     @map("OrdrEdit")
+  sourceLineId Int?    @map("OrdDetailEditRef")
+  context      String? @map("Context") @db.VarChar(32)
+  itemId       Int?    @map("Item")
+  qtyReqd      Float?  @map("QtyReqd")
+  stdQty       Float?  @map("StdQty")
+  qtyUsed      Float?  @map("QtyUsed")
+  execStatus   String? @map("ExecStatus") @db.VarChar(6)
+  line         BigInt? @map("Line")
+  execOrder    Int?    @map("ExecOrder")
+  phase        String? @map("Phase") @db.VarChar(50)
+  description  String? @map("Description") @db.VarChar(256)
+  comment      String? @map("Comment") @db.Text
+
+  // ERP1 extension: a copied line the edit removes is MARKED, never deleted —
+  // the draft must keep its full source-id baseline so publish can tell "the
+  // user removed this line" apart from "this live line appeared after the
+  // draft was created" (the latter is refused as drift, never deleted).
+  removed Boolean @default(false) @map("erp1_removed")
+
+  @@index([ordrEditId])
+  @@map("OrdDetailEdit")
+}
+
+// In-process tests carried by an edit's IPT lines: snapshots of the live
+// OrdDetailTest rows (OrdDetailTestEditRef set) on copied lines, or the tests
+// to create for an IPT line added by the edit (ref NULL).
+model OrdDetailTestEdit {
+  id              Int     @id @map("OrdDetailTestEdit")
+  ordDetailEditId Int     @map("OrdDetailEdit")
+  sourceTestId    Int?    @map("OrdDetailTestEditRef")
+  test            String  @map("Test") @db.VarChar(20)
+  qualifier       String? @map("Qualifier") @db.VarChar(40)
+  min             Float?  @map("Min")
+  max             Float?  @map("Max")
+  target          Float?  @map("Target")
+  comment         String? @map("Comment") @db.Text
+  line            Int?    @map("Line")
+
+  @@index([ordDetailEditId])
+  @@map("OrdDetailTestEdit")
+}
+
 // Per-line purchase pricing/packaging (mirrors legacy). For a PO line this
 // carries the supplier's packaging: PkgType (an Item whose code is e.g. "DRUM"),
 // EntityQuantity (qty per package), EntityUnit (the stock unit), and

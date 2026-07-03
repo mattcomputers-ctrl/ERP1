@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@erp1/db';
 import { ApprovalPolicyService } from '../approval/approval-policy.service';
 import { ApprovalRequestService } from '../approval/approval-request.service';
@@ -24,6 +24,13 @@ import type { EditOrderDto } from './dto/edit-order.dto';
 import type { IptResultsDto } from './dto/ipt-results.dto';
 import type { RecordLineDto } from './dto/record-line.dto';
 import type { ReverseOrderDto } from './dto/reverse-order.dto';
+import type {
+  AddRevisionLineDto,
+  PublishRevisionDto,
+  RejectRevisionDto,
+  UpdateRevisionDto,
+  UpdateRevisionLineDto,
+} from './dto/revision.dto';
 import type { ShipLotsDto } from './dto/ship-lots.dto';
 import type { SpecifyPackoutDto } from './dto/specify-packout.dto';
 
@@ -45,6 +52,20 @@ const COMPLETE_SECURED_ITEM = 'order.complete';
 // Secured item governing order reversal (un-completing a batch). Undoing a
 // signed completion is held to the same signing standard as the completion.
 const REVERSE_SECURED_ITEM = 'order.reverse';
+
+// Secured item governing the publish of a released-order revision (UG §7
+// Batching Order Edits / §9 Packaging Order Edits): changing what a released
+// batch will execute is a signed act, like completing it.
+const REVISE_SECURED_ITEM = 'order.revise';
+
+// OrdrEdit lifecycle (UG §7.1.1.1): a draft in progress is STD — the order
+// itself shows EDT, which blocks execution and lifecycle transitions until the
+// draft is resolved; a published edit is CMP (applied to the order); a
+// cancelled one is REJ (kept for audit, excluded from the revision history,
+// and its revision number is reused by the next draft).
+const EDIT_DRAFT = 'STD';
+const EDIT_PUBLISHED = 'CMP';
+const EDIT_REJECTED = 'REJ';
 
 // Legacy ChangeSet context for reversing a production posting: RVSMFP is the
 // ONLY manufacturing reversal context in the live data (389 rows — packout
@@ -69,8 +90,11 @@ const ORDER_EDIT_KIND = 'order.edit';
 
 // Order lifecycle: Not started -> Released -> Completed -> Closed (legacy
 // Ordr.Status NST/RLS/CMP/CLS). A null/empty status is treated as Not started.
+// EDT (Being edited, legacy UG §6.1) is a revision-draft parenthesis on RLS:
+// entered when an order-edit draft opens, left (back to RLS) when the draft is
+// published or rejected. While EDT, everything that requires RLS refuses.
 const STATUS_LABEL: Record<string, string> = {
-  NST: 'Not started', RLS: 'Released', CMP: 'Completed', CLS: 'Closed',
+  NST: 'Not started', RLS: 'Released', EDT: 'Being edited', CMP: 'Completed', CLS: 'Closed',
 };
 const curStatus = (s: string | null) => (s && s.trim() ? s : 'NST');
 const label = (s: string | null) => STATUS_LABEL[curStatus(s)] ?? curStatus(s);
@@ -3208,6 +3232,1094 @@ export class OrdersService {
         pct: plannedBatch && actualBatch != null && plannedBatch > 0 ? (actualBatch / plannedBatch) * 100 : null,
       },
     };
+  }
+
+  // --- §7 order-edit revisions ---------------------------------------------
+  //
+  // Revise a RELEASED production order with a published trail (UG §7 Batching
+  // Order Edits / §9 Packaging Order Edits — the legacy OrdrEdit/OrdDetailEdit
+  // tables are 0-row in this install, so the semantics are native design per
+  // the vendor's manual on the mirrored tables). A draft (OrdrEdit STD) copies
+  // the order's full line set; while it is open the order shows Status EDT,
+  // which locks out execution, lifecycle transitions, and a second draft (they
+  // all re-assert RLS under the row lock). Publishing (an e-signable act)
+  // makes the order match the draft: quantity/comment updates on unexecuted
+  // lines, line removals, and added ingredient/instruction/IPT lines. At the
+  // first publish the pre-edit order is also snapshotted as revision 0
+  // (UG §7.1.8); Ordr.Revision then carries the latest published revision.
+  // Rejecting the draft (UG §7.1.7) returns the order to RLS and frees the
+  // revision number for reuse. Executed lines, produced-product (PK) lines,
+  // and bulk-use (UB) lines are locked; items on existing lines cannot be
+  // changed (vendor rule: delete the line and add a new one).
+
+  /** Line contexts a revision may change, remove, or add. */
+  private static readonly REVISABLE_CONTEXTS = new Set(['UI', 'INSTR', 'IPT']);
+
+  /**
+   * Whether a line already holds recorded work (vendor: completed steps get a
+   * green dot and can be neither changed nor removed). Reversal resets lines
+   * to ExecStatus 'NST', so both NULL and 'NST' read as unexecuted.
+   */
+  private lineExecuted(l: { execStatus: string | null; qtyUsed: number | null }) {
+    return l.qtyUsed != null || (l.execStatus != null && l.execStatus.trim() !== '' && l.execStatus !== 'NST');
+  }
+
+  /** The effective e-signature/reason requirements for publishing a revision. */
+  async reviseRequirement(actorId: string) {
+    return this.securedRequirements(actorId, REVISE_SECURED_ITEM);
+  }
+
+  /**
+   * The revision picture of an order: the published history (UG §6.5.4 —
+   * rejected edits excluded), the open draft with its editable line set, and
+   * whether a new draft may be opened.
+   */
+  async revisions(orderId: number) {
+    const order = await this.prisma.ordr.findUnique({
+      where: { id: orderId },
+      select: { id: true, context: true, status: true, revision: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    const edits = await this.prisma.ordrEdit.findMany({ where: { ordrId: orderId }, orderBy: { id: 'asc' } });
+    // Same resolver as every mutation (lockDraft) — the two must never
+    // disagree about WHICH draft is "the open one".
+    const draft = OrdersService.resolveOpenDraft(orderId, edits.filter((e) => e.status === EDIT_DRAFT));
+    const st = curStatus(order.status);
+    return {
+      orderId,
+      status: st,
+      revision: order.revision ?? 0,
+      canRevise: OrdersService.EXEC_CONTEXTS.has(order.context ?? '') && st === 'RLS',
+      history: edits
+        .filter((e) => e.status === EDIT_PUBLISHED)
+        .sort((a, b) => (a.revision ?? 0) - (b.revision ?? 0))
+        .map((e) => ({
+          editId: e.id,
+          revision: e.revision,
+          revisionComment: e.revisionComment,
+          createdBy: e.createdBy,
+          createdAt: e.createdAt,
+          publishedBy: e.resolvedBy,
+          publishedAt: e.resolvedAt,
+        })),
+      draft: draft
+        ? {
+            editId: draft.id,
+            revision: draft.revision,
+            revisionComment: draft.revisionComment,
+            createdBy: draft.createdBy,
+            createdAt: draft.createdAt,
+            // Echoed back by publish as the reviewed-content token.
+            updatedAt: draft.updatedAt,
+            lines: await this.editLines(draft.id),
+          }
+        : null,
+    };
+  }
+
+  /**
+   * The single-open-draft rule, shared by the read path (revisions) and every
+   * mutation (lockDraft): newest STD edit wins, and MORE than one open draft —
+   * unreachable through the API, since drafts open only under the RLS->EDT
+   * transition — is surfaced loudly rather than silently picking one.
+   */
+  private static resolveOpenDraft<T extends { id: number }>(orderId: number, drafts: T[]): T | null {
+    if (drafts.length > 1) {
+      throw new BadRequestException(`Order #${orderId} has ${drafts.length} open revision drafts — data inconsistency.`);
+    }
+    return drafts[0] ?? null;
+  }
+
+  /** One revision's line set (open draft or published snapshot), decorated. */
+  async revisionLines(orderId: number, editId: number) {
+    const edit = await this.prisma.ordrEdit.findUnique({ where: { id: editId } });
+    if (!edit || edit.ordrId !== orderId) throw new NotFoundException('Revision not found');
+    return {
+      editId,
+      revision: edit.revision,
+      status: edit.status,
+      revisionComment: edit.revisionComment,
+      lines: await this.editLines(editId),
+    };
+  }
+
+  private async editLines(editId: number) {
+    const rows = await this.prisma.ordDetailEdit.findMany({
+      where: { ordrEditId: editId },
+      orderBy: [{ execOrder: 'asc' }, { id: 'asc' }],
+    });
+    const itemIds = [...new Set(rows.map((r) => r.itemId).filter((v): v is number => v != null))];
+    const items = itemIds.length
+      ? await this.prisma.item.findMany({
+          where: { id: { in: itemIds } },
+          select: { id: true, itemCode: true, description: true, unit: true },
+        })
+      : [];
+    const itemById = new Map(items.map((i) => [i.id, i]));
+    const tests = await this.prisma.ordDetailTestEdit.findMany({
+      where: { ordDetailEditId: { in: rows.map((r) => r.id) } },
+      orderBy: [{ line: 'asc' }, { id: 'asc' }],
+    });
+    const testsByLine = new Map<number, typeof tests>();
+    for (const t of tests) {
+      const arr = testsByLine.get(t.ordDetailEditId) ?? [];
+      arr.push(t);
+      testsByLine.set(t.ordDetailEditId, arr);
+    }
+    // Removability extra for IPT lines: recorded test RESULTS also lock the
+    // line even when the line itself was never checked off (results can be
+    // entered while the order is Released).
+    const iptSourceIds = rows
+      .filter((r) => r.context === 'IPT' && r.sourceLineId != null)
+      .map((r) => r.sourceLineId!);
+    const testedIpt = iptSourceIds.length
+      ? new Set(
+          (
+            await this.prisma.ordDetailTest.findMany({
+              where: { ordDetailId: { in: iptSourceIds }, result: { not: null } },
+              select: { ordDetailId: true },
+            })
+          ).map((t) => t.ordDetailId!),
+        )
+      : new Set<number>();
+    // Committed (packout/demand-allocated) quantity per source line: removal
+    // is refused outright, and a quantity edit may not go below this floor.
+    const sourceIds = rows.map((r) => r.sourceLineId).filter((v): v is number => v != null);
+    const commitAgg = sourceIds.length
+      ? await this.prisma.ordDetailCommit.groupBy({
+          by: ['ordDetailId'],
+          where: { ordDetailId: { in: sourceIds } },
+          _sum: { qty: true },
+        })
+      : [];
+    const committedBySource = new Map(commitAgg.map((c) => [c.ordDetailId!, c._sum.qty ?? 0]));
+    return rows.map((r) => {
+      const item = r.itemId != null ? itemById.get(r.itemId) : undefined;
+      const locked =
+        r.sourceLineId != null &&
+        (!OrdersService.REVISABLE_CONTEXTS.has(r.context ?? '') ||
+          this.lineExecuted(r) ||
+          testedIpt.has(r.sourceLineId));
+      return {
+        lineId: r.id,
+        sourceLineId: r.sourceLineId,
+        added: r.sourceLineId == null,
+        context: r.context,
+        itemId: r.itemId,
+        itemCode: item?.itemCode ?? null,
+        itemDescription: item?.description ?? null,
+        unit: item?.unit ?? null,
+        qtyReqd: r.qtyReqd,
+        qtyUsed: r.qtyUsed,
+        execStatus: r.execStatus,
+        line: r.line != null ? Number(r.line) : null,
+        execOrder: r.execOrder,
+        phase: r.phase,
+        description: r.description,
+        comment: r.comment,
+        locked,
+        removed: r.removed,
+        committedQty: r.sourceLineId != null ? (committedBySource.get(r.sourceLineId) ?? null) : null,
+        tests: (testsByLine.get(r.id) ?? []).map((t) => ({
+          testId: t.id,
+          test: t.test,
+          qualifier: t.qualifier,
+          min: t.min,
+          max: t.max,
+          target: t.target,
+          comment: t.comment,
+        })),
+      };
+    });
+  }
+
+  /**
+   * Open a revision draft on a Released production order: snapshot every line
+   * (and IPT tests) into the edit tables and flip the order to EDT, atomically.
+   * EDT is what guarantees a single open draft and freezes execution while the
+   * revision is being written (UG §6.9.2).
+   */
+  async createRevision(orderId: number, actor: Actor) {
+    const order = await this.requireTransition(orderId, 'RLS', 'revise');
+    if (!OrdersService.EXEC_CONTEXTS.has(order.context ?? '')) {
+      throw new BadRequestException('Only production (MFBA/MFPP) orders take order-edit revisions.');
+    }
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      // Row lock first, then the advisory id-allocation lock (the global order).
+      await this.lockAndRequireStatus(tx, orderId, 'RLS');
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const editId =
+        ((await tx.ordrEdit.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ??
+          NATIVE_ID_BASE) + 1;
+      // Rejected drafts free their number (UG §7.1.7); revision 0 is reserved
+      // for the original-order snapshot taken at first publish.
+      const maxPub = await tx.ordrEdit.aggregate({
+        _max: { revision: true },
+        where: { ordrId: orderId, status: EDIT_PUBLISHED },
+      });
+      const revision = (maxPub._max.revision ?? 0) + 1;
+      await tx.ordrEdit.create({
+        data: {
+          id: editId,
+          ordrId: orderId,
+          status: EDIT_DRAFT,
+          revision,
+          context: order.context,
+          createdBy: actor.label ?? actor.id,
+          createdAt: at,
+          updatedAt: at,
+        },
+      });
+      const copied = await this.copyOrderLinesToEdit(tx, orderId, editId);
+      await tx.ordr.update({ where: { id: orderId }, data: { status: 'EDT' } });
+      await this.audit.record(
+        {
+          action: 'order.revise.open',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.revise',
+          summary: `Order #${orderId}: revision ${revision} draft opened (${copied} lines)`,
+          changes: [
+            { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Status', oldValue: 'RLS', newValue: 'EDT' },
+            { tableName: 'OrdrEdit', recordId: String(editId), fieldName: 'created', oldValue: null, newValue: `revision ${revision} draft` },
+          ],
+        },
+        tx,
+      );
+      return { orderId, editId, revision, lines: copied };
+    });
+  }
+
+  /**
+   * Snapshot an order's live lines (and their IPT tests) into an edit's line
+   * set. Used at draft creation (the editable baseline) and at first publish
+   * (the revision-0 original-order snapshot). Caller must hold the Ordr row
+   * lock and the native-id allocation lock.
+   */
+  private async copyOrderLinesToEdit(tx: Prisma.TransactionClient, orderId: number, editId: number) {
+    const lines = await tx.ordDetail.findMany({
+      where: { ordrId: orderId },
+      orderBy: [{ execOrder: 'asc' }, { sortOrder: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true, context: true, itemId: true, qtyReqd: true, stdQty: true, qtyUsed: true,
+        execStatus: true, line: true, execOrder: true, phase: true, description: true, comment: true,
+      },
+    });
+    const nativeWhere = { id: { gte: NATIVE_ID_BASE } };
+    let deId = (await tx.ordDetailEdit.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
+    let dtId =
+      (await tx.ordDetailTestEdit.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
+    const editLineBySource = new Map<number, number>();
+    await tx.ordDetailEdit.createMany({
+      data: lines.map((l) => {
+        const id = (deId += 1);
+        editLineBySource.set(l.id, id);
+        return {
+          id,
+          ordrEditId: editId,
+          sourceLineId: l.id,
+          context: l.context,
+          itemId: l.itemId,
+          qtyReqd: l.qtyReqd,
+          stdQty: l.stdQty,
+          qtyUsed: l.qtyUsed,
+          execStatus: l.execStatus,
+          line: l.line,
+          execOrder: l.execOrder,
+          phase: l.phase,
+          description: l.description,
+          comment: l.comment,
+        };
+      }),
+    });
+    const iptIds = lines.filter((l) => l.context === 'IPT').map((l) => l.id);
+    if (iptIds.length) {
+      const tests = await tx.ordDetailTest.findMany({
+        where: { ordDetailId: { in: iptIds } },
+        orderBy: [{ line: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true, ordDetailId: true, test: true, qualifier: true, min: true, max: true,
+          target: true, comment: true, line: true,
+        },
+      });
+      const rows = tests.filter((t) => t.ordDetailId != null && t.test != null);
+      if (rows.length) {
+        await tx.ordDetailTestEdit.createMany({
+          data: rows.map((t) => ({
+            id: (dtId += 1),
+            ordDetailEditId: editLineBySource.get(t.ordDetailId!)!,
+            sourceTestId: t.id,
+            test: t.test!,
+            qualifier: t.qualifier,
+            min: t.min,
+            max: t.max,
+            target: t.target,
+            comment: t.comment,
+            line: t.line,
+          })),
+        });
+      }
+    }
+    return lines.length;
+  }
+
+  /**
+   * Lock the order row and resolve its single open revision draft. EDT and the
+   * STD draft flip together under the row lock, so EDT-without-draft is a data
+   * inconsistency worth surfacing loudly rather than papering over.
+   */
+  private async lockDraft(tx: Prisma.TransactionClient, orderId: number) {
+    await this.lockAndRequireStatus(tx, orderId, 'EDT');
+    const drafts = await tx.ordrEdit.findMany({
+      where: { ordrId: orderId, status: EDIT_DRAFT },
+      orderBy: { id: 'desc' },
+    });
+    const draft = OrdersService.resolveOpenDraft(orderId, drafts);
+    if (!draft) {
+      throw new BadRequestException(`Order #${orderId} is Being edited but has no open revision draft — data inconsistency.`);
+    }
+    return draft;
+  }
+
+  /** Bump the draft's optimistic-concurrency token inside the mutating tx. */
+  private async touchDraft(tx: Prisma.TransactionClient, editId: number, at: Date) {
+    await tx.ordrEdit.update({ where: { id: editId }, data: { updatedAt: at } });
+  }
+
+  /** Update the open draft's header (the revision comment, required to publish). */
+  async updateRevision(orderId: number, dto: UpdateRevisionDto, actor: Actor) {
+    if (dto.revisionComment === undefined) throw new BadRequestException('Nothing to update.');
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const draft = await this.lockDraft(tx, orderId);
+      const comment = dto.revisionComment?.trim() ? dto.revisionComment.trim() : null;
+      await tx.ordrEdit.update({ where: { id: draft.id }, data: { revisionComment: comment, updatedAt: at } });
+      await this.audit.record(
+        {
+          action: 'order.revise.update',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.revise',
+          summary: `Order #${orderId} revision ${draft.revision}: revision comment updated`,
+          changes: [
+            { tableName: 'OrdrEdit', recordId: String(draft.id), fieldName: 'RevisionComment', oldValue: draft.revisionComment, newValue: comment },
+          ],
+        },
+        tx,
+      );
+      return { orderId, editId: draft.id };
+    });
+  }
+
+  /**
+   * Add a line to the open draft: an ingredient (UI), an instruction step
+   * (INSTR), or an in-process test step (IPT, with its tests) — the vendor's
+   * failed-IPT fix adds the corrective ingredients then a new IPT after them
+   * (UG §7.2.5). The line lands on the order only when the draft is published.
+   */
+  async addRevisionLine(orderId: number, dto: AddRevisionLineDto, actor: Actor) {
+    if (dto.context === 'UI') {
+      if (dto.itemId == null) throw new BadRequestException('An ingredient line needs an item.');
+      if (!(dto.qty != null && dto.qty > 0)) throw new BadRequestException('An ingredient line needs a positive quantity.');
+    }
+    if (dto.context === 'INSTR' && !dto.description?.trim()) {
+      throw new BadRequestException('An instruction line needs a description.');
+    }
+    if (dto.tests?.length && dto.context !== 'IPT') {
+      throw new BadRequestException('Only IPT lines carry tests.');
+    }
+    const item =
+      dto.itemId != null
+        ? await this.prisma.item.findUnique({ where: { id: dto.itemId }, select: { id: true, itemCode: true } })
+        : null;
+    if (dto.itemId != null && !item) throw new BadRequestException(`Item ${dto.itemId} not found.`);
+    if (dto.tests?.length) {
+      const names = [...new Set(dto.tests.map((t) => t.test.trim()))];
+      if (names.length !== dto.tests.length) throw new BadRequestException('The same test is listed more than once.');
+      const known = await this.prisma.test.findMany({ where: { test: { in: names } }, select: { test: true } });
+      if (known.length !== names.length) {
+        const have = new Set(known.map((k) => k.test));
+        throw new BadRequestException(`Unknown test(s): ${names.filter((n) => !have.has(n)).join(', ')}.`);
+      }
+    }
+
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const draft = await this.lockDraft(tx, orderId);
+      // In-process tests only exist on batch orders: recordIptResults and the
+      // execution panel's IPT grid are MFBA-only, so an IPT step published
+      // onto a packaging order could never record results.
+      if (dto.context === 'IPT' && draft.context !== 'MFBA') {
+        throw new BadRequestException('Only batch (MFBA) orders carry in-process tests.');
+      }
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const nativeWhere = { id: { gte: NATIVE_ID_BASE } };
+      const deId =
+        ((await tx.ordDetailEdit.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE) + 1;
+      const agg = await tx.ordDetailEdit.aggregate({ _max: { execOrder: true }, where: { ordrEditId: draft.id } });
+      await tx.ordDetailEdit.create({
+        data: {
+          id: deId,
+          ordrEditId: draft.id,
+          sourceLineId: null,
+          context: dto.context,
+          itemId: dto.itemId ?? null,
+          qtyReqd: dto.context === 'UI' ? dto.qty : null,
+          stdQty: dto.context === 'UI' ? dto.qty : null,
+          execOrder: (agg._max.execOrder ?? 0) + 1,
+          phase: dto.phase?.trim() || null,
+          description: dto.description?.trim() || (dto.context === 'IPT' ? 'In-process testing' : null),
+          comment: dto.comment?.trim() || null,
+        },
+      });
+      if (dto.tests?.length) {
+        let dtId =
+          (await tx.ordDetailTestEdit.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
+        await tx.ordDetailTestEdit.createMany({
+          data: dto.tests.map((t, i) => ({
+            id: (dtId += 1),
+            ordDetailEditId: deId,
+            sourceTestId: null,
+            test: t.test.trim(),
+            qualifier: t.qualifier?.trim() || null,
+            min: t.min ?? null,
+            max: t.max ?? null,
+            target: t.target ?? null,
+            comment: t.comment?.trim() || null,
+            line: i + 1,
+          })),
+        });
+      }
+      await this.audit.record(
+        {
+          action: 'order.revise.addLine',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.revise',
+          summary:
+            `Order #${orderId} revision ${draft.revision}: ${dto.context} line added` +
+            (item ? ` (${item.itemCode}${dto.qty != null ? ` qty ${dto.qty}` : ''})` : '') +
+            (dto.tests?.length ? ` with ${dto.tests.length} test(s)` : ''),
+          changes: [
+            {
+              tableName: 'OrdDetailEdit', recordId: String(deId), fieldName: 'created', oldValue: null,
+              newValue: `${dto.context}${item ? ` ${item.itemCode}` : ''}${dto.qty != null ? ` qty ${dto.qty}` : ''}`,
+            },
+          ],
+        },
+        tx,
+      );
+      await this.touchDraft(tx, draft.id, at);
+      return { orderId, editId: draft.id, lineId: deId };
+    });
+  }
+
+  /** Change a draft line: quantity on material (UI) lines, comment on any editable line. */
+  async updateRevisionLine(orderId: number, lineId: number, dto: UpdateRevisionLineDto, actor: Actor) {
+    if (dto.qtyReqd === undefined && dto.comment === undefined) throw new BadRequestException('Nothing to update.');
+    // Explicit null slips past class-validator (@IsOptional skips ALL checks
+    // on null) — assert positivity here so a NULL/0 quantity can never land.
+    if (dto.qtyReqd !== undefined && !(typeof dto.qtyReqd === 'number' && dto.qtyReqd > 0)) {
+      throw new BadRequestException('Quantity must be a positive number.');
+    }
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const draft = await this.lockDraft(tx, orderId);
+      const row = await tx.ordDetailEdit.findUnique({ where: { id: lineId } });
+      if (!row || row.ordrEditId !== draft.id) {
+        throw new NotFoundException(`Line ${lineId} is not part of this order's open revision.`);
+      }
+      if (row.removed) {
+        throw new BadRequestException('This line is marked for removal — restore it before editing.');
+      }
+      if (!OrdersService.REVISABLE_CONTEXTS.has(row.context ?? '')) {
+        throw new BadRequestException(`${row.context ?? 'Such'} lines cannot be changed by a revision.`);
+      }
+      if (row.sourceLineId != null && this.lineExecuted(row)) {
+        throw new BadRequestException('This line was already executed — completed steps cannot be changed (add a new line instead).');
+      }
+      if (dto.qtyReqd !== undefined && row.context !== 'UI') {
+        throw new BadRequestException('Only material (UI) lines carry a quantity.');
+      }
+      // A demand line's quantity may not drop below what packout allocations
+      // (OrdDetailCommit) have already committed against it.
+      if (dto.qtyReqd !== undefined && row.sourceLineId != null) {
+        const committed = await tx.ordDetailCommit.aggregate({
+          _sum: { qty: true },
+          where: { ordDetailId: row.sourceLineId },
+        });
+        const floor = committed._sum.qty ?? 0;
+        if (dto.qtyReqd < floor) {
+          throw new BadRequestException(
+            `Quantity ${dto.qtyReqd} is below the ${floor} already allocated to packouts — reduce the allocation first.`,
+          );
+        }
+      }
+      const data: { qtyReqd?: number; stdQty?: number; comment?: string | null } = {};
+      const changes: FieldChange[] = [];
+      if (dto.qtyReqd !== undefined && dto.qtyReqd !== row.qtyReqd) {
+        data.qtyReqd = dto.qtyReqd;
+        // An added line has no independent recipe standard — its standard IS
+        // its quantity (same convention as batch additions), so keep them in
+        // step when the addition is corrected before publish.
+        if (row.sourceLineId == null && row.context === 'UI') data.stdQty = dto.qtyReqd;
+        changes.push({
+          tableName: 'OrdDetailEdit', recordId: String(lineId), fieldName: 'QtyReqd',
+          oldValue: row.qtyReqd != null ? String(row.qtyReqd) : null, newValue: String(dto.qtyReqd),
+        });
+      }
+      if (dto.comment !== undefined) {
+        const c = dto.comment?.trim() ? dto.comment.trim() : null;
+        if (c !== (row.comment ?? null)) {
+          data.comment = c;
+          changes.push({
+            tableName: 'OrdDetailEdit', recordId: String(lineId), fieldName: 'Comment',
+            oldValue: row.comment, newValue: c,
+          });
+        }
+      }
+      if (!changes.length) return { orderId, editId: draft.id, lineId, changed: false };
+      await tx.ordDetailEdit.update({ where: { id: lineId }, data });
+      await this.audit.record(
+        {
+          action: 'order.revise.updateLine',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.revise',
+          summary: `Order #${orderId} revision ${draft.revision}: line ${lineId} updated`,
+          changes,
+        },
+        tx,
+      );
+      await this.touchDraft(tx, draft.id, at);
+      return { orderId, editId: draft.id, lineId, changed: true };
+    });
+  }
+
+  /**
+   * Remove a line from the draft. For a line the edit added this cancels the
+   * addition (hard delete — it never had a live counterpart); for a copied
+   * line it MARKS the row removed (never deletes it), so the draft keeps its
+   * full source-id baseline and publish can tell a user removal apart from a
+   * live line that appeared after the snapshot. Executed lines, PK/UB lines,
+   * lines carrying packout/demand allocations, and IPT lines with recorded
+   * results are refused (re-checked again at publish under the same lock).
+   */
+  async deleteRevisionLine(orderId: number, lineId: number, actor: Actor) {
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const draft = await this.lockDraft(tx, orderId);
+      const row = await tx.ordDetailEdit.findUnique({ where: { id: lineId } });
+      if (!row || row.ordrEditId !== draft.id) {
+        throw new NotFoundException(`Line ${lineId} is not part of this order's open revision.`);
+      }
+      if (row.sourceLineId != null) {
+        if (row.removed) throw new BadRequestException('This line is already marked for removal.');
+        if (!OrdersService.REVISABLE_CONTEXTS.has(row.context ?? '')) {
+          throw new BadRequestException(`${row.context ?? 'Such'} lines cannot be removed by a revision.`);
+        }
+        if (this.lineExecuted(row)) {
+          throw new BadRequestException('This line was already executed — completed steps cannot be removed.');
+        }
+        await this.requireRemovableLive(tx, row.sourceLineId, row.context);
+        await tx.ordDetailEdit.update({ where: { id: lineId }, data: { removed: true } });
+      } else {
+        await tx.ordDetailTestEdit.deleteMany({ where: { ordDetailEditId: lineId } });
+        await tx.ordDetailEdit.delete({ where: { id: lineId } });
+      }
+      await this.audit.record(
+        {
+          action: 'order.revise.removeLine',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.revise',
+          summary:
+            `Order #${orderId} revision ${draft.revision}: ` +
+            (row.sourceLineId == null ? `added line ${lineId} withdrawn` : `line ${row.sourceLineId} marked for removal`),
+          changes: [
+            {
+              tableName: 'OrdDetailEdit', recordId: String(lineId), fieldName: 'removed',
+              oldValue: `${row.context}${row.itemId != null ? ` item ${row.itemId}` : ''}${row.qtyReqd != null ? ` qty ${row.qtyReqd}` : ''}`,
+              newValue: row.sourceLineId == null ? null : 'true',
+            },
+          ],
+        },
+        tx,
+      );
+      await this.touchDraft(tx, draft.id, at);
+      return { orderId, editId: draft.id, lineId };
+    });
+  }
+
+  /** Undo a mark-for-removal on a copied draft line. */
+  async restoreRevisionLine(orderId: number, lineId: number, actor: Actor) {
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const draft = await this.lockDraft(tx, orderId);
+      const row = await tx.ordDetailEdit.findUnique({ where: { id: lineId } });
+      if (!row || row.ordrEditId !== draft.id) {
+        throw new NotFoundException(`Line ${lineId} is not part of this order's open revision.`);
+      }
+      if (row.sourceLineId == null || !row.removed) {
+        throw new BadRequestException('Only lines marked for removal can be restored.');
+      }
+      await tx.ordDetailEdit.update({ where: { id: lineId }, data: { removed: false } });
+      await this.audit.record(
+        {
+          action: 'order.revise.restoreLine',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.revise',
+          summary: `Order #${orderId} revision ${draft.revision}: line ${row.sourceLineId} removal undone`,
+          changes: [
+            { tableName: 'OrdDetailEdit', recordId: String(lineId), fieldName: 'removed', oldValue: 'true', newValue: 'false' },
+          ],
+        },
+        tx,
+      );
+      await this.touchDraft(tx, draft.id, at);
+      return { orderId, editId: draft.id, lineId };
+    });
+  }
+
+  /**
+   * Refuse removing a live line that recorded work or that other records
+   * depend on. A packout/demand allocation (OrdDetailCommit) referencing the
+   * line — from either side — would be orphaned by the delete; recorded IPT
+   * results must never lose their test spec.
+   */
+  private async requireRemovableLive(tx: Prisma.TransactionClient, sourceLineId: number, context: string | null) {
+    const live = await tx.ordDetail.findUnique({
+      where: { id: sourceLineId },
+      select: { id: true, execStatus: true, qtyUsed: true },
+    });
+    if (!live) return; // vanished live line surfaces as stale-draft at publish
+    if (this.lineExecuted(live)) {
+      throw new BadRequestException('This line was already executed — completed steps cannot be removed.');
+    }
+    const commits = await tx.ordDetailCommit.count({
+      where: { OR: [{ ordDetailId: sourceLineId }, { srcOrdDetailId: sourceLineId }] },
+    });
+    if (commits > 0) {
+      throw new BadRequestException('This line carries a packout/demand allocation — remove the allocation first.');
+    }
+    if (context === 'IPT') {
+      const withResult = await tx.ordDetailTest.count({
+        where: { ordDetailId: sourceLineId, result: { not: null } },
+      });
+      if (withResult > 0) {
+        throw new BadRequestException('This test step already has recorded results — it cannot be removed.');
+      }
+    }
+  }
+
+  /**
+   * Publish the open draft — apply it to the order (UG §7.1.8). An e-signable
+   * act gated by the `order.revise` secured item. Inside one transaction under
+   * the order row lock: re-validate every change against the LIVE lines (the
+   * draft's own snapshot flags are advisory; the live re-read is authoritative
+   * — everything that writes OrdDetail takes the same row lock first), take
+   * the revision-0 snapshot if this is the first publish, apply updates/
+   * removals/additions, stamp the edit CMP and the order back to RLS with its
+   * new revision number.
+   */
+  async publishRevision(orderId: number, dto: PublishRevisionDto, actor: Actor) {
+    await this.requireTransition(orderId, 'EDT', 'publish a revision of');
+    const req = await this.securedRequirements(actor.id, REVISE_SECURED_ITEM);
+    if (req.requireReason && !dto.reason?.trim()) {
+      throw new BadRequestException('A reason is required to publish this revision.');
+    }
+    const witness = await this.verifySignatures(actor, dto, req, REVISE_SECURED_ITEM, {
+      password: 'Your password is required to sign this revision.',
+      witnessRequired: 'A witness signature is required to publish this revision.',
+      witnessNotPermitted: 'That user is not permitted to witness order revisions.',
+    });
+
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const draft = await this.lockDraft(tx, orderId);
+      // Bind the signature to the draft the signer actually reviewed: the
+      // credential entry happened pre-tx, so without this pin a concurrent
+      // reject + re-open could swap a DIFFERENT draft under the signature.
+      if (draft.id !== dto.editId) {
+        throw new ConflictException('The revision draft changed since you reviewed it — reload and review again.');
+      }
+      // And when the client echoes the content token, refuse edits made to
+      // the SAME draft after the review too.
+      if (dto.draftUpdatedAt !== undefined) {
+        const seen = new Date(dto.draftUpdatedAt).getTime();
+        if (!draft.updatedAt || draft.updatedAt.getTime() !== seen) {
+          throw new ConflictException('The draft was edited since you reviewed it — reload and review again.');
+        }
+      }
+      if (!draft.revisionComment?.trim()) {
+        throw new BadRequestException('A revision comment is required to publish.');
+      }
+      const cur = await tx.ordr.findUnique({
+        where: { id: orderId },
+        select: { context: true, revision: true },
+      });
+      if (!cur) throw new NotFoundException(`Order #${orderId} not found.`);
+
+      const live = await tx.ordDetail.findMany({
+        where: { ordrId: orderId },
+        orderBy: [{ execOrder: 'asc' }, { sortOrder: 'asc' }, { id: 'asc' }],
+      });
+      const liveById = new Map(live.map((l) => [l.id, l]));
+      const draftRows = await tx.ordDetailEdit.findMany({
+        where: { ordrEditId: draft.id },
+        orderBy: [{ execOrder: 'asc' }, { id: 'asc' }],
+      });
+      const draftBySource = new Map(
+        draftRows.filter((r) => r.sourceLineId != null).map((r) => [r.sourceLineId!, r]),
+      );
+
+      // Stale-draft guard: every copied draft line's source must still exist.
+      for (const r of draftRows) {
+        if (r.sourceLineId != null && !liveById.has(r.sourceLineId)) {
+          throw new BadRequestException(
+            `Order line ${r.sourceLineId} no longer exists — the draft is stale; reject it and start a new revision.`,
+          );
+        }
+      }
+      // Appeared-line guard (the reverse direction): a live line the draft
+      // never snapshotted means something wrote the order outside the EDT
+      // lock (a parallel-running import). Refuse loudly — treating it as a
+      // removal would silently delete a line the reviser never saw.
+      const appeared = live.filter((l) => !draftBySource.has(l.id));
+      if (appeared.length) {
+        throw new BadRequestException(
+          `Line(s) ${appeared.map((l) => l.id).join(', ')} appeared since the draft was created — reject the draft and start a new revision.`,
+        );
+      }
+
+      // Updates: draft lines that differ from their live source (rows marked
+      // for removal are handled below, not diffed).
+      const updates: { live: (typeof live)[number]; qtyReqd?: number; comment?: string | null }[] = [];
+      for (const r of draftRows) {
+        if (r.sourceLineId == null || r.removed) continue;
+        const l = liveById.get(r.sourceLineId)!;
+        const qtyChanged = r.qtyReqd !== l.qtyReqd;
+        const commentChanged = (r.comment ?? null) !== (l.comment ?? null);
+        if (!qtyChanged && !commentChanged) continue;
+        if (!OrdersService.REVISABLE_CONTEXTS.has(l.context ?? '')) {
+          throw new BadRequestException(`Line ${l.id} (${l.context}) cannot be changed by a revision.`);
+        }
+        if (this.lineExecuted(l)) {
+          throw new BadRequestException(`Line ${l.id} was executed since the draft was created — it cannot be changed.`);
+        }
+        if (qtyChanged && l.context !== 'UI') {
+          throw new BadRequestException(`Line ${l.id} (${l.context}) carries no quantity to change.`);
+        }
+        if (qtyChanged && !(r.qtyReqd != null && r.qtyReqd > 0)) {
+          throw new BadRequestException(`Line ${l.id}: material quantities must be positive.`);
+        }
+        if (qtyChanged) {
+          // Demand floor: the line's quantity may not drop below what packout
+          // allocations have committed against it (re-checked under the lock).
+          const committed = await tx.ordDetailCommit.aggregate({
+            _sum: { qty: true },
+            where: { ordDetailId: l.id },
+          });
+          const floor = committed._sum.qty ?? 0;
+          if (r.qtyReqd! < floor) {
+            throw new BadRequestException(
+              `Line ${l.id}: quantity ${r.qtyReqd} is below the ${floor} already allocated to packouts — reduce the allocation first.`,
+            );
+          }
+        }
+        updates.push({
+          live: l,
+          ...(qtyChanged ? { qtyReqd: r.qtyReqd! } : {}),
+          ...(commentChanged ? { comment: r.comment ?? null } : {}),
+        });
+      }
+
+      // Removals: draft rows the user marked removed. Full re-check under the
+      // lock — the draft-time checks are UX; these are the enforcement.
+      const removals = draftRows
+        .filter((r) => r.removed && r.sourceLineId != null)
+        .map((r) => liveById.get(r.sourceLineId!)!);
+      for (const l of removals) {
+        if (!OrdersService.REVISABLE_CONTEXTS.has(l.context ?? '') || this.lineExecuted(l)) {
+          throw new BadRequestException(
+            `Line ${l.id} (${l.context}) cannot be removed by a revision — reject the draft and start over.`,
+          );
+        }
+        const commits = await tx.ordDetailCommit.count({
+          where: { OR: [{ ordDetailId: l.id }, { srcOrdDetailId: l.id }] },
+        });
+        if (commits > 0) {
+          throw new BadRequestException(`Line ${l.id} carries a packout/demand allocation — remove the allocation first.`);
+        }
+        if (l.context === 'IPT') {
+          const withResult = await tx.ordDetailTest.count({
+            where: { ordDetailId: l.id, result: { not: null } },
+          });
+          if (withResult > 0) {
+            throw new BadRequestException(`Line ${l.id} has recorded test results — it cannot be removed.`);
+          }
+        }
+      }
+
+      // Additions: draft lines with no source.
+      const additions = draftRows.filter((r) => r.sourceLineId == null);
+      for (const a of additions) {
+        if (a.context === 'UI' && !(a.qtyReqd != null && a.qtyReqd > 0)) {
+          throw new BadRequestException('Material additions must have a positive quantity.');
+        }
+        if (a.context === 'IPT' && cur.context !== 'MFBA') {
+          throw new BadRequestException('Only batch (MFBA) orders carry in-process tests.');
+        }
+      }
+
+      if (!updates.length && !removals.length && !additions.length) {
+        throw new BadRequestException('This revision makes no changes — edit some lines first, or reject it.');
+      }
+
+      const changes: FieldChange[] = [];
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const nativeWhere = { id: { gte: NATIVE_ID_BASE } };
+
+      // First publish: snapshot the pre-edit order as revision 0 (UG §7.1.8),
+      // BEFORE applying this edit's changes.
+      const hasRevZero = await tx.ordrEdit.findFirst({
+        where: { ordrId: orderId, revision: 0, status: EDIT_PUBLISHED },
+        select: { id: true },
+      });
+      if (!hasRevZero) {
+        const zeroId =
+          ((await tx.ordrEdit.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE) + 1;
+        await tx.ordrEdit.create({
+          data: {
+            id: zeroId,
+            ordrId: orderId,
+            status: EDIT_PUBLISHED,
+            revision: 0,
+            revisionComment: 'Original order (as of first revision)',
+            context: cur.context,
+            createdBy: actor.label ?? actor.id,
+            createdAt: at,
+            resolvedBy: actor.label ?? actor.id,
+            resolvedAt: at,
+          },
+        });
+        await this.copyOrderLinesToEdit(tx, orderId, zeroId);
+        changes.push({
+          tableName: 'OrdrEdit', recordId: String(zeroId), fieldName: 'created',
+          oldValue: null, newValue: 'revision 0 (original order snapshot)',
+        });
+      }
+
+      // Apply: updates.
+      for (const u of updates) {
+        await tx.ordDetail.update({
+          where: { id: u.live.id },
+          data: {
+            ...(u.qtyReqd !== undefined ? { qtyReqd: u.qtyReqd } : {}),
+            ...(u.comment !== undefined ? { comment: u.comment } : {}),
+            dateUpdated: at,
+          },
+        });
+        if (u.qtyReqd !== undefined) {
+          changes.push({
+            tableName: 'OrdDetail', recordId: String(u.live.id), fieldName: 'QtyReqd',
+            oldValue: u.live.qtyReqd != null ? String(u.live.qtyReqd) : null, newValue: String(u.qtyReqd),
+          });
+        }
+        if (u.comment !== undefined) {
+          changes.push({
+            tableName: 'OrdDetail', recordId: String(u.live.id), fieldName: 'Comment',
+            oldValue: u.live.comment, newValue: u.comment,
+          });
+        }
+      }
+
+      // Apply: removals (test specs first — no FK, but never leave orphans).
+      if (removals.length) {
+        const removeIds = removals.map((l) => l.id);
+        await tx.ordDetailTest.deleteMany({ where: { ordDetailId: { in: removeIds } } });
+        await tx.ordDetail.deleteMany({ where: { id: { in: removeIds } } });
+        for (const l of removals) {
+          changes.push({
+            tableName: 'OrdDetail', recordId: String(l.id), fieldName: 'removed',
+            oldValue: `${l.context}${l.itemId != null ? ` item ${l.itemId}` : ''}${l.qtyReqd != null ? ` qty ${l.qtyReqd}` : ''}`,
+            newValue: null,
+          });
+        }
+      }
+
+      // Apply: additions — appended after the existing procedure (vendor
+      // recommends new instructions as additional phases, UG §7.1.2).
+      if (additions.length) {
+        let odId = (await tx.ordDetail.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
+        let otId =
+          (await tx.ordDetailTest.aggregate({ _max: { id: true }, where: nativeWhere }))._max.id ?? NATIVE_ID_BASE;
+        const aggLive = await tx.ordDetail.aggregate({
+          _max: { line: true, execOrder: true },
+          where: { ordrId: orderId },
+        });
+        let lineNo = Number(aggLive._max.line ?? 0);
+        let execOrder = aggLive._max.execOrder ?? 0;
+        for (const a of additions) {
+          const newId = (odId += 1);
+          await tx.ordDetail.create({
+            data: {
+              id: newId,
+              ordrId: orderId,
+              context: a.context,
+              itemId: a.itemId,
+              // An addition's standard IS its published quantity (same
+              // convention as batch additions — no independent recipe base).
+              qtyReqd: a.qtyReqd,
+              stdQty: a.context === 'UI' ? a.qtyReqd : null,
+              line: (lineNo += 1),
+              execOrder: (execOrder += 1),
+              phase: a.phase,
+              description: a.description,
+              comment: a.comment,
+              mustPreweigh: 0,
+              isOpen: true,
+              dateUpdated: at,
+            },
+          });
+          // Point the published draft line at the live line it created.
+          await tx.ordDetailEdit.update({ where: { id: a.id }, data: { sourceLineId: newId } });
+          const tests = await tx.ordDetailTestEdit.findMany({
+            where: { ordDetailEditId: a.id },
+            orderBy: [{ line: 'asc' }, { id: 'asc' }],
+          });
+          if (tests.length) {
+            await tx.ordDetailTest.createMany({
+              data: tests.map((t) => ({
+                id: (otId += 1),
+                ordDetailId: newId,
+                test: t.test,
+                qualifier: t.qualifier,
+                min: t.min,
+                max: t.max,
+                target: t.target,
+                comment: t.comment,
+                line: t.line,
+              })),
+            });
+          }
+          changes.push({
+            tableName: 'OrdDetail', recordId: String(newId), fieldName: 'created', oldValue: null,
+            newValue:
+              `${a.context}${a.itemId != null ? ` item ${a.itemId}` : ''}${a.qtyReqd != null ? ` qty ${a.qtyReqd}` : ''}` +
+              (tests.length ? ` (+${tests.length} tests)` : ''),
+          });
+        }
+      }
+
+      // Finalize: edit CMP, order back to RLS with the published revision
+      // number. Renumber defensively under the lock (must equal the draft's
+      // number — nothing else can publish while the order is EDT).
+      const maxPub = await tx.ordrEdit.aggregate({
+        _max: { revision: true },
+        where: { ordrId: orderId, status: EDIT_PUBLISHED },
+      });
+      const revision = (maxPub._max.revision ?? 0) + 1;
+      await tx.ordrEdit.update({
+        where: { id: draft.id },
+        data: { status: EDIT_PUBLISHED, revision, resolvedBy: actor.label ?? actor.id, resolvedAt: at },
+      });
+      await tx.ordr.update({ where: { id: orderId }, data: { status: 'RLS', revision } });
+      changes.push(
+        { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Status', oldValue: 'EDT', newValue: 'RLS' },
+        {
+          tableName: 'Ordr', recordId: String(orderId), fieldName: 'Revision',
+          oldValue: cur.revision != null ? String(cur.revision) : null, newValue: String(revision),
+        },
+        { tableName: 'OrdrEdit', recordId: String(draft.id), fieldName: 'OrdrEditStatus', oldValue: EDIT_DRAFT, newValue: EDIT_PUBLISHED },
+      );
+
+      const auditLog = await this.audit.record(
+        {
+          action: 'order.revise.publish',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.revise',
+          summary:
+            `Order #${orderId} revision ${revision} published — ${draft.revisionComment.trim()} ` +
+            `(${updates.length} changed, ${additions.length} added, ${removals.length} removed)` +
+            (dto.reason ? ` — ${dto.reason}` : '') +
+            (witness
+              ? ` (witnessed by ${witness.label}${dto.witnessExplanation ? `: ${dto.witnessExplanation}` : ''})`
+              : ''),
+          changes,
+        },
+        tx,
+      );
+
+      if (req.requireSignature) {
+        await this.esign.sign(
+          {
+            securedItemKey: REVISE_SECURED_ITEM,
+            meaning: 'Order revision published',
+            userId: actor.id,
+            userLabel: actor.label ?? actor.id,
+            userExplanation: dto.reason ?? null,
+            witnessUserId: witness?.id ?? null,
+            witnessLabel: witness?.label ?? null,
+            witnessExplanation: witness ? dto.witnessExplanation ?? null : null,
+            masterTable: 'Ordr',
+            masterId: String(orderId),
+            auditLogId: auditLog.id,
+          },
+          tx,
+        );
+      }
+
+      return {
+        orderId,
+        editId: draft.id,
+        revision,
+        status: 'RLS',
+        applied: { updated: updates.length, added: additions.length, removed: removals.length },
+        signed: req.requireSignature,
+        witness: witness?.label ?? null,
+      };
+    });
+  }
+
+  /**
+   * Cancel the open draft (UG §7.1.7): the edit gets status REJ (kept for
+   * audit, excluded from the revision history, its number reused) and the
+   * order returns to Released untouched.
+   */
+  async rejectRevision(orderId: number, dto: RejectRevisionDto, actor: Actor) {
+    const at = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const draft = await this.lockDraft(tx, orderId);
+      // Same pin as publish: never cancel a draft that was swapped while the
+      // confirmation was on screen.
+      if (draft.id !== dto.editId) {
+        throw new ConflictException('The revision draft changed since you reviewed it — reload and review again.');
+      }
+      await tx.ordrEdit.update({
+        where: { id: draft.id },
+        data: { status: EDIT_REJECTED, resolvedBy: actor.label ?? actor.id, resolvedAt: at },
+      });
+      await tx.ordr.update({ where: { id: orderId }, data: { status: 'RLS' } });
+      await this.audit.record(
+        {
+          action: 'order.revise.reject',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.revise',
+          summary: `Order #${orderId} revision ${draft.revision} draft cancelled${dto.reason ? ` — ${dto.reason}` : ''}`,
+          changes: [
+            { tableName: 'OrdrEdit', recordId: String(draft.id), fieldName: 'OrdrEditStatus', oldValue: EDIT_DRAFT, newValue: EDIT_REJECTED },
+            { tableName: 'Ordr', recordId: String(orderId), fieldName: 'Status', oldValue: 'EDT', newValue: 'RLS' },
+          ],
+        },
+        tx,
+      );
+      return { orderId, editId: draft.id, status: EDIT_REJECTED };
+    });
   }
 
   private async requireTransition(id: number, from: string, action: string) {

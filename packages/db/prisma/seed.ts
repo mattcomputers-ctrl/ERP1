@@ -27,6 +27,7 @@ const BASELINE_PROGRAMS = [
   { key: 'orders.browser', name: 'Order Browser', folder: 'Transactions/Orders' },
   { key: 'orders.create', name: 'Create Order', folder: 'Transactions/Orders' },
   { key: 'orders.edit', name: 'Edit Order', folder: 'Transactions/Orders' },
+  { key: 'orders.revise', name: 'Order Edit (Revisions)', folder: 'Transactions/Orders' },
   { key: 'orders.release', name: 'Release Order', folder: 'Transactions/Orders' },
   { key: 'orders.complete', name: 'Complete Order', folder: 'Transactions/Orders' },
   { key: 'orders.close', name: 'Close Order', folder: 'Transactions/Orders' },
@@ -78,6 +79,14 @@ const SECURED_ITEMS = [
     key: 'order.reverse',
     description: 'Sign-off on reversing a completed batch order (un-complete)',
     requireReason: true,
+    requireSignature: true,
+    requireWitness: false,
+  },
+  {
+    key: 'order.revise',
+    description: 'Sign-off on publishing a released-order revision (order edit)',
+    // The mandatory revision comment is the narrative; no extra reason box.
+    requireReason: false,
     requireSignature: true,
     requireWitness: false,
   },
