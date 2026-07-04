@@ -1,7 +1,9 @@
-import { Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { CurrentUser, type Actor } from '../auth/current-user.decorator';
 import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
+import { CreatePoFromPlanDto } from './dto/create-po-from-plan.dto';
+import { PlanningPoService } from './planning-po.service';
 import { PlanningRecalcService } from './planning-recalc.service';
 import { PlanningService, type PlanTraceListQuery } from './planning.service';
 
@@ -12,6 +14,7 @@ export class PlanningController {
   constructor(
     private readonly planning: PlanningService,
     private readonly recalc: PlanningRecalcService,
+    private readonly planningPo: PlanningPoService,
   ) {}
 
   // Plan Tracing set viewer (UG §14.2): the plan's requirements in sequence.
@@ -33,5 +36,12 @@ export class PlanningController {
   @RequireProgram('planning.recalculate')
   recalculate(@CurrentUser() actor: Actor) {
     return this.recalc.recalculate(actor);
+  }
+
+  // Create Purchase Order from selected Short lines (UG §14.2.1).
+  @Post('create-po')
+  @RequireProgram('planning.createPo')
+  createPo(@Body() dto: CreatePoFromPlanDto, @CurrentUser() actor: Actor) {
+    return this.planningPo.createPoFromPlan(dto, actor);
   }
 }

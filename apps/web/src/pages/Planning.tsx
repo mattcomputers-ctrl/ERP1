@@ -12,6 +12,7 @@ import { api } from '../lib/api';
 
 interface TraceRow {
   id: number; parentId: number | null; reference: string | null;
+  manufacturerId: number | null; reqdSublotId: number | null;
   itemId: number | null; itemCode: string | null; itemDescription: string | null; unit: string | null;
   quantity: number | null; mfLevel: number | null;
   ordrId: number | null; sourceOrdrId: number | null; mfOrdrId: number | null; mfgItemCode: string | null;
@@ -22,6 +23,10 @@ interface TraceRow {
 }
 interface TraceResp { rows: TraceRow[]; total: number; page: number; pageSize: number; lastCalculated: string | null; source: 'legacy' | 'native' }
 interface RecalcResp { rows: number; shortRows: number; shortItems: number; demands: number; minStockDemands: number; elapsedMs: number }
+interface SupplierOption { supplierId: number; supplierCode: string; preferred: boolean; price: number | null; leadTime: number | null }
+type CreatePoResp =
+  | { created: true; orderId: number; supplierCode: string; itemCode: string; quantity: number; lines: number }
+  | { created: false; needsSupplierChoice: true; options: SupplierOption[]; quantity: number; itemId: number };
 interface ShortRow {
   itemId: number | null; itemCode: string | null; description: string | null; unit: string | null;
   requiredManufacturer: string | null; requiredSublotId: number | null;
@@ -91,11 +96,20 @@ export function Planning() {
   );
 }
 
+// A line can be purchased when it needs an order and doesn't pin a sublot
+// (UG §14.2.1 — sublot-pinned requirements can't come from a PO).
+const orderable = (r: TraceRow) => (r.reference === 'Short' || r.reference === 'Negative') && r.reqdSublotId == null;
+
 function TraceGrid() {
   const [page, setPage] = useState(1);
   const [q, setQ] = useState('');
   const [reference, setReference] = useState('');
   const [sort, setSort] = useState('id:asc');
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [supplierOptions, setSupplierOptions] = useState<SupplierOption[] | null>(null);
+  const [chosenSupplier, setChosenSupplier] = useState<number | ''>('');
+  const [poResult, setPoResult] = useState<string | null>(null);
+  const qc = useQueryClient();
 
   const params = new URLSearchParams({ page: String(page), pageSize: '25', sort });
   if (q) params.set('q', q);
@@ -106,7 +120,61 @@ function TraceGrid() {
     queryFn: () => api.get<TraceResp>(`/planning/trace?${params.toString()}`),
   });
 
+  const createPo = useMutation({
+    mutationFn: (supplierId?: number) =>
+      api.post<CreatePoResp>('/planning/create-po', { planTraceIds: [...selected], ...(supplierId ? { supplierId } : {}) }),
+    onSuccess: (r) => {
+      if (r.created) {
+        setPoResult(`Purchase order #${r.orderId} created for ${r.supplierCode}: ${r.quantity.toFixed(2)} of ${r.itemCode} (${r.lines} plan line${r.lines === 1 ? '' : 's'}).`);
+        setSelected(new Set());
+        setSupplierOptions(null);
+        setChosenSupplier('');
+        qc.invalidateQueries({ queryKey: ['plan-trace'] });
+        qc.invalidateQueries({ queryKey: ['plan-short'] });
+      } else {
+        setSupplierOptions(r.options);
+        setChosenSupplier(r.options[0]?.supplierId ?? '');
+        setPoResult(null);
+      }
+    },
+  });
+
+  const toggle = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    // Any change to what's selected invalidates a pending supplier prompt —
+    // its options and tier prices were computed for the OLD selection's
+    // summed quantity.
+    setSupplierOptions(null);
+    setChosenSupplier('');
+    setPoResult(null);
+  };
+
+  // Changing the view (page, search, filter, sort) drops the selection: rows
+  // the user can no longer see must not silently ride into a purchase order.
+  const clearSelection = () => {
+    setSelected(new Set());
+    setSupplierOptions(null);
+    setChosenSupplier('');
+  };
+
   const columns: GridColumn<TraceRow>[] = [
+    {
+      key: 'select', header: '',
+      render: (r) =>
+        orderable(r) ? (
+          <input
+            type="checkbox"
+            aria-label={`Select plan line ${r.id}`}
+            checked={selected.has(r.id)}
+            onChange={() => toggle(r.id)}
+          />
+        ) : null,
+    },
     { key: 'id', header: 'Trace #', sortable: true },
     {
       key: 'reference', header: 'Reference', sortable: true,
@@ -144,6 +212,36 @@ function TraceGrid() {
             : '(legacy planning engine — refreshed with each import sync)'}
         </p>
       )}
+      {poResult && <p className="text-sm text-emerald-700">{poResult}</p>}
+      {createPo.isError && (
+        <p className="text-sm text-red-600">
+          Couldn’t create the purchase order: {createPo.error instanceof Error ? createPo.error.message : 'unknown error'}
+        </p>
+      )}
+      {supplierOptions && (
+        <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+          <span>Several suppliers price this item — which one?</span>
+          <select
+            value={chosenSupplier}
+            onChange={(e) => setChosenSupplier(e.target.value ? Number(e.target.value) : '')}
+            className="rounded-md border border-slate-300 px-2 py-1"
+          >
+            {supplierOptions.map((o) => (
+              <option key={o.supplierId} value={o.supplierId}>
+                {o.supplierCode}
+                {o.preferred ? ' (preferred)' : ''}
+                {o.price != null ? ` — ${o.price.toFixed(2)}` : ''}
+              </option>
+            ))}
+          </select>
+          <Button disabled={chosenSupplier === '' || createPo.isPending} onClick={() => createPo.mutate(chosenSupplier as number)}>
+            {createPo.isPending ? 'Creating…' : 'Create with this supplier'}
+          </Button>
+          <button type="button" className="text-slate-500 underline" onClick={() => setSupplierOptions(null)}>
+            Cancel
+          </button>
+        </div>
+      )}
       <DataGrid
         columns={columns}
         rows={list.data?.rows ?? []}
@@ -152,16 +250,25 @@ function TraceGrid() {
         pageSize={25}
         loading={list.isLoading}
         sort={sort}
-        onSortChange={(s) => { setSort(s); setPage(1); }}
-        onPageChange={setPage}
+        onSortChange={(s) => { setSort(s); setPage(1); clearSelection(); }}
+        onPageChange={(p) => { setPage(p); clearSelection(); }}
         q={q}
-        onSearch={(v) => { setQ(v); setPage(1); }}
+        onSearch={(v) => { setQ(v); setPage(1); clearSelection(); }}
         rowKey={(r) => r.id}
         exportName="plan-trace"
         toolbar={
-          <select value={reference} onChange={(e) => { setReference(e.target.value); setPage(1); }} className="rounded-md border border-slate-300 px-2 py-1.5 text-sm">
-            {REFERENCES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-          </select>
+          <div className="flex items-center gap-2">
+            <select value={reference} onChange={(e) => { setReference(e.target.value); setPage(1); clearSelection(); }} className="rounded-md border border-slate-300 px-2 py-1.5 text-sm">
+              {REFERENCES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+            <Button
+              disabled={selected.size === 0 || createPo.isPending}
+              onClick={() => { setPoResult(null); createPo.mutate(undefined); }}
+              title="Create one purchase order from the selected Short lines (same item + required manufacturer)"
+            >
+              {createPo.isPending ? 'Creating…' : `Create purchase order${selected.size ? ` (${selected.size})` : ''}`}
+            </Button>
+          </div>
         }
       />
     </>

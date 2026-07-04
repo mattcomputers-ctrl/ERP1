@@ -401,7 +401,26 @@ export class PurchasingService {
     // Source each line's packaging + price from the supplier's effective price
     // version (where Mar-Kov configures purchasing packaging). Read-only lookups,
     // done before the transaction; null for items the supplier has no price for.
-    const sourcing = await Promise.all(dto.lines.map((l) => this.priceVersions.lineSourcing(supplier.id, l.itemId, l.qtyReqd)));
+    // A line's required manufacturer must be a real manufacturer entity — an
+    // arbitrary integer would silently never match manufacturer-pinned demand
+    // in planning (validated like shipViaId above).
+    const mfrIds = [...new Set(dto.lines.map((l) => l.manufacturerId).filter((v): v is number => v != null))];
+    if (mfrIds.length) {
+      const mfrs = await this.prisma.entity.findMany({
+        where: { id: { in: mfrIds } },
+        select: { id: true, entityCode: true, isManufacturer: true },
+      });
+      const mfrById = new Map(mfrs.map((m) => [m.id, m]));
+      for (const id of mfrIds) {
+        const m = mfrById.get(id);
+        if (!m) throw new BadRequestException(`Required manufacturer ${id} not found.`);
+        if (!m.isManufacturer) throw new BadRequestException(`Entity ${m.entityCode} is not flagged as a manufacturer.`);
+      }
+    }
+
+    const sourcing = await Promise.all(
+      dto.lines.map((l) => this.priceVersions.lineSourcing(supplier.id, l.itemId, l.qtyReqd, l.manufacturerId ?? null)),
+    );
 
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
@@ -442,6 +461,7 @@ export class PurchasingService {
           price: l.price ?? sourcing[i]?.price ?? null,
           entityUnit: l.unit ?? item.unit ?? null,
           description: l.description ?? item.description ?? null,
+          manufacturerId: l.manufacturerId ?? null,
           sortOrder: i + 1,
           execOrder: i + 1,
           isOpen: true,
@@ -582,6 +602,14 @@ export class PurchasingService {
     payload: PoLineEditPayload,
   ): Promise<{ item?: { id: number; itemCode: string | null; description: string | null; unit: string | null }; line?: { qtyReqd: number | null; qtyUsed: number | null; price: Prisma.Decimal | null; entityUnit: string | null; description: string | null } }> {
     if (payload.op === 'add') {
+      if (payload.dto.manufacturerId != null) {
+        const m = await db.entity.findUnique({
+          where: { id: payload.dto.manufacturerId },
+          select: { entityCode: true, isManufacturer: true },
+        });
+        if (!m) throw new BadRequestException('Required manufacturer not found.');
+        if (!m.isManufacturer) throw new BadRequestException(`Entity ${m.entityCode} is not flagged as a manufacturer.`);
+      }
       const item = await db.item.findUnique({
         where: { id: payload.dto.itemId },
         select: { id: true, itemCode: true, description: true, unit: true },
@@ -622,7 +650,10 @@ export class PurchasingService {
     if (payload.op === 'add') {
       const dto = payload.dto;
       const item = v.item!;
-      const sourcing = po.entityId != null ? await this.priceVersions.lineSourcing(po.entityId, dto.itemId, dto.qtyReqd) : null;
+      const sourcing =
+        po.entityId != null
+          ? await this.priceVersions.lineSourcing(po.entityId, dto.itemId, dto.qtyReqd, dto.manufacturerId ?? null)
+          : null;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       const odId = ((await tx.ordDetail.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
       const sort = ((await tx.ordDetail.aggregate({ _max: { sortOrder: true }, where: { ordrId: id, context: PO_CONTEXT } }))._max.sortOrder ?? 0) + 1;
@@ -636,6 +667,7 @@ export class PurchasingService {
           price: dto.price ?? sourcing?.price ?? null,
           entityUnit: dto.unit ?? item.unit ?? null,
           description: dto.description ?? item.description ?? null,
+          manufacturerId: dto.manufacturerId ?? null,
           sortOrder: sort,
           execOrder: sort,
           isOpen: true,

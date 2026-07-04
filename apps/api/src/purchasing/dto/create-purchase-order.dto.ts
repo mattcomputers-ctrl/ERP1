@@ -44,6 +44,13 @@ export class CreatePurchaseOrderLineDto {
   @IsString()
   @MaxLength(256)
   description?: string;
+
+  /** Required manufacturer (Entity.id) — the received goods must be made by
+   * this manufacturer (OrdDetail.Manufacturer; planning matches PO supply to
+   * manufacturer-pinned demand through it). */
+  @IsOptional()
+  @IsInt()
+  manufacturerId?: number;
 }
 
 export class CreatePurchaseOrderDto {

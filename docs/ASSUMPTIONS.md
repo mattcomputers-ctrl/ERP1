@@ -638,3 +638,51 @@ Decisions and observed evidence:
   last-writer-wins a complete consistent plan), button visible without the
   program (server-guarded, UX-only), method-level program override
   (getAllAndOverride handler-first is the established short() pattern).
+
+## Create PO from plan (§10 / UG §14.2.1, built 2026-07-04)
+
+- Vendor rules enforced verbatim: selected lines must all be Short/Negative,
+  the SAME Item + Required-Manufacturer combination, none may pin a sublot
+  (a PO can't produce a specific sublot), and supplier pricing must exist
+  for the combination. One PO, one line: quantity = sum of the selected
+  lines, DateRequired = the earliest of theirs, Reference "Plan Trace".
+- "Pricing for that combination": a supplier's CURRENT effective price
+  version must hold a PriceDetail for the item that is either generic
+  (Manufacturer NULL) or for the required manufacturer — generic pricing
+  covers pinned demands; details on superseded versions don't qualify.
+- The vendor's "which pricing to use" prompt is a round-trip: with no
+  supplierId and >1 qualifying supplier the endpoint returns
+  needsSupplierChoice + ranked options (preferred supplier — Item.Supplier —
+  first) and creates NOTHING; the client re-posts with the choice.
+- The PO is created by the EXISTING purchasing.create engine (native ids,
+  tier price from the effective version, OrdDetailPricing packaging
+  snapshot, audit `purchaseorder.create`); the endpoint itself is guarded by
+  its own program `planning.createPo` (the vendor puts the button on the
+  Plan Tracing viewer) — a planner does not need `purchasing.create`.
+- PO lines now carry the required manufacturer (CreatePurchaseOrderLineDto.
+  manufacturerId → OrdDetail.Manufacturer, create + add-line paths) so the
+  next recalc matches the new supply to the manufacturer-pinned demand.
+- Selection works on whichever plan the viewer shows (legacy or native rows
+  — both are real requirements during parallel running).
+- **Review outcomes (2026-07-04, 5 confirmed findings fixed pre-commit, 4
+  refuted)**: (1) CRITICAL — the priced detail could differ from the detail
+  that qualified the supplier: `effectivePriceDetail`/`lineSourcing` were
+  manufacturer-blind (lowest-id row), so a pinned line could be priced and
+  packaged at ANOTHER manufacturer's rate; sourcing now threads the
+  required manufacturer (pinned → manufacturer-specific detail else generic;
+  unpinned → generic else lowest-id) through options display,
+  purchasing.create and add-line — the qualifying detail IS the priced
+  detail. (2) supplier candidates now require `Entity.IsSupplier` (sales
+  price lists share PriceVersion/PriceDetail and could surface as fake
+  suppliers, failing late in purchasing.create). (3) the web supplier
+  chooser resets when the selection changes (its tier prices were computed
+  for the old summed qty). (4) the selection clears on page/search/filter/
+  sort changes (hidden rows must not silently ride into a PO; ids are also
+  stale across a recalc). (5) line manufacturerId is now validated
+  (exists + IsManufacturer) on both purchasing create paths — unvalidated it
+  would mint a dangling FK that never matches pinned demand. Refuted:
+  audit-under-purchasing.create program (documented decision), the
+  needsSupplierChoice TOCTOU (bounded, non-corrupting — the second POST
+  re-validates everything), CSV blank checkbox column (cosmetic, matches
+  pre-change exports), test-gap meta-finding (coverage added with the fixes
+  anyway).

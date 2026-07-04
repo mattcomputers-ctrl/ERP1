@@ -41,14 +41,41 @@ export class PriceVersionService {
   }
 
   /**
-   * The supplier's PriceDetail for an item, from its effective version. A version
-   * may list the item under several package sizes (≈40 live cases); pick the
-   * lowest-id row deterministically so a line sources the same offer every time.
+   * The supplier's PriceDetail for an item, from its effective version — aware
+   * of a required manufacturer so the priced detail is the one that QUALIFIES
+   * the offer: a manufacturer-pinned line prices from the manufacturer-specific
+   * detail, else the generic (no-manufacturer) one — never another
+   * manufacturer's rate. An unpinned line prefers the generic detail, falling
+   * back to the lowest-id row (a version may list an item under several
+   * package sizes, ≈40 live cases; lowest id keeps sourcing deterministic).
    */
-  async effectivePriceDetail(supplierId: number, itemId: number, at: Date = new Date()) {
+  async effectivePriceDetail(
+    supplierId: number,
+    itemId: number,
+    manufacturerId: number | null = null,
+    at: Date = new Date(),
+  ) {
     const v = await this.effectiveVersion(supplierId, at);
     if (!v) return null;
-    return this.prisma.priceDetail.findFirst({ where: { priceVersionId: v.id, itemId }, orderBy: { id: 'asc' } });
+    if (manufacturerId != null) {
+      return (
+        (await this.prisma.priceDetail.findFirst({
+          where: { priceVersionId: v.id, itemId, manufacturerId },
+          orderBy: { id: 'asc' },
+        })) ??
+        (await this.prisma.priceDetail.findFirst({
+          where: { priceVersionId: v.id, itemId, manufacturerId: null },
+          orderBy: { id: 'asc' },
+        }))
+      );
+    }
+    return (
+      (await this.prisma.priceDetail.findFirst({
+        where: { priceVersionId: v.id, itemId, manufacturerId: null },
+        orderBy: { id: 'asc' },
+      })) ??
+      (await this.prisma.priceDetail.findFirst({ where: { priceVersionId: v.id, itemId }, orderBy: { id: 'asc' } }))
+    );
   }
 
   /**
@@ -56,8 +83,13 @@ export class PriceVersionService {
    * Returns null when the supplier has no price detail for the item — the PO line
    * then carries no packaging (degrades like a legacy PO without pricing).
    */
-  async lineSourcing(supplierId: number, itemId: number, qty: number): Promise<LineSourcing | null> {
-    const pd = await this.effectivePriceDetail(supplierId, itemId);
+  async lineSourcing(
+    supplierId: number,
+    itemId: number,
+    qty: number,
+    manufacturerId: number | null = null,
+  ): Promise<LineSourcing | null> {
+    const pd = await this.effectivePriceDetail(supplierId, itemId, manufacturerId);
     if (!pd) return null;
     const price = tierPrice(
       {

@@ -120,6 +120,8 @@ export class PlanningService {
           id: Number(r.id),
           parentId: r.parentId != null ? Number(r.parentId) : null,
           reference: r.reference,
+          manufacturerId: r.manufacturerId,
+          reqdSublotId: r.reqdSublotId,
           itemId: r.itemId,
           itemCode: item?.itemCode ?? null,
           itemDescription: item?.description ?? null,

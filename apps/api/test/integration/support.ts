@@ -17,6 +17,7 @@ import { RecipeEditorService } from '../../src/manufacturing/recipe-editor.servi
 import { RecipeReplacementService } from '../../src/manufacturing/recipe-replacement.service';
 import { RecipesService } from '../../src/manufacturing/recipes.service';
 import { OrdersService } from '../../src/orders/orders.service';
+import { PlanningPoService } from '../../src/planning/planning-po.service';
 import { PlanningRecalcService } from '../../src/planning/planning-recalc.service';
 import { PlanningService } from '../../src/planning/planning.service';
 import type { PrismaService } from '../../src/prisma/prisma.service';
@@ -91,6 +92,7 @@ export function services(prisma: PrismaClient) {
   const approvalPolicy = new ApprovalPolicyService(p, audit);
   const approvalRequests = new ApprovalRequestService(p);
   const recipeEditor = new RecipeEditorService(p, audit, esign, auth, permissions);
+  const purchasing = new PurchasingService(p, settings, audit, party, valuation, priceVersions, approvalPolicy, approvalRequests);
   return {
     settings,
     audit,
@@ -100,7 +102,7 @@ export function services(prisma: PrismaClient) {
     salesPricing,
     orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation, approvalPolicy, approvalRequests),
     approvalRequests,
-    purchasing: new PurchasingService(p, settings, audit, party, valuation, priceVersions, approvalPolicy, approvalRequests),
+    purchasing,
     shipping: new ShippingService(p, audit, party, salesPricing, approvalPolicy, approvalRequests),
     genealogy: new GenealogyService(p, party),
     inventory: new InventoryService(p, audit),
@@ -117,6 +119,7 @@ export function services(prisma: PrismaClient) {
     recipeReplacement: new RecipeReplacementService(p, audit, recipeEditor),
     planning: new PlanningService(p, settings),
     planningRecalc: new PlanningRecalcService(p, audit),
+    planningPo: new PlanningPoService(p, purchasing, priceVersions),
   };
 }
 
@@ -243,13 +246,14 @@ export async function onHandForLot(prisma: PrismaClient, lot: string): Promise<n
 
 export async function addEntity(
   prisma: PrismaClient,
-  data: { id?: number; code?: string; isSupplier?: boolean; isBillTo?: boolean; isShipTo?: boolean; isShipVia?: boolean; isSalesman?: boolean; isPriceList?: boolean; priceListId?: number | null },
+  data: { id?: number; code?: string; isSupplier?: boolean; isManufacturer?: boolean; isBillTo?: boolean; isShipTo?: boolean; isShipVia?: boolean; isSalesman?: boolean; isPriceList?: boolean; priceListId?: number | null },
 ): Promise<number> {
   const row = await prisma.entity.create({
     data: {
       id: data.id,
       entityCode: data.code ?? `E${data.id ?? ''}`,
       isSupplier: data.isSupplier ?? false,
+      isManufacturer: data.isManufacturer ?? false,
       isBillTo: data.isBillTo ?? false,
       isShipTo: data.isShipTo ?? false,
       isShipVia: data.isShipVia ?? false,
