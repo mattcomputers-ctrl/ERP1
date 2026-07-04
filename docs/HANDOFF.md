@@ -29,12 +29,14 @@ end with a fresh handoff prompt.
   `pnpm --filter @erp1/db migrate:deploy` and
   `pnpm --filter @erp1/api test:integration` with
   `DATABASE_URL=postgresql://postgres:postgres@localhost:55432/erp1_test?schema=public`.
-  Run a single suite: `pnpm run test:integration -- <name-fragment>` from apps/api.
+  Run one suite: `pnpm exec vitest run --config vitest.integration.config.ts test/integration/<file>` from apps/api.
 - **Generating a migration**: `prisma migrate dev` is interactive-only (fails
   headless). Use: edit schema →
   `npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --script > prisma/migrations/<yyyymmddhhmmss>_<name>/migration.sql`
   → `migrate deploy` → verify `migrate diff --exit-code` says no difference →
-  `prisma generate`.
+  `prisma generate`. To amend an UNCOMMITTED migration: drop the itest schema
+  (`docker exec erp1-itest-pg psql -U postgres -d erp1_test -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"`),
+  delete the migration dir, redeploy the rest, regenerate one migration.
 - **Legacy DB** (ground truth): READ-ONLY via the `mssql` MCP tool (SQL Server
   10.10.10.11, db CMS). Never write. Verify schema/data by querying — never
   guess. Vendor PDFs in `reference/` (extract with
@@ -48,48 +50,53 @@ end with a fresh handoff prompt.
 
 - **Every schema.prisma change requires a Prisma migration** in
   `packages/db/prisma/migrations/` (CI drift check fails otherwise).
-  Baseline `000000000000_init`; deploy auto-baselines db-push'd installs.
 - Domain tables mirror legacy names (@map/@@map); ERP1-only columns on
   mirrored tables use `erp1_*` map names. Native rows get ids ≥ 1_000_000_000
   allocated under `pg_advisory_xact_lock(NATIVE_ID_ALLOC_LOCK)`
   (`apps/api/src/common/locks.ts`) with max-id/uniqueness/state checks
   **inside** the locked tx.
-- **Concurrency invariants** (hardened 2026-07-03 across two reviews):
+- **Concurrency invariants**:
   1. Every multi-parcel Inventory acquisition is ONE global ascending-id
-     `SELECT … FOR UPDATE` scan (`ValuationService.depleteSpecificMany` /
-     `depleteFifoMany`; order reversal's produced+restored scan). NEVER loop
-     per-lot locked reads — two different total orders deadlock (empirically
-     reproduced, 40P01).
-  2. Lifecycle transitions (release/complete/close/reverse) re-assert their
-     precondition under the Ordr row lock INSIDE the tx
-     (`lockAndRequireStatus`) — the lifecycle is non-monotonic since reversal
-     (CMP→RLS), so pre-tx checks alone are stale reads.
-  3. Consumption/shipment writers DEPLETE before writing their lineage/
-     shipment record — the parcel locks are what serialize them against a
-     reversal's untouched-stock guard.
-  4. Anything mutating one order's execution/consumption state takes the Ordr
-     row lock first (`OrdersService.lockOrdr`).
+     `SELECT … FOR UPDATE` scan. NEVER loop per-lot locked reads (deadlock,
+     empirically reproduced 40P01).
+  2. Lifecycle transitions re-assert their precondition under the Ordr row
+     lock INSIDE the tx (`lockAndRequireStatus`) — lifecycle is non-monotonic
+     (reverse: CMP→RLS; revisions: RLS↔EDT).
+  3. Consumption/shipment writers DEPLETE before writing lineage/shipment.
+  4. Anything mutating one order's state takes the Ordr row lock first.
+  5. **E-signed actions must PIN their reviewed target**: credentials verify
+     pre-tx (slow Argon2), so the DTO carries the target id (+ an updatedAt
+     content token where drafts are editable) asserted under the row lock —
+     a signature must never land on content the signer didn't review
+     (order-revisions publish/reject is the template).
 - Every mutation: `@RequireProgram` (seeded in `packages/db/prisma/seed.ts`,
   auto-granted to ADMIN) + atomic hash-chained audit
   (`AuditService.record(entry, tx)`) in the same transaction. E-sig actions
   use SecuredItems + `ESignatureService` (recipe publish / order complete /
-  order reverse / QA disposition are templates).
-- Boolean mirror columns: write explicit `false`, never leave NULL.
-- Reversals via reversing ChangeSets; no destructive deletes of posted records.
-- **Import-engine invariants** (§0, built 2026-07-03): legacy access ONLY via
-  `LegacyDbService` (the seam integration tests fake); watermark =
-  `app_settings import.logWatermark` (legacy Log id, digits-only); the sync
-  must hold the watermark whenever a change was rejected; native rows are
-  never deleted OR overwritten by imports (id range + native-Lot guard);
-  LogResult FieldNames must be canonicalized to physical column casing.
-- Integration tests (vitest, real Postgres) for every flow —
-  `apps/api/test/integration/` with `support.ts` scaffolding; HTTP-layer
-  route-table invariants cover auth automatically.
-- After each increment: update FEATURE_PARITY.md (+ ASSUMPTIONS/OPEN_QUESTIONS)
-  and run a multi-agent review over the staged diff (find → adversarially
-  verify → fix confirmed findings) before committing. Scale the review to the
-  diff. The two 2026-07-03 reviews each caught a critical data-loss bug the
-  tests missed — do not skip this step.
+  order reverse / order revise / QA disposition are templates).
+- Boolean mirror columns: explicit `false`, never NULL. Prisma `NOT`/`notIn`
+  drop NULL rows; `@IsOptional()` skips ALL validators on explicit null —
+  services re-assert numeric positivity. A single `notIn` list breaks past
+  32,767 bind variables — compute set-differences app-side, delete in
+  5,000-id `in` chunks.
+- Reversals via reversing ChangeSets; no destructive deletes of posted
+  records. Derived/editable working state must keep its FULL BASELINE
+  (mark-removed, don't delete) so "user removed X" and "X appeared behind our
+  back" are distinguishable — silently deleting drift is a data-loss bug
+  (order-revisions publish is the template).
+- **Import-engine invariants** (§0): legacy access ONLY via `LegacyDbService`
+  (the seam tests fake); watermark = `app_settings import.logWatermark`;
+  native rows never deleted/overwritten by imports; LogResult FieldNames
+  canonicalized to physical casing; tables absent from the change feed live
+  in NEVER_LOGGED_ALWAYS/PROXIED (wholesale re-copy); `replaceStale` specs
+  (PlanTrace) additionally prune vanished legacy-range rows — but an EMPTY
+  snapshot against a non-empty mirror skips the prune (mid-rewrite guard).
+- Integration tests (vitest, real Postgres) for every flow; use
+  CLOCK-RELATIVE dates when the code compares against "now" (no time bombs).
+- After each increment: update FEATURE_PARITY.md (+ ASSUMPTIONS/
+  OPEN_QUESTIONS) and run a multi-agent review over the staged diff (find →
+  adversarially verify → fix confirmed) before committing. The 2026-07-03
+  reviews confirmed 13 + 11 findings the tests missed — never skip.
 
 ## How the user will play with it
 
@@ -98,65 +105,54 @@ Install on an Ubuntu 24.04 VM (Proxmox):
 (validated end-to-end in a container — fresh + upgrade modes; see
 docs/DEPLOYMENT.md). Then set `LEGACY_MSSQL_PASSWORD` in `/etc/erp1.env`,
 restart, and run **Administration → Legacy Import** (full import, then
-schedule **Sync changes** during parallel running). Re-running the install
-command upgrades in place.
+schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. **Verify latest CI is green** (last session ended at 2f0746a — express
-   execution; 69d31dd packouts is confirmed green; check 2f0746a completed
-   green, fix first if red).
-2. **§5 batch-order edit revisions** (`OrdrEdit`/`OrdDetailEdit` are 0-row —
-   native design per the vendor's §7 semantics: revise a RELEASED order's
-   quantities/testing with a published revision trail; ERP1 already has
-   edit-before-release + rescale). Then §6 packaging end-lot specifics +
-   reserved-material release (vendor §8.5), if the data shows they're used.
-3. **§10 Planning/MRP** (supply/demand, plan trace, create-PO-from-plan) —
-   specify-packouts already writes the demand allocation (OrdDetailCommit),
-   which is the §10 building block.
-4. Then **§13 accounting/QuickBooks export**, **§17 email notifications**,
+1. **Verify CI green for e5ab5fd** (Planning slice 1; a1e1e9e revisions is
+   confirmed green — fix first if red).
+2. **§10 slice 2 — native Recalculate Plan Trace engine** (vendor §14.1
+   algorithm; fill order: available stock → quarantined → open MF orders →
+   open POs → plan MF order from the active costing recipe, exploding
+   ingredient requirements (MFLevel+1) → plan PO; Negative rows for min-stock
+   — note: Item has NO lead-time/min-stock columns in this install, decide
+   sources or omit). Native rows ids ≥ 1e9; `POST /planning/recalculate`
+   (program), progress-safe; disable the PlanTrace import at cutover. Then
+   **create-PO-from-plan** (§14.2.1 — selected Short lines, same item +
+   required manufacturer, via existing purchasing.create engine + supplier
+   pricing).
+3. **§13 accounting/QuickBooks export**, **§17 email notifications**,
    **§14 config tabs**, **§18 viewer library** (batch-build on DataGrid),
    **§15 i18n**, **§19 handheld PWA** — in that rough order.
-5. Background chip pending: enforce secured-item PERFORM grant on
-   order.complete + release.disposition.
-6. OPEN_QUESTIONS: native-Lot marker column (`erp1_native`) if parallel
-   running shows YYMMDD### collisions on raw-material lots; whether recipe
-   publish should also re-point ItemPackagedProduct bindings (current answer:
-   no — read-time resolution, see ASSUMPTIONS §Packouts).
-7. Before cutover: one real install pass on the actual Proxmox VM; a live
-   `POST /import/sync` against the real legacy DB (only tested against the
-   seam fake + shape-validated queries so far).
+4. Background chip pending: enforce secured-item PERFORM grant on
+   order.complete + release.disposition (+ order.revise now).
+5. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
+   YYMMDD### collisions; Ordr.ReserveAmount on SH orders (sales-side, 45
+   rows) — surface on documents?
+6. Before cutover: one real install pass on the actual Proxmox VM; a live
+   `POST /import/sync` against the real legacy DB (seam-fake tested only).
 
-## State of the world (as of 2026-07-03, commit 2f0746a)
+## State of the world (as of 2026-07-03, commit e5ab5fd)
 
-- Foundations ✅ (auth/RBAC/audit/e-sig/DataGrid/installer/migrations/CI).
-- §4 Recipes ✅; §5/§6 guided execution core ✅ + order reversal ✅ +
-  **packouts ✅** (2026-07-03: `ItemPackagedProduct` mirrored + imported;
-  specify-what-to-packout on batch orders — creates the MFPP order from the
-  ACTIVE recipe revision + OrdDetailCommit allocation in one tx; demand/
-  supply panels; 7.22-style packaging-product lookup in the create form —
-  see ASSUMPTIONS §Packouts) + **express execution ✅** (record all
-  remaining lines at standard, one locked FIFO acquisition, traced picks =
-  lineage; traced shortfall REFUSES, untraced warns — see ASSUMPTIONS
-  §Express execution).
-- **Multi-batch is ⏸️ with evidence**: `Ordr.Parent` NULL on all 75K live
-  orders; the plant sizes batches to demand (don't rebuild it without a
-  user ask).
-- **§0 import engine ✅**: full import + log-driven incremental sync +
-  reconciliation report. NOT yet run against the real legacy DB end-to-end.
-- Suites: 74 unit + 273 integration green; CI green through 69d31dd
-  (2f0746a pending at session end — verify).
-- New this session: migration `20260703170000_item_packaged_product`;
-  routes `GET /orders/packout-options`, `GET/POST /orders/:id/packouts`,
-  `POST /orders/:id/execution/express`; no new programs (packouts under
-  `orders.create`, express under `orders.execute`).
-- Hardening worth remembering (multi-agent reviews each increment):
-  everything an audited verdict depends on must be re-read IN-TX under the
-  row lock; `curStatus(null)`='NST' means absent rows must throw explicitly
-  (fixed in `lockAndRequireStatus` too); Prisma `NOT:{col:'X'}` drops NULL
-  rows (unexecuted lines carry ExecStatus NULL); tests must seed explicit
-  `false` on boolean mirror columns (legacy has NO NULL booleans).
-- Known quirks: recipe editor authors at per-100-lb basis (stored per-1-lb);
-  `UseFrom` on UB lines undecoded; RMPP exec numbering is a documented
-  extension; `Ordr.ActualBatchSize` holds the PLANNED size until completion
-  (and reverts to it / to null for MFPP on reversal).
+- Foundations ✅; §4 Recipes ✅; §5/§6 execution core + reversal + packouts +
+  express execution ✅; **order-edit revisions ✅** (2026-07-03, a1e1e9e:
+  OrdrEdit/OrdDetailEdit/OrdDetailTestEdit mirrored (0-row in legacy — native
+  design per UG §7/§9); draft on RLS order → EDT blocks everything; marked
+  removals keep the draft baseline; e-signed publish pinned via editId +
+  updatedAt token; revision-0 snapshot at first publish; program
+  `orders.revise`, secured item `order.revise`; MFPP works too = §9 covered).
+- **§6 end-lot + reserved-material release ⏸️ with evidence**: MFPP lines
+  have NO phases, LocationVessel is 0-row, ReserveAmount is sales-side only.
+- **§10 Planning 🟡 slice 1 ✅** (e5ab5fd): PlanTrace mirrored + imported
+  (replaceStale) + Plan Tracing / Short Inventory viewers (programs
+  `planning.trace`/`planning.short`), web Planning page. Legacy engine stays
+  authoritative during parallel running; native recalc = slice 2.
+- **§0 import engine ✅** (not yet run against the real legacy DB end-to-end).
+- Suites: 74 unit + 291 integration green; CI green through a1e1e9e
+  (e5ab5fd pending at handoff-write time — verify).
+- Multi-batch ⏸️ (Ordr.Parent NULL on all 75K orders).
+- Known quirks: recipe editor authors per-100-lb (stored per-1-lb); `UseFrom`
+  on UB lines undecoded (UB lines locked in revisions); RMPP exec numbering
+  is an ERP1 extension; `Ordr.ActualBatchSize` holds PLANNED size until
+  completion; plan dates are plant wall-clock stored as UTC digits — compare
+  against UTC-digit midnight (see [[datetime-timezone-handling]]).
