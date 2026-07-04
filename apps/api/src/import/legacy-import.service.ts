@@ -63,6 +63,35 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    name: 'GLGroup', legacyTable: 'dbo.GLGroup', delegate: 'gLGroup',
+    where: (d) => ({ glGroup: d.glGroup }),
+    map: (r) => ({ glGroup: r.GLGroup, description: r.Description }),
+  },
+  {
+    name: 'GLCode', legacyTable: 'dbo.GLCode', delegate: 'gLCode',
+    where: (d) => ({ glCode: d.glCode }),
+    map: (r) => ({ glCode: r.GLCode, description: r.Description, version: r.Version }),
+  },
+  {
+    name: 'AccountCode', legacyTable: 'dbo.AccountCode', delegate: 'accountCode',
+    where: (d) => ({ accountCode: d.accountCode }),
+    map: (r) => ({ accountCode: r.AccountCode, version: r.Version, description: r.Description }),
+  },
+  {
+    name: 'GLGroupCode', legacyTable: 'dbo.GLGroupCode', delegate: 'gLGroupCode', idColumn: 'GLGroupCode',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({ id: r.GLGroupCode, glGroup: r.GLGroup, glCode: r.GLCode, accountCode: r.AccountCode }),
+  },
+  {
+    name: 'TaxRule', legacyTable: 'dbo.TaxRule', delegate: 'taxRule', idColumn: 'TaxRule',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.TaxRule, description: r.Description, version: r.Version, context: r.Context ?? '',
+      itemTaxGroup: r.ItemTaxGroup, entityTaxGroup: r.EntityTaxGroup, rate: r.Rate,
+      amount: r.Amount, taxOnTax: b(r.TaxOnTax), taxNumber: r.TaxNumber,
+    }),
+  },
+  {
     name: 'Unit', legacyTable: 'dbo.Unit', delegate: 'unit',
     where: (d) => ({ code: d.code }),
     map: (r) => ({
@@ -103,7 +132,8 @@ const TABLES: TableSpec[] = [
       standardCost: r.StandardCost, standardPurchasePrice: r.StandardPurchasePrice,
       standardCurrency: r.StandardCurrency, purchasePrice: r.PurchasePrice, salesPrice: r.SalesPrice,
       targetPrice: r.TargetPrice, replacementCost: r.ReplacementCost, supplierId: r.Supplier,
-      glGroup: r.GLGroup, abcCode: r.ABCCode, tax1Group: r.Tax1Group, isKit: b(r.IsKit),
+      glGroup: r.GLGroup, abcCode: r.ABCCode, tax1Group: r.Tax1Group, tax2Group: r.Tax2Group,
+      tax3Group: r.Tax3Group, isKit: b(r.IsKit),
       controlledSubstance: b(r.ControlledSubstance), certifiedOrganic: b(r.CertifiedOrganic),
       weight: r.Weight, weightUnit: r.WeightUnit, serviceGroup: r.ServiceGroup, service: r.Service,
       comment: r.Comment, costingRecipeId: r.CostingRecipe,

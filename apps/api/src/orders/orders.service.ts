@@ -2305,21 +2305,38 @@ export class OrdersService {
       }
     }
 
-    // Any referenced order line must be a line on THIS order (IDOR-safe).
     const refLineIds = [...new Set(dto.lots.map((l) => l.ordDetailId).filter((v): v is number => v != null))];
-    if (refLineIds.length) {
-      const validLines = await this.prisma.ordDetail.findMany({
-        where: { id: { in: refLineIds }, ordrId: id },
-        select: { id: true },
-      });
-      const validSet = new Set(validLines.map((l) => l.id));
-      for (const lineId of refLineIds) {
-        if (!validSet.has(lineId)) throw new BadRequestException(`Line ${lineId} is not a line on shipping order #${id}.`);
-      }
-    }
 
     return this.prisma.$transaction(async (tx) => {
-      // Deplete the shipped lots' on-hand FIRST, in ONE locked acquisition
+      // This now mutates order state (the QtyUsed stamp below), so take the
+      // Ordr row lock FIRST (system convention) and validate the referenced
+      // lines INSIDE the tx — the NST-stage SH line editor deletes lines
+      // under this same lock, so a line can't vanish between check and write.
+      await tx.$queryRaw`SELECT "Ordr" FROM "Ordr" WHERE "Ordr" = ${id} FOR UPDATE`;
+      if (refLineIds.length) {
+        const validLines = await tx.ordDetail.findMany({
+          where: { id: { in: refLineIds }, ordrId: id },
+          select: { id: true, itemId: true, context: true },
+        });
+        const lineById = new Map(validLines.map((l) => [l.id, l]));
+        for (const l of dto.lots) {
+          if (l.ordDetailId == null) continue;
+          const line = lineById.get(l.ordDetailId);
+          if (!line || line.context !== 'SH') {
+            throw new BadRequestException(`Line ${l.ordDetailId} is not a line on shipping order #${id}.`);
+          }
+          // The stamped quantity feeds billing — the lot must BE the line's
+          // item, or the wrong line gets invoiced at the wrong price.
+          const lot = lotByCode.get(l.lot.trim())!;
+          if (line.itemId != null && lot.itemId != null && line.itemId !== lot.itemId) {
+            throw new BadRequestException(
+              `Lot ${l.lot.trim()} is not line ${l.ordDetailId}'s item — link each shipped lot to its own order line.`,
+            );
+          }
+        }
+      }
+
+      // Deplete the shipped lots' on-hand next, in ONE locked acquisition
       // (see consumeLineTx — the single-scan lock order plus depletion-first
       // ordering serialize this shipment against a concurrent reversal of a
       // lot's producing batch). A shortfall is recorded, not blocked — the
@@ -2348,6 +2365,18 @@ export class OrdersService {
           };
         }),
       });
+
+      // Stamp the shipped quantity on the order line (legacy convention:
+      // SH OrdDetail.QtyUsed = quantity shipped so far). Invoice generation
+      // and the invoice document's backorder math read QtyUsed, so native
+      // shipments must keep it as faithful as imported ones.
+      const shipByLine = new Map<number, number>();
+      for (const l of dto.lots) {
+        if (l.ordDetailId != null) shipByLine.set(l.ordDetailId, (shipByLine.get(l.ordDetailId) ?? 0) + l.qty);
+      }
+      for (const [lineId, inc] of shipByLine) {
+        await tx.$executeRaw`UPDATE "OrdDetail" SET "QtyUsed" = COALESCE("QtyUsed", 0) + ${inc} WHERE "OrdDetail" = ${lineId}`;
+      }
 
       await this.audit.record(
         {

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type ReactNode, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { DataGrid, type GridColumn } from '../components/DataGrid';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
@@ -322,6 +323,9 @@ export function Orders() {
             <EditShLines order={detail.data} onDone={refresh} />
           )}
           {detail.data.context === 'SH' && <ShipLots orderId={detail.data.id} onDone={refresh} />}
+          {detail.data.context === 'SH' && lifeState(detail.data.status) !== 'NST' && (
+            <GenerateInvoice orderId={detail.data.id} onDone={refresh} />
+          )}
 
           <dl className="mb-4 grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
             <Detail label="Status" value={detail.data.status} />
@@ -1405,6 +1409,53 @@ function ShipLots({ orderId, onDone }: { orderId: number; onDone: () => void }) 
             {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
           </div>
         </>
+      )}
+    </Card>
+  );
+}
+
+// Generate a customer invoice (Trans CI) for the order's shipped-but-not-yet-
+// invoiced quantities. Legacy invoices per shipment event, so this can be used
+// after each partial shipment; taxes come from the accounting tax rules.
+function GenerateInvoice({ orderId, onDone }: { orderId: number; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [freight, setFreight] = useState('');
+
+  const m = useMutation({
+    mutationFn: () =>
+      api.post<{ id: number; invoiceNumber: string; lines: number; subtotal: number; taxes: number[]; freight: number }>(
+        '/invoices',
+        { orderId, freightCharge: freight === '' ? undefined : Number(freight) },
+      ),
+  });
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mb-4 mr-4 text-sm font-medium text-indigo-600 hover:underline">
+        Generate invoice…
+      </button>
+    );
+  }
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 text-sm font-medium text-slate-700">
+        Generate invoice <span className="font-normal text-slate-400">— bills the shipped quantities no prior invoice covered</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-sm text-slate-500">
+          Freight charge
+          <input type="number" min="0" step="0.01" value={freight} onChange={(e) => setFreight(e.target.value)} className="w-28 rounded border border-slate-300 px-2 py-1 text-right text-sm" />
+        </label>
+        <Button onClick={() => m.mutate()} disabled={m.isPending}>{m.isPending ? 'Generating…' : 'Generate invoice'}</Button>
+        <button type="button" onClick={() => { setOpen(false); m.reset(); setFreight(''); }} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
+      {m.data && (
+        <p className="mt-2 text-sm text-emerald-700">
+          Invoice <Link to={`/invoices/${m.data.id}/print`} className="font-medium underline">{m.data.invoiceNumber}</Link> created —{' '}
+          {m.data.lines} line(s), subtotal {m.data.subtotal.toFixed(2)}, tax {(m.data.taxes[0] + m.data.taxes[1] + m.data.taxes[2]).toFixed(2)}
+          {m.data.freight ? `, freight ${m.data.freight.toFixed(2)}` : ''}.
+        </p>
       )}
     </Card>
   );

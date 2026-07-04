@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AccountingModule } from '../accounting/accounting.module';
 import { ApprovalModule } from '../approval/approval.module';
 import { AuthModule } from '../auth/auth.module';
 import { SettingsModule } from '../settings/settings.module';
@@ -15,7 +16,7 @@ import { ShippingController } from './shipping.controller';
 import { ShippingService } from './shipping.service';
 
 @Module({
-  imports: [AuthModule, SettingsModule, ApprovalModule],
+  imports: [AuthModule, SettingsModule, ApprovalModule, AccountingModule],
   controllers: [InvoicesController, PackingSlipController, BillsController, ShippingController, SalesPricingController],
   providers: [InvoicesService, PackingSlipService, PartyService, BillsService, ShippingService, SalesPricingService],
   exports: [PartyService, SalesPricingService],

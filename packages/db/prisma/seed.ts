@@ -65,6 +65,9 @@ const BASELINE_PROGRAMS = [
   { key: 'planning.createPo', name: 'Create PO from Plan', folder: 'Planning' },
   { key: 'admin.import', name: 'Legacy Import', folder: 'Administration' },
   { key: 'admin.config', name: 'Configuration', folder: 'Administration' },
+  { key: 'accounting.config', name: 'Accounting Masters', folder: 'Master Tables/Accounting' },
+  { key: 'accounting.export', name: 'Accounting Export', folder: 'Master Tables/Accounting' },
+  { key: 'sales.invoice', name: 'Generate Invoice', folder: 'Transactions/Sales' },
 ];
 
 // Secured items = granular actions with a response level (reason / signature /

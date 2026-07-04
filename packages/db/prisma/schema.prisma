@@ -429,6 +429,87 @@ model IncoTerms {
   @@map("IncoTerms")
 }
 
+// ---------------------------------------------------------------------------
+// Accounting masters (UG ch.17, mirrors legacy). All accounting impact for an
+// item flows from Item.GLGroup: GLGroupCode maps (GLGroup, GLCode) -> the
+// AccountCode used by the external accounting system (QuickBooks account
+// names in this install, e.g. "12500 - BULK Inventory Asset").
+// ---------------------------------------------------------------------------
+
+model GLGroup {
+  glGroup     String  @id @map("GLGroup") @db.VarChar(20)
+  description String? @map("Description") @db.VarChar(256)
+
+  @@map("GLGroup")
+}
+
+// GL purposes (Asset/COGS/Income + adjustment reasons like COUNT/Writeoff).
+model GLCode {
+  glCode      String  @id @map("GLCode") @db.VarChar(50)
+  description String? @map("Description") @db.VarChar(256)
+  version     Int?    @map("Version")
+
+  @@map("GLCode")
+}
+
+// External accounting-system account names (must exist identically there).
+model AccountCode {
+  accountCode String  @id @map("AccountCode") @db.VarChar(159)
+  version     Int?    @map("Version")
+  description String? @map("Description") @db.VarChar(256)
+
+  @@map("AccountCode")
+}
+
+// (GLGroup, GLCode) -> AccountCode mapping rows.
+model GLGroupCode {
+  id          Int     @id @default(autoincrement()) @map("GLGroupCode")
+  glGroup     String  @map("GLGroup") @db.VarChar(20)
+  glCode      String  @map("GLCode") @db.VarChar(50)
+  accountCode String? @map("AccountCode") @db.VarChar(159)
+
+  @@unique([glGroup, glCode])
+  @@map("GLGroupCode")
+}
+
+// ERP1-native ledger of accounting export runs (no legacy counterpart): what
+// range/kinds/format was handed to the accounting system, when, by whom.
+model AccountingExportRun {
+  id           Int      @id @default(autoincrement())
+  at           DateTime @default(now())
+  fromDate     DateTime
+  toDate       DateTime
+  kinds        String
+  format       String
+  entryCount   Int
+  warningCount Int
+  actorUserId  String?
+
+  @@index([at])
+  @@map("accounting_export_run")
+}
+
+// Tax rules (UG §17.4.7): one rule per (tax level, EntityTaxGroup,
+// ItemTaxGroup). Resolution per level: exact item-group match first, then the
+// blank-item-group rule for the customer group, else no tax. Rate is a
+// percentage of the taxed value; Amount a fixed charge per unit quantity;
+// TaxOnTax computes on the value inclusive of LOWER-numbered tax levels.
+model TaxRule {
+  id             Int      @id @default(autoincrement()) @map("TaxRule")
+  description    String?  @map("Description") @db.VarChar(256)
+  version        Int?     @map("Version")
+  context        String   @default("") @map("Context") @db.VarChar(6)
+  itemTaxGroup   String?  @map("ItemTaxGroup") @db.VarChar(20)
+  entityTaxGroup String?  @map("EntityTaxGroup") @db.VarChar(20)
+  rate           Float?   @map("Rate")
+  amount         Decimal? @map("Amount") @db.Money
+  taxOnTax       Boolean? @map("TaxOnTax")
+  taxNumber      Int?     @map("TaxNumber")
+
+  @@index([taxNumber])
+  @@map("TaxRule")
+}
+
 model Item {
   id                    Int      @id @default(autoincrement()) @map("Item")
   itemCode              String   @unique @map("ItemCode") @db.VarChar(30)
@@ -462,6 +543,8 @@ model Item {
   glGroup               String?  @map("GLGroup") @db.VarChar(20)
   abcCode               String?  @map("ABCCode") @db.VarChar(10)
   tax1Group             String?  @map("Tax1Group") @db.VarChar(20)
+  tax2Group             String?  @map("Tax2Group") @db.VarChar(20)
+  tax3Group             String?  @map("Tax3Group") @db.VarChar(20)
   isKit                 Boolean? @map("IsKit")
   controlledSubstance   Boolean? @map("ControlledSubstance")
   certifiedOrganic      Boolean? @map("CertifiedOrganic")

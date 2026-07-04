@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AccountingModule } from './accounting/accounting.module';
 import { ApprovalModule } from './approval/approval.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
@@ -44,6 +45,7 @@ import { UsersModule } from './users/users.module';
     StatsModule,
     SalesModule,
     QaModule,
+    AccountingModule,
   ],
 })
 export class AppModule {}

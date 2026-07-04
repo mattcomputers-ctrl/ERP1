@@ -42,3 +42,14 @@ sales-side figure (deposit/reserve), unrelated to §8.5 packaging material
 reservation (whose vessel table is 0-row). ERP1 mirrors the column but nothing
 reads it. Decide during sales/invoicing polish whether any document should
 show it.
+
+## Invoice numbers during parallel running (noted 2026-07-04)
+
+ERP1's native invoice generation continues the plant's `N`+8-digit sequence
+from the imported high-water mark. While both systems run, legacy can mint
+the same next number; the import sync would then insert the legacy Trans row
+alongside ERP1's (different Trans ids, duplicate TransDocument — there is no
+unique constraint, matching legacy). Fine for testing; before using ERP1
+invoices for real during parallel running, either reserve a distinct prefix
+(e.g. `E########`) or cut invoicing over in one go (same decision shape as
+the native-lot marker question).

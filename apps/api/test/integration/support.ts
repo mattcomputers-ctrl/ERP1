@@ -1,4 +1,6 @@
 import { PrismaClient } from '@erp1/db';
+import { GlMastersService } from '../../src/accounting/gl-masters.service';
+import { TaxService } from '../../src/accounting/tax.service';
 import { ApprovalPolicyService } from '../../src/approval/approval-policy.service';
 import { ApprovalRequestService } from '../../src/approval/approval-request.service';
 import { AuditService } from '../../src/audit/audit.service';
@@ -26,6 +28,7 @@ import { PurchasingService } from '../../src/purchasing/purchasing.service';
 import { RolesService } from '../../src/roles/roles.service';
 import { SecuredItemsService } from '../../src/secured-items/secured-items.service';
 import { UsersService } from '../../src/users/users.service';
+import { InvoicesService } from '../../src/sales/invoices.service';
 import { PartyService } from '../../src/sales/party.service';
 import { SalesPricingService } from '../../src/sales/sales-pricing.service';
 import { ShippingService } from '../../src/sales/shipping.service';
@@ -120,6 +123,9 @@ export function services(prisma: PrismaClient) {
     planning: new PlanningService(p, settings),
     planningRecalc: new PlanningRecalcService(p, audit),
     planningPo: new PlanningPoService(p, purchasing, priceVersions),
+    glMasters: new GlMastersService(p, audit),
+    tax: new TaxService(p),
+    invoices: new InvoicesService(p, settings, party, new TaxService(p), audit),
   };
 }
 

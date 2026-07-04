@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { type Me, useLogout, useMe } from './lib/auth';
+import { Accounting } from './pages/Accounting';
 import { ApprovalPolicies } from './pages/ApprovalPolicies';
 import { Audit } from './pages/Audit';
 import { BatchSheet } from './pages/BatchSheet';
@@ -86,6 +87,7 @@ export function App() {
         <Route path="/bills" element={<Bills />} />
         <Route path="/bills/:id/print" element={<BillDoc />} />
         <Route path="/price-lists" element={<PriceLists />} />
+        <Route path="/accounting" element={<Accounting />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/inventory-receipts" element={<MiscReceipts />} />
         <Route path="/lot-tracking" element={<LotTracking />} />
@@ -122,6 +124,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/packing-slips', label: 'Packing Slips' },
     { to: '/bills', label: 'Supplier Bills' },
     { to: '/price-lists', label: 'Price Lists' },
+    { to: '/accounting', label: 'Accounting' },
     { to: '/certificates', label: 'Certificates' },
     { to: '/item-tests', label: 'Item Tests' },
     { to: '/inventory', label: 'Inventory' },

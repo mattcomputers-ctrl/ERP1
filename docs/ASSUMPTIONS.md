@@ -686,3 +686,148 @@ Decisions and observed evidence:
   re-validates everything), CSV blank checkbox column (cosmetic, matches
   pre-change exports), test-gap meta-finding (coverage added with the fixes
   anyway).
+
+## Accounting — GL/tax masters, tax engine, invoice generation (§13 slice 1, built 2026-07-04)
+
+Evidence base: UG ch.17–18 + live-DB sweep (GLGroup 8 / GLCode 11 /
+AccountCode 27 / GLGroupCode 70 / TaxRule 3 / QuickBooksTransactions 7;
+Trans CI 22,083 still minted daily through 2026-07-02).
+
+1. **QuickBooks live bridge replaced by a file export.** The vendor's QB
+   interface is a resident agent speaking the QB Desktop COM API both ways
+   (export txns; import Actual Cost back; overnight auto-reconciliation).
+   This install used it for SEVEN transactions (Dec 2018–Jan 2019, RefNumbers
+   matching Trans CI invoice numbers) and abandoned it; invoicing continued
+   standalone. ERP1 therefore ships an **IIF + CSV export pack** driven by
+   the same GL model instead of a live bridge; QB-side validation/retry,
+   cost import-back, and overnight reconciliation are ⏸️ (impossible without
+   a live QB session, and demonstrably unused).
+2. **Tax rule resolution** (UG §17.4.7, engine in `tax-math.ts`): per level
+   1–3 and per line — exact (EntityTaxGroup, ItemTaxGroup) match, else the
+   blank-ItemTaxGroup rule for that customer group, else no tax. Blank and
+   NULL group values are equivalent (case-insensitive compare); a customer
+   with no group at a level gets no tax at that level unless a rule with a
+   blank EntityTaxGroup exists. Rate is % of the line value; Amount is a
+   fixed charge × unit qty; **TaxOnTax bases the rate on the value inclusive
+   of taxes computed at lower-numbered levels** ("higher levels" in the UG =
+   more senior = level 1; the classic PST-on-GST case). Freight is taxed via
+   an ItemTaxGroup literally named 'Freight' (fallback: the blank rule),
+   rate-only (no unit qty). Each level's TOTAL is rounded to cents once (not
+   per line). `TaxRule.TaxNumber` is the level selector; `Context` (which
+   held '1' on all 3 live rows) is written = String(taxNumber) on native
+   rules — undecidable from data which one legacy resolution used, both are
+   kept consistent.
+3. **Masters are legacy-owned during parallel running.** The five GL/tax
+   tables ARE in the legacy change feed (LogResult names them), so they got
+   standard log-driven import specs; ERP1 edits to an imported KEY can be
+   overwritten by a later legacy-side change (legacy is master until
+   cutover), while ERP1-created rows (new varchar keys; native ids ≥1e9 for
+   GLGroupCode/TaxRule) are never touched by the import. GLGroupCode gained
+   a `@@unique(glGroup, glCode)` — the live 70 rows have no duplicates and
+   the legacy editor grid implies the pair is the identity.
+4. **Invoice generation bills QtyUsed − already-invoiced.** Legacy invoices
+   per shipment event (2,861 orders carry >1 CI invoice; Trans header fields
+   equal the Ordr's BillTo/Owner/Salesman/Currency/PoNumber on live rows;
+   TransDetail rows carry the ORDER's context 'SH', the shipped qty and the
+   line price). ERP1's generate: per SH line, invoiceable = QtyUsed (shipped
+   so far) − Σ qty on prior non-reversed CI invoices for that line (a
+   reversal PAIR — the reversing invoice and its target — is excluded from
+   the sum, restoring the qty as re-billable). Refused when nothing is
+   uninvoiced, when the order isn't SH, has no bill-to, or is NST. Zero tax
+   amounts are stored as NULL (matching live rows); freight and taxes land
+   on the header exactly like `trans-math` reads them back.
+5. **`shipLots` now stamps `OrdDetail.QtyUsed`** (atomic COALESCE bump per
+   line referenced by a shipped lot) — the legacy shipped-so-far convention.
+   Before this, native shipments left QtyUsed NULL, so invoice generation
+   and the invoice document's backordered math only worked for imported
+   orders. Lots recorded without an `ordDetailId` still ship (traceability
+   is lot-level) but don't move QtyUsed — the pick list UI always links
+   lines.
+6. **Invoice numbering continues the plant's sequence**: `N` + 8-digit
+   zero-padded integer (all 22K live documents match `^N[0-9]{8}$`). The max
+   is computed with that regex under the shared advisory lock, so malformed
+   documents can't poison the sequence; TI documents share it (legacy TI
+   rows use the same format). Collision risk during parallel running (both
+   systems minting the next N) is recorded in OPEN_QUESTIONS — same shape as
+   the lot-number question.
+7. **Review round 1 (2026-07-04, 5 lenses → adversarial verify, 51 agents):**
+   9 unique findings confirmed and fixed — (1) the new shipLots QtyUsed stamp
+   mutated order state WITHOUT the Ordr row lock (hard-convention violation;
+   racing the NST line editor could silently strand a shipment unbilled) —
+   now locks Ordr first and validates referenced lines IN-tx; (2) shipLots
+   accepted an ordDetailId whose item differs from the shipped lot (QtyUsed
+   would land on the wrong line and be billed at ITS price) — now rejected;
+   (3) invoice-generation tax reads ran on separate pool connections while
+   the row+advisory locks were held — TaxService now takes the tx client;
+   (4) invoice audit change rows recorded the ORDER line id under
+   tableName=TransDetail — now the created detail ids; (5) GL-masters PATCH
+   treated an omitted description as "clear to NULL" — now keep-on-omit /
+   clear-on-null; (6) explicit `taxOnTax: null` could NULL a boolean mirror
+   column — treated as omitted; (7) the web tax preview called non-existent
+   /shipping/* routes (actual: /shipping-orders/*) with the failure
+   swallowed; (8) MappingGrid state leaked across GL-group switches (keyed
+   now) and its account select visibly reverted while a PATCH was in flight
+   (optimistic value now); (9) the tax-rule editor couldn't clear a
+   description (blank mapped to undefined = keep). Notable refutations: TI
+   invoices are NOT invoice-shaped duplicates to exclude; CurrencyRate has
+   zero readers; the import sync cannot clobber native QtyUsed (imported
+   orders are legacy-mastered, native orders aren't in legacy).
+
+## Accounting export — IIF/CSV journal (§13 slice 2, built 2026-07-04)
+
+1. **Scope = the transaction kinds the legacy QB agent exported** (UG
+   §18.1.2) minus master-list sync (customers/suppliers/items are maintained
+   in the accounting system directly): sales invoices, purchase receipts (as
+   BILLs), misc receipts, inventory adjustments, builds. Master-list IIF
+   (CUST/VEND/INVITEM) can be added later if the user wants it.
+2. **Double-entry construction**: invoice → AR debit vs per-GL-group Income
+   credits + per-level tax credits + freight credit; PO receipt → Asset
+   debit vs AP credit at the PO line price; MISC receipt → Asset vs the
+   group's MiscReceipt account at the received lot's unit cost; native COUNT
+   adjustment → Asset vs the group's COUNT account, delta recovered from the
+   atomic audit entry (the ChangeSet and the parcel's qty before/after are
+   recorded in the SAME audit row set), valued at the parcel lot's unit
+   cost; native build → product Asset debit vs consumed ingredients' Asset
+   credits (source='consumption' genealogy edges × each consumed lot's own
+   unitCost — the exact figures the valuation engine rolled up). Header-side
+   accounts (AR/AP/tax1-3/freight/fallback) are app settings
+   (`accounting.*Account`) with QuickBooks-style defaults.
+3. **Legacy-imported adjustments and builds are NOT exported** (only native
+   id ≥ 1e9): their value lives in legacy InvMovement/OrdrItemCost costing
+   ERP1 doesn't re-derive; the plant's accounting for the legacy era already
+   happened. Invoices and PO receipts ARE exported for any date range (their
+   value = stored document/line figures, valid for both worlds).
+4. **Every line is rounded to cents and the header line is forced to balance
+   the rounded rest** — float artifacts (400 × 2.03 = 811.9999…) must never
+   reach an accounting import; the export refuses to render an unbalanced
+   entry (belt-and-braces check).
+5. **Unresolvable accounts never drop value**: they book to the
+   `accounting.fallbackAccount` ('Uncategorized') and emit a warning listed
+   in the preview, the export response, and the run ledger's warning count.
+6. Every download is recorded (`accounting_export_run` + audit): range,
+   kinds, format, entry/warning counts, actor — the operational answer to
+   "what did accounting already get" (the vendor's overnight sync is ⏸️, see
+   slice 1 §1).
+7. **Day-boundary caveat during parallel running**: the export range filters
+   raw stored timestamps; legacy rows are plant wall-clock stored as UTC
+   digits while ERP1-native rows are true UTC (see
+   [[datetime-timezone-handling]]) — transactions near midnight can fall on
+   either side of a day boundary depending on origin until the cutover
+   normalization. Whole-month ranges make this immaterial.
+8. **Review round 2 (2026-07-04, 3 lenses → adversarial verify, 23 agents):**
+   8 unique findings confirmed and fixed — (1) CRITICAL: by-package PO
+   receipts were billed at the PACKAGE price per stock unit (live data: up
+   to 864× overstated AP) — the journal now divides by
+   `OrdDetailPricing.entityQuantity` exactly like receiving costs the lot;
+   (2) reversed PO/MISC receipts exported as live bills — in-range reversal
+   pairs are now excluded (warned), and an in-range reversal of a
+   prior-period receipt emits a negated counter-entry dated at the reversal;
+   (3) builds booked null-unitCost consumed lots at 0 where the produced
+   lot's roll-up used the purchase-price fallback — same fallback applied;
+   (4) the header-rebalance could shift an invoice's AR a cent off the
+   stored document total — rounding dust now lands in the largest detail
+   line, never the header; (5) CSV formula-injection guard (leading
+   =/+/-/@ in text cells); (6) PATCH-with-omitted-description wrote a false
+   "cleared" audit newValue; (7) the round-1 optimistic select still
+   reverted during the refetch (mutation now stays pending through
+   invalidation); (8) the day-boundary caveat above recorded.
