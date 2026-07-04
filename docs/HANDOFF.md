@@ -116,27 +116,68 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. **Verify CI green for 43ef59e** (create-PO-from-plan; d84be91 — the native
-   recalc engine — is confirmed green. Fix first if red).
-2. **§13 accounting/QuickBooks export** (UG ch.18: the QuickBooks bridge —
-   invoices/bills/inventory sync; legacy `Trans` CI rows are the invoice
-   backbone, see [[sales-docs-mapping]]; decide export format: IIF vs a
-   CSV/report pack — discovery first).
-3. **§10 leftover — Inventory Supply & Demand tool** (UG §13.3: per-item
-   sources / existing orders / all-demand / supply-for-demand tables —
-   read-only analysis viewer; the recalc engine's loaders are reusable).
-4. **§17 email notifications**, **§14 config tabs**, **§18 viewer library**
-   (batch-build on DataGrid), **§15 i18n**, **§19 handheld PWA** — in that
-   rough order.
+1. **Verify CI green for ac4fcaf** (supply & demand viewer; 4378ccc — the
+   full §13 accounting slice — is confirmed green. Fix first if red).
+2. **§17 email notifications** (UG ch.22: configurable notifications on
+   containers/items/lots/orders/planning/receipts/resources/workflows —
+   legacy `Notification`/`EmailNotification` tables; discovery first: which
+   notification kinds this install actually configured; SMTP config lives
+   in the future §14 mail tab — an `app_settings`-driven SMTP + a
+   notification-rule engine is the likely shape).
+3. **§14 config tabs** (UG ch.19, `Params*` tables — the app_settings
+   foundation + SettingsService exist; build the tabbed admin UI over the
+   real Params* values incl. the new `accounting.*Account` keys).
+4. **§18 viewer library** (batch-build set viewers on DataGrid), **§15 i18n**
+   (`Vocabulary`), **§19 handheld PWA** — in that rough order.
 5. Background chip pending: enforce secured-item PERFORM grant on
    order.complete + release.disposition (+ order.revise now).
 6. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
-   YYMMDD### collisions; Ordr.ReserveAmount on SH orders (sales-side, 45
-   rows) — surface on documents?
+   YYMMDD### collisions; N-sequence invoice numbers can collide during
+   parallel running (reserve an E-prefix or cut invoicing over in one go);
+   Ordr.ReserveAmount on SH orders (45 rows) — surface on documents?
 7. Before cutover: one real install pass on the actual Proxmox VM; a live
    `POST /import/sync` against the real legacy DB (seam-fake tested only);
    disable the PlanTrace import spec (the native plan takes over — setting
    `planning.source` already flips on first recalc).
+
+## State of the world (as of 2026-07-04 late, commit ac4fcaf)
+
+- **§13 Accounting ✅** (4378ccc): GL/tax masters mirrored + imported
+  (`GLGroup`/`GLCode`/`AccountCode`/`GLGroupCode`/`TaxRule` — all ARE in the
+  legacy change feed; `Item.Tax2Group/Tax3Group` gap closed) with a full
+  CRUD Accounting page (program `accounting.config`); **tax engine** per UG
+  §17.4.7 (`tax-math.ts` pure + `TaxService` — pass the tx client when
+  already inside a transaction!); **native invoice generation**
+  (`POST /invoices`, program `sales.invoice`): bills QtyUsed − prior
+  non-reversed CI per line (legacy invoices per shipment event), header
+  copies the order, N+8-digit sequence continues the plant's numbering
+  (collision note in OPEN_QUESTIONS), Ordr row lock → id-alloc lock;
+  `shipLots` now stamps `OrdDetail.QtyUsed` under the Ordr row lock with
+  in-tx validation (lot item must BE the line item). **Accounting export**
+  (`POST /accounting/export`, program `accounting.export`): date-range
+  double-entry journal as QuickBooks IIF or CSV — invoices/PO-receipt
+  BILLs/MISC receipts/native adjustments (audit-trail delta)/native builds
+  (consumption genealogy); by-package PO prices divide by
+  `OrdDetailPricing.entityQuantity` (the 864x lesson); reversed receipts
+  netted out or counter-entered across periods; account resolution
+  Item.GLGroup → GLGroupCode → AccountCode with `accounting.*Account`
+  settings + fallback-with-warning; cents-exact, headers pinned to document
+  totals; `accounting_export_run` ledger + audit per download. The legacy
+  live QB COM bridge was used for 7 txns in 2018/19 then abandoned —
+  reconciliation ⏸️. "Cost categories" row ⏸️ (zero data).
+- **§10 Supply & Demand viewer ✅** (ac4fcaf): read-only Allocate Demand
+  (UG §13.3) — `GET /planning/supply-demand?itemId=` (program
+  `planning.supplyDemand`) + linked-tables tab on Planning; same
+  openness/nettable/release semantics as the recalc engine; open demand =
+  Σ(required−used); only OPEN-to-OPEN OrdDetailCommit edges count
+  (closed-side commits are settled history). Allocation editing
+  intentionally omitted (Packouts panel owns it).
+- **Review discipline paid again**: 3 rounds this session (5+3+2 lenses →
+  2 adversarial verifiers each, strict kill) confirmed 9 + 8 + 4 unique
+  findings the tests missed — incl. a CRITICAL by-package AP overstatement,
+  a lock-convention violation, and tax reads escaping the locked tx. If
+  review agents die on usage limits, re-run with model:'opus'.
+- Suites: 93 unit + 322 integration green.
 
 ## State of the world (as of 2026-07-04, commit 43ef59e)
 
