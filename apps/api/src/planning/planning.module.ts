@@ -6,10 +6,11 @@ import { PlanningPoService } from './planning-po.service';
 import { PlanningRecalcService } from './planning-recalc.service';
 import { PlanningController } from './planning.controller';
 import { PlanningService } from './planning.service';
+import { SupplyDemandService } from './supply-demand.service';
 
 @Module({
   imports: [AuthModule, SettingsModule, PurchasingModule],
   controllers: [PlanningController],
-  providers: [PlanningService, PlanningRecalcService, PlanningPoService],
+  providers: [PlanningService, PlanningRecalcService, PlanningPoService, SupplyDemandService],
 })
 export class PlanningModule {}

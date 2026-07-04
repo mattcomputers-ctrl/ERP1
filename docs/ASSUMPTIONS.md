@@ -831,3 +831,31 @@ Trans CI 22,083 still minted daily through 2026-07-02).
    "cleared" audit newValue; (7) the round-1 optimistic select still
    reverted during the refetch (mutation now stays pending through
    invalidation); (8) the day-boundary caveat above recorded.
+
+## Inventory Supply & Demand viewer (§10 / UG §13.3, built 2026-07-04)
+
+1. **Read-only by design.** The vendor's Allocate Demand form also EDITS
+   allocations (Supplied Qty / Allocated Qty = OrdDetailCommit rows). In this
+   install the only allocations ever recorded are packaging-order bulk
+   commitments (MFPP-UI ← MFBA-PK; see [[packouts-model]]), which ERP1
+   already creates/edits through the Packouts panel with the proper
+   locking/audit. Stock-to-order commitments were never used (no such
+   OrdDetailCommit shape exists in 27.8K live rows), so an allocation editor
+   here would write rows nothing else reads. The viewer states this and
+   links the workflow.
+2. Semantics copied from the native plan engine (same openness rule,
+   WHS/null-context nettable stock, latest-release Available/Held
+   classification, remaining = QtyReqd − QtyUsed) so the two screens can
+   never disagree about what counts as supply.
+3. **Review round 3 (2026-07-04, 2 lenses → adversarial verify):** 4 confirmed
+   findings fixed — open-demand total now sums remaining (required−used), not
+   balance+committed (commits are never decremented, so after partial
+   execution the old formula overstated demand); allocation edges and
+   committed/allocated sums now count only OPEN-to-OPEN line pairs (a commit
+   whose counterpart order closed is settled history — it used to dim every
+   row in the linked-table UI and inflate sums); the warehouse-inventory
+   source row is inert (its null id was the no-selection sentinel — clicking
+   it silently wiped the selection); item-picker errors are surfaced (a user
+   without `planning.supplyDemand` saw a silent dead end). Refuted: the
+   unbounded per-item query (measured: worst real item ≪ bind-variable
+   ceiling), produce-line discarded-filter (zero such rows live).

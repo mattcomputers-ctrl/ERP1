@@ -52,7 +52,7 @@ function fmtDate(v: string | null | undefined): string {
 }
 
 export function Planning() {
-  const [tab, setTab] = useState<'trace' | 'short'>('trace');
+  const [tab, setTab] = useState<'trace' | 'short' | 'sd'>('trace');
   const qc = useQueryClient();
   const [recalcSummary, setRecalcSummary] = useState<RecalcResp | null>(null);
   const recalc = useMutation({
@@ -79,6 +79,7 @@ export function Planning() {
           <div className="flex gap-1 rounded-md bg-slate-100 p-1 text-sm">
             <button onClick={() => setTab('trace')} className={`rounded px-3 py-1 ${tab === 'trace' ? 'bg-white shadow-sm' : 'text-slate-600'}`}>Plan Tracing</button>
             <button onClick={() => setTab('short')} className={`rounded px-3 py-1 ${tab === 'short' ? 'bg-white shadow-sm' : 'text-slate-600'}`}>Short Inventory</button>
+            <button onClick={() => setTab('sd')} className={`rounded px-3 py-1 ${tab === 'sd' ? 'bg-white shadow-sm' : 'text-slate-600'}`}>Supply &amp; Demand</button>
           </div>
         </div>
       </div>
@@ -91,7 +92,210 @@ export function Planning() {
           {recalcSummary.demands} order demands + {recalcSummary.minStockDemands} min-stock targets in {(recalcSummary.elapsedMs / 1000).toFixed(1)}s.
         </p>
       )}
-      {tab === 'trace' ? <TraceGrid /> : <ShortGrid />}
+      {tab === 'trace' && <TraceGrid />}
+      {tab === 'short' && <ShortGrid />}
+      {tab === 'sd' && <SupplyDemand />}
+    </div>
+  );
+}
+
+// --- Inventory Supply & Demand (UG §13.3 "Allocate Demand", read-only) ------
+
+interface SdItemOption { id: number; itemCode: string | null; description: string | null; unit: string | null }
+interface SdSource {
+  kind: 'INV' | 'PO' | 'MFBA' | 'MFPP'; orderId: number | null; ordDetailId: number | null;
+  supplyQty: number; allocatedQty: number; balanceQty: number;
+  planStartDate: string | null; dateRequired: string | null; status: string | null;
+}
+interface SdDemand {
+  orderId: number; ordDetailId: number; context: string;
+  requiredQty: number; usedQty: number; committedQty: number; balanceQty: number;
+  planStartDate: string | null; dateRequired: string | null; status: string | null;
+  itemProduceCode: string | null; qtyProduce: number | null;
+}
+interface SdResp {
+  item: SdItemOption;
+  sources: SdSource[];
+  demands: SdDemand[];
+  allocations: Array<{ demandOrdDetailId: number | null; srcOrdDetailId: number | null; qty: number }>;
+  totals: { availableStock: number; heldStock: number; supply: number; openDemand: number; balance: number };
+}
+
+const SOURCE_LABEL: Record<string, string> = { INV: 'Warehouse inventory', PO: 'Purchase', MFBA: 'Batch', MFPP: 'Packaging' };
+
+function SupplyDemand() {
+  const [search, setSearch] = useState('');
+  const [item, setItem] = useState<SdItemOption | null>(null);
+  const [selSource, setSelSource] = useState<number | null>(null); // ordDetailId
+  const [selDemand, setSelDemand] = useState<number | null>(null);
+
+  const options = useQuery({
+    queryKey: ['sd-items', search],
+    queryFn: () => api.get<{ rows: SdItemOption[] }>(`/planning/supply-demand/item-options?q=${encodeURIComponent(search)}`),
+    enabled: search.trim().length >= 1 && !item,
+  });
+  const data = useQuery({
+    queryKey: ['sd', item?.id],
+    queryFn: () => api.get<SdResp>(`/planning/supply-demand?itemId=${item!.id}`),
+    enabled: item != null,
+  });
+
+  const d = data.data;
+  // Linked-table filters: what the selected source supplies / what supplies
+  // the selected demand (OrdDetailCommit edges, packaging bulk allocations).
+  const demandsForSource = selSource != null && d
+    ? new Map(d.allocations.filter((a) => a.srcOrdDetailId === selSource).map((a) => [a.demandOrdDetailId, a.qty]))
+    : null;
+  const sourcesForDemand = selDemand != null && d
+    ? new Map(d.allocations.filter((a) => a.demandOrdDetailId === selDemand).map((a) => [a.srcOrdDetailId, a.qty]))
+    : null;
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <div className="text-sm text-slate-500">
+          All supply and demand for one item (vendor &quot;Allocate Demand&quot;, read-only). Select a source or a demand
+          row to see its allocations — packaging bulk commitments are edited on the batch order&apos;s Packouts panel.
+        </div>
+        <div className="mt-3 max-w-md">
+          {item ? (
+            <div className="flex items-center gap-2">
+              <span className="rounded-md bg-indigo-50 px-2 py-1 text-sm text-indigo-700">
+                {item.itemCode} — {item.description}
+              </span>
+              <button className="text-xs text-slate-500 hover:text-slate-800" onClick={() => { setItem(null); setSearch(''); setSelSource(null); setSelDemand(null); }}>
+                change
+              </button>
+            </div>
+          ) : (
+            <div>
+              <input
+                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search items by code or description…"
+              />
+              {search.trim().length >= 1 && (
+                <div className="mt-1 max-h-48 overflow-y-auto rounded-md border border-slate-200">
+                  {options.isError && (
+                    <div className="px-3 py-2 text-sm text-rose-600">
+                      {options.error instanceof Error ? options.error.message : 'Search failed'}
+                    </div>
+                  )}
+                  {options.data?.rows.map((o) => (
+                    <button key={o.id} className="block w-full px-3 py-1.5 text-left text-sm hover:bg-indigo-50" onClick={() => setItem(o)}>
+                      {o.itemCode} — {o.description}
+                    </button>
+                  ))}
+                  {options.data?.rows.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">No matches.</div>}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {d && (
+          <div className="mt-3 flex flex-wrap gap-6 text-sm">
+            <span>Available stock: <b>{d.totals.availableStock.toFixed(2)}</b> {d.item.unit}</span>
+            {d.totals.heldStock > 0 && <span className="text-amber-700">Held/rejected: {d.totals.heldStock.toFixed(2)}</span>}
+            <span>Total supply: <b>{d.totals.supply.toFixed(2)}</b></span>
+            <span>Open demand: <b>{d.totals.openDemand.toFixed(2)}</b></span>
+            <span className={d.totals.balance < 0 ? 'text-rose-600' : 'text-emerald-700'}>
+              Balance: <b>{d.totals.balance.toFixed(2)}</b>
+            </span>
+          </div>
+        )}
+      </Card>
+      {data.isLoading && item && <p className="text-sm text-slate-400">Loading…</p>}
+      {data.isError && <p className="text-sm text-red-600">{data.error instanceof Error ? data.error.message : 'Failed to load'}</p>}
+      {d && (
+        <div className="grid gap-4 xl:grid-cols-2">
+          <Card>
+            <h3 className="text-sm font-medium text-slate-700">Sources — supply for {d.item.itemCode}</h3>
+            <table className="mt-2 w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+                  <th className="py-1.5 pr-2">Source</th>
+                  <th className="py-1.5 pr-2">Order</th>
+                  <th className="py-1.5 pr-2 text-right">Supply</th>
+                  <th className="py-1.5 pr-2 text-right">Allocated</th>
+                  <th className="py-1.5 pr-2 text-right">Balance</th>
+                  <th className="py-1.5 pr-2">Required</th>
+                  <th className="py-1.5">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.sources.map((s, i) => (
+                  <tr
+                    key={i}
+                    // The warehouse-inventory row has no order line to link
+                    // allocations to (ordDetailId null = the no-selection
+                    // sentinel) — render it inert, not clickable.
+                    onClick={s.ordDetailId != null ? () => { setSelSource(s.ordDetailId); setSelDemand(null); } : undefined}
+                    className={`border-b border-slate-100 ${s.ordDetailId != null ? 'cursor-pointer' : ''} ${selSource != null && selSource === s.ordDetailId ? 'bg-indigo-50' : s.ordDetailId != null ? 'hover:bg-slate-50' : ''} ${sourcesForDemand && !sourcesForDemand.has(s.ordDetailId) ? 'opacity-40' : ''}`}
+                  >
+                    <td className="py-1.5 pr-2">{SOURCE_LABEL[s.kind]}</td>
+                    <td className="py-1.5 pr-2">{s.orderId ?? ''}</td>
+                    <td className="py-1.5 pr-2 text-right">{s.supplyQty.toFixed(2)}</td>
+                    <td className="py-1.5 pr-2 text-right">{s.allocatedQty ? s.allocatedQty.toFixed(2) : ''}</td>
+                    <td className="py-1.5 pr-2 text-right">{s.balanceQty.toFixed(2)}</td>
+                    <td className="py-1.5 pr-2">{fmtDate(s.dateRequired)}</td>
+                    <td className="py-1.5">{s.status ?? ''}</td>
+                  </tr>
+                ))}
+                {d.sources.length === 0 && <tr><td colSpan={7} className="py-3 text-center text-slate-400">No supply.</td></tr>}
+              </tbody>
+            </table>
+            {sourcesForDemand && (
+              <p className="mt-2 text-xs text-slate-500">
+                Highlighted: sources allocated to order #{d.demands.find((x) => x.ordDetailId === selDemand)?.orderId}
+                {[...sourcesForDemand.values()].length > 0 && ` (${[...sourcesForDemand.values()].reduce((a, b) => a + b, 0).toFixed(2)} allocated)`}
+              </p>
+            )}
+          </Card>
+          <Card>
+            <h3 className="text-sm font-medium text-slate-700">All demand for {d.item.itemCode}</h3>
+            <table className="mt-2 w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+                  <th className="py-1.5 pr-2">Order</th>
+                  <th className="py-1.5 pr-2">Type</th>
+                  <th className="py-1.5 pr-2">Produces</th>
+                  <th className="py-1.5 pr-2 text-right">Required</th>
+                  <th className="py-1.5 pr-2 text-right">Committed</th>
+                  <th className="py-1.5 pr-2 text-right">Balance</th>
+                  <th className="py-1.5 pr-2">Required by</th>
+                  <th className="py-1.5">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.demands.map((r) => (
+                  <tr
+                    key={r.ordDetailId}
+                    onClick={() => { setSelDemand(r.ordDetailId); setSelSource(null); }}
+                    className={`cursor-pointer border-b border-slate-100 ${selDemand === r.ordDetailId ? 'bg-indigo-50' : 'hover:bg-slate-50'} ${demandsForSource && !demandsForSource.has(r.ordDetailId) ? 'opacity-40' : ''}`}
+                  >
+                    <td className="py-1.5 pr-2">{r.orderId}</td>
+                    <td className="py-1.5 pr-2">{SOURCE_LABEL[r.context] ?? r.context}</td>
+                    <td className="py-1.5 pr-2">{r.itemProduceCode ?? ''}{r.qtyProduce != null ? ` × ${r.qtyProduce}` : ''}</td>
+                    <td className="py-1.5 pr-2 text-right">{r.requiredQty.toFixed(2)}</td>
+                    <td className="py-1.5 pr-2 text-right">{r.committedQty ? r.committedQty.toFixed(2) : ''}</td>
+                    <td className="py-1.5 pr-2 text-right">{r.balanceQty.toFixed(2)}</td>
+                    <td className="py-1.5 pr-2">{fmtDate(r.dateRequired)}</td>
+                    <td className="py-1.5">{r.status ?? ''}</td>
+                  </tr>
+                ))}
+                {d.demands.length === 0 && <tr><td colSpan={8} className="py-3 text-center text-slate-400">No open demand.</td></tr>}
+              </tbody>
+            </table>
+            {demandsForSource && (
+              <p className="mt-2 text-xs text-slate-500">
+                Highlighted: orders supplied by the selected source
+                {[...demandsForSource.values()].length > 0 && ` (${[...demandsForSource.values()].reduce((a, b) => a + b, 0).toFixed(2)} allocated)`}
+              </p>
+            )}
+          </Card>
+        </div>
+      )}
     </div>
   );
 }

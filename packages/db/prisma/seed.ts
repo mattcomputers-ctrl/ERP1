@@ -63,6 +63,7 @@ const BASELINE_PROGRAMS = [
   { key: 'planning.short', name: 'Short Inventory', folder: 'Planning' },
   { key: 'planning.recalculate', name: 'Recalculate Plan Trace', folder: 'Planning' },
   { key: 'planning.createPo', name: 'Create PO from Plan', folder: 'Planning' },
+  { key: 'planning.supplyDemand', name: 'Inventory Supply & Demand', folder: 'Planning' },
   { key: 'admin.import', name: 'Legacy Import', folder: 'Administration' },
   { key: 'admin.config', name: 'Configuration', folder: 'Administration' },
   { key: 'accounting.config', name: 'Accounting Masters', folder: 'Master Tables/Accounting' },

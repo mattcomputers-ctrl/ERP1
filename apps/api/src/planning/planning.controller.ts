@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
 import { CurrentUser, type Actor } from '../auth/current-user.decorator';
 import { ProgramGuard, RequireProgram } from '../auth/program.guard';
 import { SessionAuthGuard } from '../auth/session-auth.guard';
@@ -6,6 +6,7 @@ import { CreatePoFromPlanDto } from './dto/create-po-from-plan.dto';
 import { PlanningPoService } from './planning-po.service';
 import { PlanningRecalcService } from './planning-recalc.service';
 import { PlanningService, type PlanTraceListQuery } from './planning.service';
+import { SupplyDemandService } from './supply-demand.service';
 
 @UseGuards(SessionAuthGuard, ProgramGuard)
 @RequireProgram('planning.trace')
@@ -15,7 +16,21 @@ export class PlanningController {
     private readonly planning: PlanningService,
     private readonly recalc: PlanningRecalcService,
     private readonly planningPo: PlanningPoService,
+    private readonly supplyDemand: SupplyDemandService,
   ) {}
+
+  // Inventory Supply & Demand / Allocate Demand (UG §13.3), read-only.
+  @Get('supply-demand')
+  @RequireProgram('planning.supplyDemand')
+  supplyDemandForItem(@Query('itemId', ParseIntPipe) itemId: number) {
+    return this.supplyDemand.forItem(itemId);
+  }
+
+  @Get('supply-demand/item-options')
+  @RequireProgram('planning.supplyDemand')
+  supplyDemandItems(@Query('q') q?: string) {
+    return this.supplyDemand.itemOptions(q ?? '');
+  }
 
   // Plan Tracing set viewer (UG §14.2): the plan's requirements in sequence.
   @Get('trace')
