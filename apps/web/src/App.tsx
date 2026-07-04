@@ -24,6 +24,7 @@ import { LotTracking } from './pages/LotTracking';
 import { MiscReceipts } from './pages/MiscReceipts';
 import { OrderEditApprovals } from './pages/OrderEditApprovals';
 import { Orders } from './pages/Orders';
+import { Planning } from './pages/Planning';
 import { PackingSlipDoc } from './pages/PackingSlipDoc';
 import { PackingSlips } from './pages/PackingSlips';
 import { PriceLists } from './pages/PriceLists';
@@ -70,6 +71,7 @@ export function App() {
         <Route path="/recipes" element={<Recipes />} />
         <Route path="/recipes/:id/preview" element={<RecipePreview />} />
         <Route path="/orders" element={<Orders />} />
+        <Route path="/planning" element={<Planning />} />
         <Route path="/orders/:id/sheet" element={<BatchSheet />} />
         <Route path="/purchasing" element={<Purchasing />} />
         <Route path="/purchase-orders/:id/print" element={<PurchaseOrderDoc />} />
@@ -114,6 +116,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/units', label: 'Units' },
     { to: '/recipes', label: 'Recipes' },
     { to: '/orders', label: 'Orders' },
+    { to: '/planning', label: 'Planning' },
     { to: '/purchasing', label: 'Purchasing' },
     { to: '/invoices', label: 'Invoices' },
     { to: '/packing-slips', label: 'Packing Slips' },

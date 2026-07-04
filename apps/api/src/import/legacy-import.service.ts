@@ -31,6 +31,11 @@ interface TableSpec {
   legacyTable: string;
   delegate: string; // Prisma model accessor
   idColumn?: string; // Postgres column name for sequence reset (id-based tables)
+  // The source rewrites this table wholesale (fresh ids, old rows gone), so
+  // after every full copy the mirror prunes LEGACY-RANGE rows the snapshot no
+  // longer contains. Requires idColumn; native rows (id >= NATIVE_ID_BASE)
+  // are never touched.
+  replaceStale?: boolean;
   where: (data: Record<string, unknown>) => Record<string, unknown>;
   map: (row: Record<string, any>) => Record<string, unknown>;
 }
@@ -305,6 +310,26 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    // MRP plan trace (vendor ch.14) — the nightly legacy recalc REWRITES the
+    // whole table with fresh ids and is never change-logged, so it re-copies
+    // wholesale on every sync and prunes vanished rows.
+    name: 'PlanTrace', legacyTable: 'dbo.PlanTrace', delegate: 'planTrace', idColumn: 'PlanTrace',
+    replaceStale: true,
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.PlanTrace, parentId: r.Parent, ownerId: r.Owner, ordrId: r.Ordr, context: r.Context,
+      itemId: r.Item, ordDetailId: r.OrdDetail, user: r.User, reference: r.Reference,
+      availableDate: r.AvailableDate, quantity: r.Quantity, dateReleased: r.DateReleased,
+      dateUpdated: r.DateUpdated, sublotId: r.Sublot, expiryFlag: r.ExpiryFlag,
+      quantityExpired: r.QuantityExpired, dateRequired: r.DateRequired, orderByDate: r.OrderByDate,
+      leadTime: r.LeadTime, testingLeadTime: r.TestingLeadTime, mfLevel: r.MFLevel,
+      mfOrdrId: r.MFOrdr, promisedDate: r.PromisedDate, sourceOrdrId: r.SourceOrdr,
+      planTraceStatus: r.PlanTraceStatus, manufacturerId: r.Manufacturer,
+      reqdSublotId: r.ReqdSubLot, mfgItemId: r.MfgItem, divisionId: r.Division,
+      arrivalDate: r.ArrivalDate,
+    }),
+  },
+  {
     name: 'LotIngredient', legacyTable: 'dbo.LotIngredient', delegate: 'lotIngredient', idColumn: 'LotIngredient',
     where: (d) => ({ id: d.id }),
     map: (r) => ({ id: r.LotIngredient, lot: r.Lot, itemId: r.Item, percent: r.Percent }),
@@ -457,7 +482,7 @@ const REWALK_LAG = 1_000;
 // cannot refresh them, so sync re-copies them wholesale: the tiny ones every
 // run, the bigger ones when a proxy table that always accompanies their
 // changes was touched (err on re-copy; reconciliation is the backstop).
-const NEVER_LOGGED_ALWAYS = ['Currency', 'TestGroup', 'Address', 'SublotParent'];
+const NEVER_LOGGED_ALWAYS = ['Currency', 'TestGroup', 'Address', 'SublotParent', 'PlanTrace'];
 const NEVER_LOGGED_PROXIED: Array<{ name: string; proxies: string[] }> = [
   // Every legacy stock movement posts InvMovement rows (logged) under a
   // ChangeSet — either touch means Inventory balances moved.
@@ -604,6 +629,45 @@ export class LegacyImportService {
     });
   }
 
+  /**
+   * For replaceStale tables (wholly rewritten at source — e.g. the nightly
+   * plan-trace recalc deletes every row and writes fresh ids), remove mirror
+   * rows the source snapshot no longer contains. LEGACY-RANGE ids only:
+   * native rows are never deleted by imports, per the engine invariant.
+   *
+   * The vanished set is computed in app code and deleted in positive `in`
+   * chunks — a single `notIn` of the whole snapshot would hit Postgres's
+   * 32,767 bind-variable ceiling as the source grows (and negated chunks
+   * don't compose). An EMPTY snapshot against a non-empty mirror is treated
+   * as suspect, not as "delete everything": a wholesale-rewritten source
+   * read mid-rewrite is indistinguishable from truly empty, so the prune is
+   * skipped with a warning and retried by the next sync.
+   */
+  private async pruneVanished(spec: TableSpec, rows: Record<string, any>[]): Promise<number> {
+    const key = spec.idColumn;
+    if (!key) return 0;
+    const delegate = (this.prisma as unknown as Record<string, any>)[spec.delegate];
+    const snapshot = new Set(rows.map((r) => r[key]).filter((v) => v != null).map((v) => Number(v)));
+    const mirror = (await delegate.findMany({
+      where: { id: { lt: NATIVE_ID_BASE } },
+      select: { id: true },
+    })) as { id: number | bigint }[];
+    if (snapshot.size === 0 && mirror.length > 0) {
+      this.logger.warn(
+        `[import] ${spec.name}: source snapshot is empty but the mirror holds ${mirror.length} rows — ` +
+          `skipping the stale-row prune (likely caught the source mid-rewrite; the next sync re-copies).`,
+      );
+      return 0;
+    }
+    const vanished = mirror.map((m) => m.id).filter((id) => !snapshot.has(Number(id)));
+    let count = 0;
+    for (let i = 0; i < vanished.length; i += 5_000) {
+      const res = await delegate.deleteMany({ where: { id: { in: vanished.slice(i, i + 5_000) } } });
+      count += res.count as number;
+    }
+    return count;
+  }
+
   async run(triggeredBy?: string, only?: string[]) {
     const selected = only?.length
       ? TABLES.filter((t) => only.includes(t.name))
@@ -637,11 +701,14 @@ export class LegacyImportService {
       for (const spec of selected) {
         const rows = (await conn.fetchAll(spec.legacyTable)) as Record<string, any>[];
         const { processed, rejected } = await this.upsertRows(spec, rows);
+        const pruned = spec.replaceStale ? await this.pruneVanished(spec, rows) : 0;
         if (spec.idColumn) await this.resetSequence(spec.name, spec.idColumn);
         const delegate = (this.prisma as unknown as Record<string, any>)[spec.delegate];
         const target = await delegate.count();
         tables.push({ name: spec.name, source: rows.length, target, processed, rejected });
-        this.logger.log(`[import] ${spec.name}: source=${rows.length} target=${target} rejected=${rejected}`);
+        this.logger.log(
+          `[import] ${spec.name}: source=${rows.length} target=${target} rejected=${rejected}${pruned ? ` pruned=${pruned}` : ''}`,
+        );
       }
 
       // Rebuild the derived lot-to-lot genealogy from the freshly imported
@@ -856,9 +923,10 @@ export class LegacyImportService {
         if (!always && proxied && !proxied.proxies.some((p) => touchedLower.has(p))) continue;
         const rows = (await conn.fetchAll(spec.legacyTable)) as Record<string, any>[];
         const res = await this.upsertRows(spec, rows);
+        const pruned = spec.replaceStale ? await this.pruneVanished(spec, rows) : 0;
         if (spec.idColumn) await this.resetSequence(spec.name, spec.idColumn);
         touchedNames.add(spec.name);
-        tables.push({ name: `${spec.name} (re-copy)`, keys: rows.length, upserted: res.processed, deleted: 0, rejected: res.rejected });
+        tables.push({ name: `${spec.name} (re-copy)`, keys: rows.length, upserted: res.processed, deleted: pruned, rejected: res.rejected });
       }
 
       // Deletes, children before parents (reverse registry order).
@@ -876,7 +944,9 @@ export class LegacyImportService {
           if (row) row.rejected++;
         }
       }
-      for (const row of tables) row.deleted = deletedBySpec.get(row.name) ?? 0;
+      // Preserve counts pre-seeded by the re-copy prune (their row names end
+      // in " (re-copy)", which deletedBySpec never keys).
+      for (const row of tables) row.deleted = deletedBySpec.get(row.name) ?? row.deleted;
 
       // Re-derive lot genealogy only when its inputs moved.
       let genealogyEdges: number | undefined;

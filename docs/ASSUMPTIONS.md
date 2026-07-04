@@ -503,3 +503,38 @@ table names. Decisions:
   skips null), and web fixes (error+retry state on the panel, editor state
   reseeded at open, confirm on cancel-draft, remove hidden on allocated
   lines).
+
+## Planning / MRP slice 1 — PlanTrace mirror + viewers (§10, built 2026-07-03)
+
+Vendor ch.14. `PlanTrace` has 2,825 live rows (the nightly Recalculate Plan
+Trace IS used at this plant); `OrdPlan`/`OrdPlanDetail`/`CapacityPlan` are
+0-row (unused). Decisions:
+
+- **The legacy engine stays authoritative during parallel running**: ERP1
+  mirrors its output and viewers read the mirror. The native recalculation
+  engine (vendor fill order: available stock → quarantined → open MF orders →
+  open POs → plan an MF order from the costing recipe, exploding requirements
+  → plan a PO) is the next slice; when it ships, native rows use ids ≥ 1e9 and
+  the import of PlanTrace should be disabled at cutover.
+- **replaceStale import semantics**: the recalc DELETES every PlanTrace row
+  and writes fresh ids, and no Log/LogResult rows are ever written for it —
+  so PlanTrace is in NEVER_LOGGED_ALWAYS (wholesale re-copy each sync) and
+  the new `replaceStale` spec flag prunes mirror rows the snapshot no longer
+  contains, LEGACY-RANGE ids only (never native rows).
+- **Short Inventory** covers `Short` + `Negative` references (both are the
+  to-order signal; Negative is the min-stock refill). Item lead time / min
+  stock are NOT on this install's Item table (no such columns), so the viewer
+  shows on-hand + dates + preferred supplier (`Item.Supplier`) without them.
+- **Expedite flag** computed per the vendor rule: AvailableDate later than
+  both today and DateRequired.
+- **Review outcomes (2026-07-03, 11 confirmed findings fixed pre-commit)**:
+  prune rewritten as app-side set-difference with 5,000-chunk `in` deletes
+  (an unbounded `notIn` hits Postgres's 32,767 bind-variable ceiling and
+  would wedge every sync once the source grows); an empty snapshot against a
+  non-empty mirror SKIPS the prune with a warning (indistinguishable from
+  catching the nightly rewrite mid-flight — never silently wipe the plan);
+  sync report keeps the re-copy prune count; q trims + intersects with an
+  exact itemId (never overwrites) and is uncapped; expedite compares against
+  UTC-digit midnight (the plant wall-clock frame); tests use clock-relative
+  dates (no time bombs), cover the sync-path prune, the empty-snapshot
+  guard, expedite boundaries, and multi-manufacturer short grouping.

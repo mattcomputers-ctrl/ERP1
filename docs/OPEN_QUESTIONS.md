@@ -34,3 +34,11 @@ default was chosen and recorded in ASSUMPTIONS.md).
   legacy lot code would not be distinguished. If parallel running shows real
   collisions, add an `erp1_native` boolean to Lot (migration + set at every
   native mint) and guard on it instead. (2026-07-03)
+
+## Ordr.ReserveAmount on shipping orders (noted 2026-07-03)
+
+45 recent SH orders (2025-10 → 2026-07) carry a non-zero `ReserveAmount` — a
+sales-side figure (deposit/reserve), unrelated to §8.5 packaging material
+reservation (whose vessel table is 0-row). ERP1 mirrors the column but nothing
+reads it. Decide during sales/invoicing polish whether any document should
+show it.

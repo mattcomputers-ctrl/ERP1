@@ -938,6 +938,53 @@ model OrdDetailEdit {
   @@map("OrdDetailEdit")
 }
 
+// MRP plan trace (vendor ch.14 Material Requirements Planning): one row per
+// planning requirement, produced by the legacy nightly Recalculate Plan Trace
+// (2,825 rows live — the module IS used at this plant). Reference encodes how
+// the requirement is filled (AVAIL / Hold / Expired / MF#n / PO#n / Short /
+// Negative, '+' suffix = late), MFLevel the explosion depth, SourceOrdr the
+// filling order. The whole table is REWRITTEN by each recalc with fresh ids
+// and is never change-logged, so the import re-copies it wholesale and prunes
+// vanished rows (replaceStale). Read-only mirror for now: the Plan Tracing /
+// Short Inventory viewers read it; the native recalculation engine is the
+// next §10 slice.
+model PlanTrace {
+  id              BigInt    @id @map("PlanTrace")
+  parentId        BigInt?   @map("Parent")
+  ownerId         Int?      @map("Owner")
+  ordrId          Int?      @map("Ordr")
+  context         String?   @map("Context") @db.VarChar(32)
+  itemId          Int?      @map("Item")
+  ordDetailId     Int?      @map("OrdDetail")
+  user            String?   @map("User") @db.VarChar(255)
+  reference       String?   @map("Reference") @db.VarChar(20)
+  availableDate   DateTime? @map("AvailableDate")
+  quantity        Float?    @map("Quantity")
+  dateReleased    DateTime? @map("DateReleased")
+  dateUpdated     DateTime? @map("DateUpdated")
+  sublotId        Int?      @map("Sublot")
+  expiryFlag      Int?      @map("ExpiryFlag")
+  quantityExpired Float?    @map("QuantityExpired")
+  dateRequired    DateTime? @map("DateRequired")
+  orderByDate     DateTime? @map("OrderByDate")
+  leadTime        Int?      @map("LeadTime")
+  testingLeadTime Int?      @map("TestingLeadTime")
+  mfLevel         Int?      @map("MFLevel")
+  mfOrdrId        Int?      @map("MFOrdr")
+  promisedDate    DateTime? @map("PromisedDate")
+  sourceOrdrId    Int?      @map("SourceOrdr")
+  planTraceStatus String?   @map("PlanTraceStatus") @db.VarChar(10)
+  manufacturerId  Int?      @map("Manufacturer")
+  reqdSublotId    Int?      @map("ReqdSubLot")
+  mfgItemId       Int?      @map("MfgItem")
+  divisionId      Int?      @map("Division")
+  arrivalDate     DateTime? @map("ArrivalDate")
+
+  @@index([itemId])
+  @@index([reference])
+  @@map("PlanTrace")
+}
+
 // In-process tests carried by an edit's IPT lines: snapshots of the live
 // OrdDetailTest rows (OrdDetailTestEditRef set) on copied lines, or the tests
 // to create for an IPT line added by the edit (ref NULL).

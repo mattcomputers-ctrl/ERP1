@@ -10,6 +10,7 @@ import { LotTrackingModule } from './lot-tracking/lot-tracking.module';
 import { ManufacturingModule } from './manufacturing/manufacturing.module';
 import { MasterDataModule } from './master-data/master-data.module';
 import { OrdersModule } from './orders/orders.module';
+import { PlanningModule } from './planning/planning.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { PurchasingModule } from './purchasing/purchasing.module';
 import { RolesModule } from './roles/roles.module';
@@ -36,6 +37,7 @@ import { UsersModule } from './users/users.module';
     LotTrackingModule,
     ManufacturingModule,
     OrdersModule,
+    PlanningModule,
     PurchasingModule,
     GenealogyModule,
     SettingsModule,
