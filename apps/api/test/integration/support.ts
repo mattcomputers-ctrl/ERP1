@@ -17,6 +17,8 @@ import { RecipeEditorService } from '../../src/manufacturing/recipe-editor.servi
 import { RecipeReplacementService } from '../../src/manufacturing/recipe-replacement.service';
 import { RecipesService } from '../../src/manufacturing/recipes.service';
 import { OrdersService } from '../../src/orders/orders.service';
+import { PlanningRecalcService } from '../../src/planning/planning-recalc.service';
+import { PlanningService } from '../../src/planning/planning.service';
 import type { PrismaService } from '../../src/prisma/prisma.service';
 import { PriceVersionService } from '../../src/purchasing/price-version.service';
 import { PurchasingService } from '../../src/purchasing/purchasing.service';
@@ -113,6 +115,8 @@ export function services(prisma: PrismaClient) {
     recipes: new RecipesService(p, settings),
     recipeEditor,
     recipeReplacement: new RecipeReplacementService(p, audit, recipeEditor),
+    planning: new PlanningService(p, settings),
+    planningRecalc: new PlanningRecalcService(p, audit),
   };
 }
 

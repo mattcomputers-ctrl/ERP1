@@ -2,7 +2,6 @@ import type { PrismaClient } from '@erp1/db';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { LegacyImportService } from '../../src/import/legacy-import.service';
 import type { LegacyDbService } from '../../src/import/legacy-db.service';
-import { PlanningService } from '../../src/planning/planning.service';
 import type { PrismaService } from '../../src/prisma/prisma.service';
 import {
   addEntity,
@@ -83,7 +82,7 @@ async function seedPlanFixture() {
 describe('PlanningService viewers', () => {
   it('trace lists decorated requirements with the expedite rule and filters', async () => {
     await seedPlanFixture();
-    const planning = new PlanningService(prisma as unknown as PrismaService);
+    const planning = services(prisma).planning;
 
     const all = await planning.trace({});
     expect(all.total).toBe(7);
@@ -118,7 +117,7 @@ describe('PlanningService viewers', () => {
 
   it('short groups by item+manufacturer with totals, SOH, dates, and supplier', async () => {
     await seedPlanFixture();
-    const planning = new PlanningService(prisma as unknown as PrismaService);
+    const planning = services(prisma).planning;
 
     const { rows } = await planning.short();
     // Grouped by item + required manufacturer: RESIN splits across MFRX/MFRY.
@@ -142,6 +141,42 @@ describe('PlanningService viewers', () => {
     expect(solvent).toMatchObject({ requiredManufacturer: null, quantity: 3, onHand: 0 });
     // Sorted by earliest required date first.
     expect(rows[0].itemCode).toBe('SOLVENT');
+  });
+});
+
+describe('import: ItemEntity mirror (planning knobs source)', () => {
+  it('full import copies ST planning knobs and MF approval rows', async () => {
+    const rows = [
+      { ItemEntity: 1, Item: 11, Entity: 4, Context: 'ST', MinimumStock: 250, LeadTime: 10, TestingLeadTime: 2, Inactive: false, ByRequestOnly: null },
+      { ItemEntity: 2, Item: 11, Entity: 51, Context: 'MF', MinimumStock: null, LeadTime: null, TestingLeadTime: null, Inactive: null, ByRequestOnly: false },
+    ];
+    await addItem(prisma, { id: 11, code: 'RESIN' });
+    const { genealogy } = services(prisma);
+    const fake = {
+      async open() {
+        return {
+          async maxLogId() { return 1; },
+          async logDelta() { return []; },
+          async tableColumns() { return []; },
+          async fetchAll(legacyTable: string) { return legacyTable === 'dbo.ItemEntity' ? rows : []; },
+          async fetchByKeys() { return []; },
+          async countRows(legacyTable: string) { return legacyTable === 'dbo.ItemEntity' ? rows.length : 0; },
+          async close() {},
+        };
+      },
+    } as unknown as LegacyDbService;
+    const importer = new LegacyImportService(prisma as unknown as PrismaService, genealogy, fake);
+    await importer.run('test', ['ItemEntity']);
+
+    const st = await prisma.itemEntity.findUnique({ where: { id: 1 } });
+    expect(st).toMatchObject({ itemId: 11, entityId: 4, context: 'ST', minimumStock: 250, leadTime: 10, testingLeadTime: 2, inactive: false });
+    const mf = await prisma.itemEntity.findUnique({ where: { id: 2 } });
+    expect(mf).toMatchObject({ context: 'MF', byRequestOnly: false, minimumStock: null });
+
+    // Re-import updates in place (the Item Update edits these knobs).
+    rows[0].MinimumStock = 300;
+    await importer.run('test', ['ItemEntity']);
+    expect((await prisma.itemEntity.findUnique({ where: { id: 1 } }))?.minimumStock).toBe(300);
   });
 });
 

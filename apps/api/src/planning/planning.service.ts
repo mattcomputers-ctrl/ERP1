@@ -1,14 +1,17 @@
 import { Injectable } from '@nestjs/common';
+import { NATIVE_ID_BASE } from '../common/locks';
 import { buildList, type ListQuery } from '../common/list';
 import { PrismaService } from '../prisma/prisma.service';
+import { SettingsService } from '../settings/settings.service';
 
-// §10 Planning (vendor ch.14 Material Requirements Planning), slice 1: the
-// mirrored PlanTrace — rewritten nightly by the legacy recalc, re-copied and
-// pruned by the import engine — exposed through the two vendor set viewers:
-// Plan Tracing (every requirement, UG §14.2) and Short Inventory (the
-// to-order summary, UG §14.3). The native recalculation engine and
-// create-PO-from-plan are the next slice; until then the viewers show the
-// legacy engine's plan (parallel running).
+// §10 Planning (vendor ch.14 Material Requirements Planning): the PlanTrace
+// table exposed through the two vendor set viewers: Plan Tracing (every
+// requirement, UG §14.2) and Short Inventory (the to-order summary, UG §14.3).
+// Two plans can coexist while parallel running: the LEGACY nightly recalc's
+// rows (id < 1e9, re-copied by the import) and the NATIVE engine's rows
+// (id >= 1e9, written by planning-recalc). The viewers show ONE at a time —
+// the app setting `planning.source` (flipped to 'native' by a recalc) picks
+// the default; `?source=` overrides per request for side-by-side comparison.
 
 const SORTABLE = ['id', 'itemId', 'reference', 'dateRequired', 'availableDate', 'orderByDate', 'quantity', 'mfLevel'];
 
@@ -16,15 +19,31 @@ const SORTABLE = ['id', 'itemId', 'reference', 'dateRequired', 'availableDate', 
 // Reference=Short; Negative is the same to-order signal for min-stock refill).
 const SHORT_REFERENCES = ['Short', 'Negative'];
 
+export type PlanSource = 'legacy' | 'native';
+
 export interface PlanTraceListQuery extends ListQuery {
   reference?: string; // prefix filter: AVAIL / Hold / Expired / MF# / PO# / Short / Negative
   itemId?: string;
   shortOnly?: string; // '1' -> Short + Negative only
+  source?: string; // 'legacy' | 'native' (default: the planning.source setting)
 }
 
 @Injectable()
 export class PlanningService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly settings: SettingsService,
+  ) {}
+
+  /** Which plan to show: an explicit ?source= wins, else the app setting. */
+  private async resolveSource(requested?: string): Promise<PlanSource> {
+    if (requested === 'legacy' || requested === 'native') return requested;
+    return (await this.settings.get('planning.source', 'legacy')) === 'native' ? 'native' : 'legacy';
+  }
+
+  private static sourceIdFilter(source: PlanSource) {
+    return source === 'native' ? { gte: BigInt(NATIVE_ID_BASE) } : { lt: BigInt(NATIVE_ID_BASE) };
+  }
 
   /** The Plan Tracing set viewer (UG §14.2): requirements in plan sequence. */
   async trace(query: PlanTraceListQuery) {
@@ -32,7 +51,8 @@ export class PlanningService {
       sortable: SORTABLE,
       defaultSort: { id: 'asc' },
     });
-    const where: Record<string, unknown> = {};
+    const source = await this.resolveSource(query.source);
+    const where: Record<string, unknown> = { id: PlanningService.sourceIdFilter(source) };
     if (query.shortOnly === '1') where.reference = { in: SHORT_REFERENCES };
     else if (query.reference) where.reference = { startsWith: query.reference };
     const exactItemId = query.itemId && /^\d+$/.test(query.itemId) ? Number(query.itemId) : null;
@@ -59,8 +79,22 @@ export class PlanningService {
     const [rows, total, lastCalc] = await this.prisma.$transaction([
       this.prisma.planTrace.findMany({ where, skip, take, orderBy }),
       this.prisma.planTrace.count({ where }),
-      this.prisma.planTrace.aggregate({ _max: { dateUpdated: true } }),
+      this.prisma.planTrace.aggregate({
+        _max: { dateUpdated: true },
+        where: { id: PlanningService.sourceIdFilter(source) },
+      }),
     ]);
+    // Native rows keep the ORDER LINE's dateUpdated (vendor parity), so the
+    // aggregate can predate the recalc — the recalc's own stamp is
+    // authoritative for the native plan.
+    let lastCalculated: Date | null = lastCalc._max.dateUpdated;
+    if (source === 'native') {
+      const stamp = await this.settings.get('planning.lastRecalcAt', '');
+      if (stamp) {
+        const d = new Date(stamp);
+        if (!Number.isNaN(d.getTime())) lastCalculated = d;
+      }
+    }
 
     const itemIds = [...new Set(rows.flatMap((r) => [r.itemId, r.mfgItemId]).filter((v): v is number => v != null))];
     const items = itemIds.length
@@ -115,7 +149,8 @@ export class PlanningService {
       total,
       page,
       pageSize,
-      lastCalculated: lastCalc._max.dateUpdated,
+      lastCalculated,
+      source,
     };
   }
 
@@ -125,9 +160,10 @@ export class PlanningService {
    * requirements — total short qty, current on-hand, the latest available /
    * earliest required dates, and the item's preferred supplier.
    */
-  async short() {
+  async short(requestedSource?: string) {
+    const source = await this.resolveSource(requestedSource);
     const rows = await this.prisma.planTrace.findMany({
-      where: { reference: { in: SHORT_REFERENCES } },
+      where: { reference: { in: SHORT_REFERENCES }, id: PlanningService.sourceIdFilter(source) },
       select: {
         itemId: true, manufacturerId: true, reqdSublotId: true, quantity: true,
         availableDate: true, dateRequired: true, orderByDate: true,
@@ -202,6 +238,7 @@ export class PlanningService {
           };
         })
         .sort((a, b) => (a.dateRequired?.getTime() ?? 0) - (b.dateRequired?.getTime() ?? 0)),
+      source,
     };
   }
 }

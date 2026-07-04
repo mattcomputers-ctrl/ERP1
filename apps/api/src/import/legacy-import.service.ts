@@ -106,7 +106,18 @@ const TABLES: TableSpec[] = [
       glGroup: r.GLGroup, abcCode: r.ABCCode, tax1Group: r.Tax1Group, isKit: b(r.IsKit),
       controlledSubstance: b(r.ControlledSubstance), certifiedOrganic: b(r.CertifiedOrganic),
       weight: r.Weight, weightUnit: r.WeightUnit, serviceGroup: r.ServiceGroup, service: r.Service,
-      comment: r.Comment,
+      comment: r.Comment, costingRecipeId: r.CostingRecipe,
+    }),
+  },
+  {
+    name: 'ItemEntity', legacyTable: 'dbo.ItemEntity', delegate: 'itemEntity', idColumn: 'ItemEntity',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.ItemEntity, itemId: r.Item, entityId: r.Entity, context: r.Context,
+      description: r.Description, expiryDate: r.ExpiryDate, minimumStock: r.MinimumStock,
+      leadTime: r.LeadTime, testingLeadTime: r.TestingLeadTime, msdsDate: r.MSDSDate,
+      inactive: b(r.Inactive), parentId: r.Parent, maxSkipCount: r.MaxSkipCount,
+      maxSkipDays: r.MaxSkipDays, byRequestOnly: b(r.ByRequestOnly),
     }),
   },
   {
@@ -277,7 +288,7 @@ const TABLES: TableSpec[] = [
       reference: r.Reference, placedBy: r.PlacedBy, terms: r.Terms, securityGroup: r.SecurityGroup,
       dateOrdered: r.DateOrdered, dateRequired: r.DateRequired, dateReleased: r.DateReleased,
       dateStarted: r.DateStarted, dateCompleted: r.DateCompleted, dateScheduled: r.DateScheduled,
-      planStartDate: r.PlanStartDate, actualBatchSize: r.ActualBatchSize, manfLot: r.ManfLot,
+      planStartDate: r.PlanStartDate, actualBatchSize: r.ActualBatchSize, leadTime: r.LeadTime, manfLot: r.ManfLot,
       labourHours: r.LabourHours, machineHours: r.MachineHours, parentId: r.Parent,
       revision: r.Revision, comment: r.Comment,
     }),

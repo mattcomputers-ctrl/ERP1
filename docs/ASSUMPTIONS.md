@@ -538,3 +538,103 @@ Trace IS used at this plant); `OrdPlan`/`OrdPlanDetail`/`CapacityPlan` are
   UTC-digit midnight (the plant wall-clock frame); tests use clock-relative
   dates (no time bombs), cover the sync-path prune, the empty-snapshot
   guard, expedite boundaries, and multi-manufacturer short grouping.
+
+## Planning / MRP slice 2 — native Recalculate Plan Trace (§10, built 2026-07-03)
+
+Discovery against the live legacy plan (2,825 rows, snapshot of 2026-07-02)
+pinned down the vendor §14.1 algorithm as actually configured at this plant.
+Decisions and observed evidence:
+
+- **Planning knobs live on `ItemEntity`, not Item**: ST-context rows (Entity 4
+  = the site, the ONLY ST entity) carry MinimumStock (430 set) / LeadTime (81)
+  / TestingLeadTime (0); MF-context rows are item×manufacturer approvals.
+  ItemEntity IS change-logged (9,205 LogResult rows) → regular import spec.
+  The native engine takes the site owner = the single distinct ST entity; if
+  several appear, stock-owner classification degrades to "all own" (no
+  consignment references) rather than guessing.
+- **`ByRequestOnly` is 0 on all 28,801 rows** → the §14.1 by-request-only
+  allocation restriction is NOT implemented. Demand-side required-manufacturer
+  (OrdDetail.Manufacturer) IS enforced: stock must come from a lot of that
+  manufacturer, PO supply from a line pinned to it; MF supply is unrestricted.
+- **Open orders** = DateCompleted NULL and status not CMP/CLS (POs have NULL
+  status — null-safe OR, not `notIn`). The 45 completed orders present in the
+  legacy snapshot were all completed AFTER the overnight run — confirmed not
+  a "completed orders still plan" rule. Quotes excluded.
+- **Demand** = SH lines (SH orders) + UI ingredient lines (MF orders),
+  remaining = QtyReqd − QtyUsed (QtyCommitted does NOT reduce demand — the
+  committed stock is still on hand, verified: committed UI lines plan their
+  full QtyReqd against AVAIL). Required date = first-of(DateScheduled,
+  PlanStartDate, DateRequired), else today.
+- **Supply** = MF orders' PK product lines (remaining = QtyReqd − QtyUsed;
+  arrival = first-of(DateRequired, DateScheduled, PlanStartDate) — verified
+  exact on every live MF# row, NO lead time added) and open PO lines
+  (arrival = first-of(line DatePromised, header DateRequired, header
+  DateOrdered + item lead) — verified arrival == DatePromised exactly; the
+  UG's "lead time plus first date" only applies from DateOrdered down).
+  `+` suffix on MF#/PO# = arrival before today (order overdue). PromisedDate
+  on PO# rows = earliest line promise of the source order.
+- **Stock classification** via latest Release per sublot: Approved+not
+  suspended → available; no Release row → available (auto-approve items
+  never get one); Hold/suspended → `Hold` (assumed approved, PlanTraceStatus
+  `Retest` — ERP1 has no in-progress-testing signal until §15 LIMS, so the
+  vendor's `Testing` status is not emitted); Rejected → only consumable by a
+  demand pinned to that exact sublot (`Rejected` reference). Expiry =
+  Release.ExpiryDate before today or before the demand's required date →
+  `Expired`. Stock at a location owned by a non-site entity is consumed
+  under that entity's code as the Reference (verified: "PRESS TECH CONSIGN"
+  rows = min-stock filled from the consignment location owned by entity
+  100877), after own-site available stock.
+- **Orders beat min-stock to the stock** (verified on item 108364: orders
+  took 130 from stock, min-stock got the 220.1 leftovers and shorted 29.9,
+  even though the min-stock rows print first). The native engine runs all
+  order demands (waves of explosion) first, then min-stock demands
+  (User=MinStock, required=today UTC-midnight) as a second phase.
+- **Explosion**: a Short on an item with an ACTIVE costing recipe plans an
+  MF order and queues child demands (per-1-lb recipe UI lines × short qty)
+  one wave deeper: User=RawMaterial, MfgItem=parent item, root order/line/
+  context carried through (verified: RawMaterial rows carry the ROOT SH
+  order across 4 levels of explosion). Child required = parent required −
+  recipe lead (verified: 2016-07-04 = today − 3650 on lead-less recipes).
+  `Item.CostingRecipe` points at a recipe row; the engine re-resolves to the
+  ACTIVE published family member (BASE.NN, highest id) since native publishes
+  create sibling rows the legacy pointer doesn't know about. Depth capped at
+  25 waves (recipe-cycle guard; Short row kept, no further explosion).
+- **MFLevel = the item's deepest wave** across the whole plan, constant per
+  item (verified: direct MFBA demands on a level-4 ingredient carry level 4,
+  not 0) — not the per-row explosion depth.
+- **Dates on Short rows**: available = today + lead + testing lead; order-by
+  = required − lead − testing lead; lead = recipe lead ?? ItemEntity ST lead
+  ?? 3650 (vendor fallback). TestingLeadTime defaults to 0 when unset — the
+  legacy engine showed BOTH `today` and `today+3650` availability on
+  identical-looking rows (items with tests), so the vendor's fallback is not
+  reproducible from one snapshot; 0 is predictable and per-item configurable.
+  PriceDetail.LeadTime is 0/15,750 in this install → supplier-price lead
+  source skipped.
+- **Row id order** is the engine's processing order (item-code order within
+  a wave, released-then-date within an item). The legacy writer's global
+  ordering (item blocks in neither id nor level order) is a presentation
+  artifact of a two-pass engine and is NOT reproduced; per-item row sequence
+  (fills in consumption order) matches.
+- **Native/legacy coexistence**: the recalc DELETEs native-range rows
+  (id ≥ 1e9) and rewrites them in one tx under the native-id advisory lock;
+  legacy rows are untouched (the import keeps refreshing them while parallel
+  running). The viewers show ONE source: app setting `planning.source`
+  (default legacy, flipped to native by a recalc), `?source=` overrides per
+  request for side-by-side comparison. At cutover: disable the PlanTrace
+  import spec and the setting stays native.
+- **Review outcomes (2026-07-04, 2 confirmed findings fixed pre-commit, 4
+  refuted)**: (1) MAJOR — stock netting had no Location.Context filter, so
+  25K retained-QC-sample parcels (SMP locations, ~280 lb across 4,770 items
+  live) would leak in as thousands of sub-lb AVAIL rows and understate
+  shorts; the engine now nets only WHS/null-context locations (live stock
+  exists only at WHS + SMP; consignment sites are WHS-context; ERP1-native
+  flows never create Location rows). (2) `planning.lastRecalcAt` was written
+  but never read while the viewer's stamp derived from MAX(dateUpdated) —
+  which keeps the ORDER LINE's date on order rows (vendor parity) and can
+  predate the recalc; trace() now surfaces the recalc stamp for the native
+  source. Refuted as non-defects: advisory-lock breadth during the write tx
+  (sub-second at plan scale, same lock all native creates take), no
+  single-flight guard (second recalc wastes compute but serializes safely,
+  last-writer-wins a complete consistent plan), button visible without the
+  program (server-guarded, UX-only), method-level program override
+  (getAllAndOverride handler-first is the established short() pattern).

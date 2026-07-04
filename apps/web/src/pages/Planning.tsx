@@ -1,14 +1,14 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { DataGrid, type GridColumn } from '../components/DataGrid';
-import { Card } from '../components/ui';
+import { Button, Card } from '../components/ui';
 import { api } from '../lib/api';
 
-// §10 Planning (vendor ch.14 MRP), slice 1 — read-only viewers over the
-// mirrored PlanTrace: Plan Tracing (every requirement) and Short Inventory
-// (what needs ordering). The plan is produced by the legacy nightly recalc
-// and refreshed by the import sync; the native recalculation engine is the
-// next slice.
+// §10 Planning (vendor ch.14 MRP) — Plan Tracing (every requirement) and
+// Short Inventory (what needs ordering), plus Recalculate Plan Trace
+// (UG §14.1): the native engine rebuilds the plan from ERP1's own data and
+// the viewers switch to it. Until the first native recalc they show the
+// legacy nightly plan refreshed by the import sync (parallel running).
 
 interface TraceRow {
   id: number; parentId: number | null; reference: string | null;
@@ -20,7 +20,8 @@ interface TraceRow {
   promisedDate: string | null; arrivalDate: string | null;
   leadTime: number | null; testingLeadTime: number | null; expedite: boolean;
 }
-interface TraceResp { rows: TraceRow[]; total: number; page: number; pageSize: number; lastCalculated: string | null }
+interface TraceResp { rows: TraceRow[]; total: number; page: number; pageSize: number; lastCalculated: string | null; source: 'legacy' | 'native' }
+interface RecalcResp { rows: number; shortRows: number; shortItems: number; demands: number; minStockDemands: number; elapsedMs: number }
 interface ShortRow {
   itemId: number | null; itemCode: string | null; description: string | null; unit: string | null;
   requiredManufacturer: string | null; requiredSublotId: number | null;
@@ -47,15 +48,44 @@ function fmtDate(v: string | null | undefined): string {
 
 export function Planning() {
   const [tab, setTab] = useState<'trace' | 'short'>('trace');
+  const qc = useQueryClient();
+  const [recalcSummary, setRecalcSummary] = useState<RecalcResp | null>(null);
+  const recalc = useMutation({
+    mutationFn: () => api.post<RecalcResp>('/planning/recalculate'),
+    onSuccess: (r) => {
+      setRecalcSummary(r);
+      qc.invalidateQueries({ queryKey: ['plan-trace'] });
+      qc.invalidateQueries({ queryKey: ['plan-short'] });
+    },
+  });
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold text-slate-900">Planning</h1>
-        <div className="flex gap-1 rounded-md bg-slate-100 p-1 text-sm">
-          <button onClick={() => setTab('trace')} className={`rounded px-3 py-1 ${tab === 'trace' ? 'bg-white shadow-sm' : 'text-slate-600'}`}>Plan Tracing</button>
-          <button onClick={() => setTab('short')} className={`rounded px-3 py-1 ${tab === 'short' ? 'bg-white shadow-sm' : 'text-slate-600'}`}>Short Inventory</button>
+        <div className="flex items-center gap-3">
+          <Button
+            onClick={() => {
+              if (window.confirm('Recalculate the plan trace now? The viewers will switch to the native plan.')) recalc.mutate();
+            }}
+            disabled={recalc.isPending}
+          >
+            {recalc.isPending ? 'Recalculating…' : 'Recalculate Plan Trace'}
+          </Button>
+          <div className="flex gap-1 rounded-md bg-slate-100 p-1 text-sm">
+            <button onClick={() => setTab('trace')} className={`rounded px-3 py-1 ${tab === 'trace' ? 'bg-white shadow-sm' : 'text-slate-600'}`}>Plan Tracing</button>
+            <button onClick={() => setTab('short')} className={`rounded px-3 py-1 ${tab === 'short' ? 'bg-white shadow-sm' : 'text-slate-600'}`}>Short Inventory</button>
+          </div>
         </div>
       </div>
+      {recalc.isError && (
+        <p className="text-sm text-red-600">Recalculation failed: {recalc.error instanceof Error ? recalc.error.message : 'unknown error'}</p>
+      )}
+      {recalcSummary && !recalc.isPending && (
+        <p className="text-sm text-emerald-700">
+          Plan recalculated: {recalcSummary.rows} requirements ({recalcSummary.shortRows} short across {recalcSummary.shortItems} items) from{' '}
+          {recalcSummary.demands} order demands + {recalcSummary.minStockDemands} min-stock targets in {(recalcSummary.elapsedMs / 1000).toFixed(1)}s.
+        </p>
+      )}
       {tab === 'trace' ? <TraceGrid /> : <ShortGrid />}
     </div>
   );
@@ -108,7 +138,10 @@ function TraceGrid() {
     <>
       {list.data?.lastCalculated && (
         <p className="text-sm text-slate-500">
-          Plan last recalculated {fmtDate(list.data.lastCalculated)} (by the legacy planning engine — refreshed with each import sync).
+          Plan last recalculated {fmtDate(list.data.lastCalculated)}{' '}
+          {list.data.source === 'native'
+            ? '(native ERP1 engine)'
+            : '(legacy planning engine — refreshed with each import sync)'}
         </p>
       )}
       <DataGrid

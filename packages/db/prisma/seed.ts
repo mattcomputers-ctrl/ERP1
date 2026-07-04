@@ -61,6 +61,7 @@ const BASELINE_PROGRAMS = [
   { key: 'inventory.recall', name: 'Recall', folder: 'Transactions/Inventory' },
   { key: 'planning.trace', name: 'Plan Tracing', folder: 'Planning' },
   { key: 'planning.short', name: 'Short Inventory', folder: 'Planning' },
+  { key: 'planning.recalculate', name: 'Recalculate Plan Trace', folder: 'Planning' },
   { key: 'admin.import', name: 'Legacy Import', folder: 'Administration' },
   { key: 'admin.config', name: 'Configuration', folder: 'Administration' },
 ];
