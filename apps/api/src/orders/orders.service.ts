@@ -10,6 +10,7 @@ import { PermissionService } from '../auth/permission.service';
 import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { ValuationService } from '../inventory/valuation.service';
+import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
@@ -123,6 +124,7 @@ export class OrdersService {
     private readonly valuation: ValuationService,
     private readonly approvalPolicy: ApprovalPolicyService,
     private readonly approvalRequests: ApprovalRequestService,
+    private readonly notifications: NotificationEngineService,
   ) {}
 
   async list(query: OrdersListQuery) {
@@ -623,6 +625,10 @@ export class OrdersService {
       tx,
     );
 
+    // UG §22.2.4 — the one notification this plant actually used (subject:
+    // "A manufacturing order has been created / edited").
+    await this.notifications.emitOrderEvent(tx, 'MFO Created Notification', orderId, actor);
+
     return { id: orderId, lineCount: lineData.length, testCount: testData.length, lot: firstLot, lineData };
   }
 
@@ -741,6 +747,12 @@ export class OrdersService {
     }
     if (!changes.length) throw new BadRequestException('Nothing to change.');
     if (Object.keys(data).length) await tx.ordr.update({ where: { id }, data });
+    // Legacy fires 'MFO Created' on order-form SAVES (subject reads
+    // "created / edited") — a pre-release edit is that same event. Emit
+    // BEFORE the audit row: emit takes the native-id lock and audit takes the
+    // audit-chain lock, and every allocating path acquires native-id first —
+    // the reverse order here would be an ABBA deadlock.
+    await this.notifications.emitOrderEvent(tx, 'MFO Created Notification', id, actor);
     await this.audit.record(
       { action: 'order.edit', actorUserId: actor.id, actorLabel: actor.label, program: 'orders.edit', summary: `Order #${id} edited${dto.batchSize != null ? ` (batch size ${dto.batchSize})` : ''}${dto.reason ? ` — ${dto.reason}` : ''}`, changes },
       tx,
@@ -1374,6 +1386,9 @@ export class OrdersService {
         where: { id },
         data: { status: 'RLS', dateReleased: at },
       });
+      // Emit BEFORE the audit row (native-id lock before audit-chain lock —
+      // the system-wide advisory-lock order; reversed = ABBA deadlock).
+      await this.notifications.emitOrderEvent(tx, 'Manufacturing Order Released Notification', id, actor);
       await this.audit.record(
         {
           action: 'order.release',
@@ -1566,6 +1581,8 @@ export class OrdersService {
           tx,
         );
       }
+
+      await this.notifications.emitOrderEvent(tx, 'Mark Manufacturing Order Complete', id, actor);
 
       return { id, status: u.status, signed: req.requireSignature, witness: witness?.label ?? null };
     });
@@ -4301,6 +4318,12 @@ export class OrdersService {
           tx,
         );
       }
+
+      // Both order-edit codes: the UG-documented publish notification, plus
+      // 'MFO Created' whose legacy subject covers "created / edited" — the
+      // code this install configured (and the only one it ever received).
+      await this.notifications.emitOrderEvent(tx, 'Order Edit Publish Notification', orderId, actor);
+      await this.notifications.emitOrderEvent(tx, 'MFO Created Notification', orderId, actor);
 
       return {
         orderId,

@@ -69,6 +69,7 @@ const BASELINE_PROGRAMS = [
   { key: 'accounting.config', name: 'Accounting Masters', folder: 'Master Tables/Accounting' },
   { key: 'accounting.export', name: 'Accounting Export', folder: 'Master Tables/Accounting' },
   { key: 'sales.invoice', name: 'Generate Invoice', folder: 'Transactions/Sales' },
+  { key: 'notifications.config', name: 'Notification Update', folder: 'Administration' },
 ];
 
 // Secured items = granular actions with a response level (reason / signature /
@@ -148,6 +149,21 @@ const DEFAULT_SETTINGS = [
   { key: 'batchSheet.gramsThresholdLb', value: '0.05', description: 'Batch-ticket quantities at or below this many pounds are shown in grams instead.' },
   { key: 'inventory.receivingLocation', value: '', description: 'Location code that received purchase stock lands in. Empty = auto-resolve the most-used inventory location.' },
   { key: 'inventory.productionLocation', value: '', description: 'Location code that finished-goods batch output lands in. Empty = auto-resolve the most-used inventory location.' },
+  // Email notifications (UG ch.22). Delivery is OFF until an operator turns it
+  // on — emitters always queue into EmailSent (free audit trail), the
+  // processor only dispatches when enabled and SMTP is configured.
+  { key: 'notifications.enabled', value: 'false', description: 'Master switch for e-mail notification DELIVERY. Rules always queue into the e-mail log; delivery only happens when this is true.' },
+  { key: 'notifications.baseUrl', value: '', description: 'Public base URL of this ERP1 web app (e.g. https://erp1.example.com) used for deep links in notification e-mails. Empty = links rendered as plain text.' },
+  { key: 'smtp.host', value: '', description: 'SMTP server host for outgoing notification e-mail. Empty = delivery disabled. The SMTP_URL environment variable overrides all smtp.* settings.' },
+  { key: 'smtp.port', value: '587', description: 'SMTP server port (587 STARTTLS, 465 implicit TLS, 25 plain).' },
+  { key: 'smtp.secure', value: 'false', description: 'true = implicit TLS from the first byte (port 465). false = plain or STARTTLS upgrade.' },
+  { key: 'smtp.user', value: '', description: 'SMTP auth username. Empty = unauthenticated relay.' },
+  { key: 'smtp.password', value: '', description: 'SMTP auth password. Prefer the SMTP_URL environment variable if you do not want the password stored in the database.' },
+  { key: 'smtp.from', value: '', description: 'From address for notification e-mail, e.g. "ERP1 <erp1@example.com>". Empty = smtp.user.' },
+  // Legacy ParamsInventory.ReweighThreshold (live value 5.0): an inventory
+  // adjustment beyond this percentage of the container quantity fires the
+  // "Reweigh Outside Threshold" notification.
+  { key: 'inventory.reweighThreshold', value: '5', description: 'Percent variance on an inventory adjustment beyond which the Reweigh Outside Threshold notification fires. 0 disables the check.' },
 ];
 
 async function main() {

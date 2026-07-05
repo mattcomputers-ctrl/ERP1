@@ -196,6 +196,10 @@ LEGACY_MSSQL_PORT=1433
 LEGACY_MSSQL_DB=CMS
 LEGACY_MSSQL_USER=sds_readonly
 LEGACY_MSSQL_PASSWORD=${ERP1_LEGACY_MSSQL_PASSWORD:-}
+# E-mail notifications: SMTP is normally configured in the app
+# (Administration -> Notifications -> Mail settings). Uncomment to configure
+# via environment instead — SMTP_URL overrides all in-app smtp.* settings.
+#SMTP_URL=smtp://user:password@mail.example.com:587
 ENV
   umask 022
 else

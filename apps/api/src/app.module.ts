@@ -10,6 +10,7 @@ import { InventoryModule } from './inventory/inventory.module';
 import { LotTrackingModule } from './lot-tracking/lot-tracking.module';
 import { ManufacturingModule } from './manufacturing/manufacturing.module';
 import { MasterDataModule } from './master-data/master-data.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { OrdersModule } from './orders/orders.module';
 import { PlanningModule } from './planning/planning.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -46,6 +47,7 @@ import { UsersModule } from './users/users.module';
     SalesModule,
     QaModule,
     AccountingModule,
+    NotificationsModule,
   ],
 })
 export class AppModule {}

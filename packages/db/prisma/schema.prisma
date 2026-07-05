@@ -510,6 +510,69 @@ model TaxRule {
   @@map("TaxRule")
 }
 
+// Notification rules (UG ch.22): one rule per (NotificationCode,
+// SecurityGroup). Resolution: exact security-group match for the event's
+// item/order first, else the '*' rule. Subject/Text are HTML templates whose
+// @Field placeholders are substituted when the e-mail is queued.
+model Notification {
+  id                Int     @id @default(autoincrement()) @map("Notification")
+  notificationCode  String  @map("NotificationCode") @db.VarChar(50)
+  securityGroup     String  @map("SecurityGroup") @db.VarChar(20)
+  version           Int?    @map("Version")
+  sendTo            String? @map("SendTo")
+  subject           String? @map("Subject")
+  text              String? @map("Text")
+  useSendtoListOnly Boolean @default(false) @map("UseSendtoListOnly")
+
+  details NotificationDetail[]
+
+  @@unique([notificationCode, securityGroup])
+  @@map("Notification")
+}
+
+// Per-owner Send To additions for a rule (UG §22.1): the event's owner is
+// walked up the entity hierarchy (Area -> Site -> Installation -> CMS) and the
+// first match is ADDED to the rule's header Send To.
+model NotificationDetail {
+  id             Int     @id @default(autoincrement()) @map("NotificationDetail")
+  notificationId Int     @map("Notification")
+  ownerId        Int     @map("Owner")
+  sendTo         String? @map("SendTo")
+
+  notification Notification @relation(fields: [notificationId], references: [id])
+
+  @@index([notificationId])
+  @@map("NotificationDetail")
+}
+
+// Outbound e-mail queue + history (legacy "Email Sent" set viewer). Rows are
+// queued FULLY RENDERED inside the emitting transaction; delivery happens
+// out-of-band (legacy: a SQL Agent job ran `exec EmailProcessor` into
+// Database Mail — never operational in this install, all 516 rows stayed
+// 'Not sent'; ERP1: EmailProcessorService over SMTP). Legacy rows import as
+// history. Status: 'Not sent' -> 'Sent' | 'Failed' (attempt cap).
+model EmailSent {
+  id          Int      @id @default(autoincrement()) @map("EmailSent")
+  sendTo      String?  @map("SendTo")
+  subject     String?  @map("Subject")
+  text        String?  @map("Text")
+  dateCreated DateTime @default(now()) @map("DateCreated")
+  log         Int?     @map("Log")
+  step        Int?     @map("Step")
+  status      String   @default("Not sent") @map("Status") @db.VarChar(10)
+  mailItemId  Int?     @map("MailItemId")
+  error       String?  @map("Error")
+  // ERP1 extensions: producing rule code, delivery attempts, dispatch-claim
+  // time (set when a dispatcher claims the row — 'Sending'), completion time.
+  notificationCode String?   @map("erp1_notification_code") @db.VarChar(50)
+  attempts         Int       @default(0) @map("erp1_attempts")
+  claimedAt        DateTime? @map("erp1_claimed_at")
+  sentAt           DateTime? @map("erp1_sent_at")
+
+  @@index([status, id])
+  @@map("EmailSent")
+}
+
 model Item {
   id                    Int      @id @default(autoincrement()) @map("Item")
   itemCode              String   @unique @map("ItemCode") @db.VarChar(30)

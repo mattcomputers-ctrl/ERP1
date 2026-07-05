@@ -92,6 +92,33 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    name: 'Notification', legacyTable: 'dbo.Notification', delegate: 'notification', idColumn: 'Notification',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.Notification, notificationCode: r.NotificationCode, securityGroup: r.SecurityGroup,
+      version: r.Version, sendTo: r.SendTo, subject: r.Subject, text: r.Text,
+      useSendtoListOnly: b(r.UseSendtoListOnly) ?? false,
+    }),
+  },
+  {
+    name: 'NotificationDetail', legacyTable: 'dbo.NotificationDetail', delegate: 'notificationDetail', idColumn: 'NotificationDetail',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.NotificationDetail, notificationId: r.Notification, ownerId: r.Owner, sendTo: r.SendTo,
+    }),
+  },
+  {
+    // Legacy outbound e-mail history (516 rows, none ever delivered — the
+    // Database Mail leg was never operational in this install).
+    name: 'EmailSent', legacyTable: 'dbo.EmailSent', delegate: 'emailSent', idColumn: 'EmailSent',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.EmailSent, sendTo: r.SendTo, subject: r.Subject, text: r.Text,
+      dateCreated: r.DateCreated, log: r.Log, step: r.Step, status: r.Status,
+      mailItemId: r.MailItemId, error: r.Error,
+    }),
+  },
+  {
     name: 'Unit', legacyTable: 'dbo.Unit', delegate: 'unit',
     where: (d) => ({ code: d.code }),
     map: (r) => ({
@@ -523,7 +550,16 @@ const REWALK_LAG = 1_000;
 // cannot refresh them, so sync re-copies them wholesale: the tiny ones every
 // run, the bigger ones when a proxy table that always accompanies their
 // changes was touched (err on re-copy; reconciliation is the backstop).
-const NEVER_LOGGED_ALWAYS = ['Currency', 'TestGroup', 'Address', 'SublotParent', 'PlanTrace'];
+// Notification / NotificationDetail are deliberately NOT here: they are also
+// never change-logged, but they are OPERATOR CONFIG that ERP1 takes ownership
+// of at the first full import — re-copying them on every sync would silently
+// revert any rule edits made in ERP1 (this install's legacy rows are dead
+// 2022 config; the plant abandoned the feature without ever delivering a
+// mail). EmailSent IS re-copied: append-only history ERP1 never edits below
+// the native-id range.
+const NEVER_LOGGED_ALWAYS = [
+  'Currency', 'TestGroup', 'Address', 'SublotParent', 'PlanTrace', 'EmailSent',
+];
 const NEVER_LOGGED_PROXIED: Array<{ name: string; proxies: string[] }> = [
   // Every legacy stock movement posts InvMovement rows (logged) under a
   // ChangeSet — either touch means Inventory balances moved.

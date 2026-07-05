@@ -59,6 +59,12 @@ end with a fresh handoff prompt.
   1. Every multi-parcel Inventory acquisition is ONE global ascending-id
      `SELECT … FOR UPDATE` scan. NEVER loop per-lot locked reads (deadlock,
      empirically reproduced 40P01).
+  1b. **Advisory-lock ORDER: NATIVE_ID_ALLOC_LOCK before AUDIT_CHAIN_LOCK.**
+     Every allocating path takes the native-id lock at tx start and audits
+     later; `NotificationEngineService.emit` allocates (native-id lock), so
+     in a tx that hasn't already taken the native-id lock, emit BEFORE
+     `audit.record` — the reverse is an ABBA deadlock (2026-07-05 review
+     confirmed it in four emitter placements).
   2. Lifecycle transitions re-assert their precondition under the Ordr row
      lock INSIDE the tx (`lockAndRequireStatus`) — lifecycle is non-monotonic
      (reverse: CMP→RLS; revisions: RLS↔EDT).
@@ -116,29 +122,57 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. **Verify CI green for ac4fcaf** (supply & demand viewer; 4378ccc — the
-   full §13 accounting slice — is confirmed green. Fix first if red).
-2. **§17 email notifications** (UG ch.22: configurable notifications on
-   containers/items/lots/orders/planning/receipts/resources/workflows —
-   legacy `Notification`/`EmailNotification` tables; discovery first: which
-   notification kinds this install actually configured; SMTP config lives
-   in the future §14 mail tab — an `app_settings`-driven SMTP + a
-   notification-rule engine is the likely shape).
-3. **§14 config tabs** (UG ch.19, `Params*` tables — the app_settings
+1. **Verify CI green for the §17 notifications commit** (fix first if red).
+2. **§14 config tabs** (UG ch.19, `Params*` tables — the app_settings
    foundation + SettingsService exist; build the tabbed admin UI over the
-   real Params* values incl. the new `accounting.*Account` keys).
-4. **§18 viewer library** (batch-build set viewers on DataGrid), **§15 i18n**
+   real Params* values incl. the new `accounting.*Account`, `smtp.*`,
+   `notifications.*`, `inventory.reweighThreshold` keys — the Notifications
+   page's Mail-settings card is a stopgap subset).
+3. **§18 viewer library** (batch-build set viewers on DataGrid), **§15 i18n**
    (`Vocabulary`), **§19 handheld PWA** — in that rough order.
-5. Background chip pending: enforce secured-item PERFORM grant on
+4. Background chip pending: enforce secured-item PERFORM grant on
    order.complete + release.disposition (+ order.revise now).
-6. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
+5. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
    YYMMDD### collisions; N-sequence invoice numbers can collide during
    parallel running (reserve an E-prefix or cut invoicing over in one go);
-   Ordr.ReserveAmount on SH orders (45 rows) — surface on documents?
-7. Before cutover: one real install pass on the actual Proxmox VM; a live
+   Ordr.ReserveAmount on SH orders (45 rows) — surface on documents?;
+   items.create uses plain autoincrement, not the native-id range (new,
+   2026-07-05).
+6. Before cutover: one real install pass on the actual Proxmox VM; a live
    `POST /import/sync` against the real legacy DB (seam-fake tested only);
    disable the PlanTrace import spec (the native plan takes over — setting
    `planning.source` already flips on first recalc).
+
+## State of the world (as of 2026-07-05, §17 notifications)
+
+- **§17 Email notifications ✅**: `Notification`/`NotificationDetail`/
+  `EmailSent` mirrored (full import copies all three; sync re-copies ONLY
+  EmailSent — rule config is ERP1-owned after first import, see
+  ASSUMPTIONS §17.10). Rule engine (`NotificationEngineService.emit`, runs
+  INSIDE the business tx): exact security-group → '*' fallback; recipients =
+  rule SendTo + first-owner-up-the-entity-chain NotificationDetail rows +
+  contextual actor e-mail unless UseSendtoListOnly; `@Field`/`@Table`
+  queue-time HTML render with `notifications.baseUrl` deep links; native
+  EmailSent ids under the alloc lock. **Emit BEFORE audit.record in any tx
+  that didn't already take the native-id lock (convention 1b)**. 15 codes
+  wired: MFO Created (create/edit/revision — the only kind this plant ever
+  fired: 516 e-mails 2022, ALL stuck 'Not sent', Database Mail never worked),
+  MFO Released, Mark Complete, Order Edit Publish, Purchase/Misc receipt +
+  reversals, New Item, Reweigh Outside Threshold
+  (`inventory.reweighThreshold`, live legacy value 5%), Release Sublot,
+  Tests Completed (transition-only), and post-recalc Short/Expedite/Testing
+  Required @Table summaries. Dispatcher (`EmailProcessorService`): 60 s
+  in-API poller; per-e-mail CAS claim ('Sending', attempts counted at
+  claim), SMTP send OUTSIDE any tx (nodemailer behind `MailTransport`;
+  10s/10s/30s timeouts; requireTLS when auth'd w/o implicit TLS), stale-claim
+  sweep; **ids < 1e9 never dispatched** (imported 2022 queue is history).
+  `smtp.*`/`notifications.*` settings seeded (enabled=false); SMTP_URL env
+  override; /notifications page (rules editor + e-mail log + mail settings
+  card + test send); program `notifications.config`. `EmailNotification`
+  table ⏸️ (0 rows). Review round: 15 confirmed findings fixed incl. the
+  batch-tx duplicate-delivery dispatcher rebuild + the ABBA lock inversion
+  (details in ASSUMPTIONS §17.11).
+- Suites: 109 unit + 341 integration green.
 
 ## State of the world (as of 2026-07-04 late, commit ac4fcaf)
 

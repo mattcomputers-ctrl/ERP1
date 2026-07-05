@@ -29,6 +29,7 @@
     "helmet": "^8.0.0",
     "ioredis": "^5.4.1",
     "mssql": "^11.0.1",
+    "nodemailer": "^9.0.3",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },
@@ -40,6 +41,7 @@
     "@types/express-session": "^1.18.0",
     "@types/mssql": "^9.1.7",
     "@types/node": "^22.7.4",
+    "@types/nodemailer": "^8.0.1",
     "@types/supertest": "^6.0.2",
     "supertest": "^7.0.0",
     "tsx": "^4.19.1",

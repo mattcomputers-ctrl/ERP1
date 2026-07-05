@@ -18,6 +18,10 @@ import { ValuationService } from '../../src/inventory/valuation.service';
 import { RecipeEditorService } from '../../src/manufacturing/recipe-editor.service';
 import { RecipeReplacementService } from '../../src/manufacturing/recipe-replacement.service';
 import { RecipesService } from '../../src/manufacturing/recipes.service';
+import { NotificationEngineService } from '../../src/notifications/notification-engine.service';
+import { NotificationsService } from '../../src/notifications/notifications.service';
+import { EmailProcessorService } from '../../src/notifications/email-processor.service';
+import type { MailTransport } from '../../src/notifications/mail-transport';
 import { OrdersService } from '../../src/orders/orders.service';
 import { PlanningPoService } from '../../src/planning/planning-po.service';
 import { PlanningRecalcService } from '../../src/planning/planning-recalc.service';
@@ -69,6 +73,27 @@ export function valuationService(prisma: PrismaClient): ValuationService {
 }
 
 /**
+ * A recording fake for the outbound-mail seam (same pattern as FakeLegacy):
+ * captures every send; `failWith` makes each subsequent send throw.
+ */
+export class FakeMailTransport {
+  sent: Array<{ from: string; to: string[]; subject: string; html: string }> = [];
+  failWith: string | null = null;
+  async send(_config: unknown, message: { from: string; to: string[]; subject: string; html: string }): Promise<void> {
+    if (this.failWith) throw new Error(this.failWith);
+    this.sent.push(message);
+  }
+}
+
+/** An EmailProcessorService wired to the test client + a recording transport. */
+export function emailProcessor(prisma: PrismaClient): { processor: EmailProcessorService; transport: FakeMailTransport } {
+  const p = prisma as unknown as PrismaService;
+  const transport = new FakeMailTransport();
+  const processor = new EmailProcessorService(p, new SettingsService(p), transport as unknown as MailTransport);
+  return { processor, transport };
+}
+
+/**
  * The real services wired against the test client (full DI graph — every service
  * has a Prisma-only constructor, so no stubs). Fresh per call so per-instance
  * memo (e.g. the owner-entity resolution) doesn't leak across tests.
@@ -95,7 +120,8 @@ export function services(prisma: PrismaClient) {
   const approvalPolicy = new ApprovalPolicyService(p, audit);
   const approvalRequests = new ApprovalRequestService(p);
   const recipeEditor = new RecipeEditorService(p, audit, esign, auth, permissions);
-  const purchasing = new PurchasingService(p, settings, audit, party, valuation, priceVersions, approvalPolicy, approvalRequests);
+  const notifications = new NotificationEngineService(p);
+  const purchasing = new PurchasingService(p, settings, audit, party, valuation, priceVersions, approvalPolicy, approvalRequests, notifications);
   return {
     settings,
     audit,
@@ -103,16 +129,18 @@ export function services(prisma: PrismaClient) {
     valuation,
     priceVersions,
     salesPricing,
-    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation, approvalPolicy, approvalRequests),
+    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation, approvalPolicy, approvalRequests, notifications),
     approvalRequests,
     purchasing,
     shipping: new ShippingService(p, audit, party, salesPricing, approvalPolicy, approvalRequests),
     genealogy: new GenealogyService(p, party),
-    inventory: new InventoryService(p, audit),
+    inventory: new InventoryService(p, audit, notifications),
     lotTracking: new LotTrackingService(p, audit),
-    miscReceipt: new MiscReceiptService(p, audit, valuation),
+    miscReceipt: new MiscReceiptService(p, audit, valuation, notifications),
     approvalPolicy,
-    releases: new ReleasesService(p, audit, esign, auth, permissions, approvalPolicy, approvalRequests),
+    notifications,
+    notificationRules: new NotificationsService(p, audit),
+    releases: new ReleasesService(p, audit, esign, auth, permissions, approvalPolicy, approvalRequests, notifications),
     roles: new RolesService(p, audit),
     users: new UsersService(p, auth, audit),
     securedItems: new SecuredItemsService(p, audit),
@@ -121,7 +149,7 @@ export function services(prisma: PrismaClient) {
     recipeEditor,
     recipeReplacement: new RecipeReplacementService(p, audit, recipeEditor),
     planning: new PlanningService(p, settings),
-    planningRecalc: new PlanningRecalcService(p, audit),
+    planningRecalc: new PlanningRecalcService(p, audit, notifications),
     planningPo: new PlanningPoService(p, purchasing, priceVersions),
     glMasters: new GlMastersService(p, audit),
     tax: new TaxService(p),

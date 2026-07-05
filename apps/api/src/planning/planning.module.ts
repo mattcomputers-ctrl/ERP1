@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { PurchasingModule } from '../purchasing/purchasing.module';
 import { SettingsModule } from '../settings/settings.module';
 import { PlanningPoService } from './planning-po.service';
@@ -9,7 +10,7 @@ import { PlanningService } from './planning.service';
 import { SupplyDemandService } from './supply-demand.service';
 
 @Module({
-  imports: [AuthModule, SettingsModule, PurchasingModule],
+  imports: [AuthModule, SettingsModule, PurchasingModule, NotificationsModule],
   controllers: [PlanningController],
   providers: [PlanningService, PlanningRecalcService, PlanningPoService, SupplyDemandService],
 })

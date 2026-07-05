@@ -53,3 +53,13 @@ unique constraint, matching legacy). Fine for testing; before using ERP1
 invoices for real during parallel running, either reserve a distinct prefix
 (e.g. `E########`) or cut invoicing over in one go (same decision shape as
 the native-lot marker question).
+
+## Native item ids bypass the native-id convention (noted 2026-07-05)
+
+`ItemsService.create` uses plain autoincrement (sequence = legacy max + 1
+after an import) instead of the ≥ 1e9 native range used everywhere else. If
+the legacy plant creates a new Item during parallel running, the next sync
+would UPSERT that legacy id over the ERP1-native item (or vice versa). Low
+likelihood (item creation is rare there) but the same decision shape as the
+native-lot marker: either move items.create to the native-id allocation
+pattern or accept and watch during parallel running.

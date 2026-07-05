@@ -6,9 +6,12 @@ import { Redis } from 'ioredis';
  * Background worker entrypoint (runs as its own container).
  *
  * For now it runs a heartbeat to prove the queue is alive. Real scheduled jobs
- * land here in later increments: legacy import/sync, overnight QuickBooks
- * reconciliation, automatic sublot expiry, MRP/plan-trace recalculation, and
- * email notifications.
+ * land here in later increments: legacy import/sync, automatic sublot expiry,
+ * and MRP/plan-trace recalculation. (E-mail notification dispatch was
+ * considered for this worker and deliberately placed IN-API instead — the
+ * EmailSent queue is in Postgres and the API polls it under an advisory
+ * try-lock, so a separate process would only add bootstrap plumbing; see
+ * EmailProcessorService.)
  */
 
 // BullMQ accepts an ioredis instance at runtime; cast to its ConnectionOptions

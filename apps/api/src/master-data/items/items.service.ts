@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { AuditService } from '../../audit/audit.service';
 import type { Actor } from '../../auth/current-user.decorator';
 import { buildList } from '../../common/list';
+import { NotificationEngineService } from '../../notifications/notification-engine.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import type { CreateItemDto, ItemListQuery, UpdateItemDto } from './items.dto';
 
@@ -12,6 +13,7 @@ export class ItemsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationEngineService,
   ) {}
 
   async list(query: ItemListQuery) {
@@ -57,6 +59,18 @@ export class ItemsService {
           specificGravity: dto.specificGravity,
         },
       });
+      // UG §22.2.2 'New Item Notification'. Emit BEFORE the audit row
+      // (native-id lock before audit-chain lock — the system-wide
+      // advisory-lock order; reversed = ABBA deadlock).
+      const creatorEmail = (await tx.user.findUnique({ where: { id: actor.id }, select: { email: true } }))?.email;
+      await this.notifications.emit(tx, 'New Item Notification', {
+        securityGroup: i.securityGroup,
+        ownerId: i.ownerId,
+        contextEmails: [creatorEmail],
+        params: { ItemCode: i.itemCode, Description: i.description },
+        links: { ItemCode: `/items?focus=${encodeURIComponent(i.itemCode)}` },
+      });
+
       await this.audit.record(
         {
           action: 'item.create',

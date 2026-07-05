@@ -859,3 +859,97 @@ Trans CI 22,083 still minted daily through 2026-07-02).
    without `planning.supplyDemand` saw a silent dead end). Refuted: the
    unbounded per-item query (measured: worst real item ≪ bind-variable
    ceiling), produce-line discarded-filter (zero such rows live).
+
+## Email notifications (§17 / UG ch.22, built 2026-07-05)
+
+1. **Delivery owned by ERP1, not the database.** Legacy queued rendered
+   e-mails in `EmailSent` and relied on a SQL Agent job (`exec EmailProcessor`
+   every minute) feeding SQL Server Database Mail (profile in
+   `ParamsMail.ProfileName`). In this install that leg NEVER worked: all 516
+   queued e-mails (one kind — 'MFO Created Notification', Apr–Jul 2022, one
+   recipient) sit at 'Not sent' with no error, and the plant abandoned the
+   feature. ERP1 keeps the queue-table design (emitters render + queue inside
+   the business transaction; audit trail for free) but dispatches itself:
+   an in-API 60-second poller (NODE_ENV=test disables) sending over
+   nodemailer behind a `MailTransport` seam. Dispatch protocol (rebuilt in
+   review round 1 — an SMTP send is a non-transactional side effect and must
+   never sit inside a tx whose rollback would erase the record of it):
+   per-e-mail CAS claim to a transient 'Sending' status (FOR UPDATE SKIP
+   LOCKED; the attempt is counted DURABLY at claim time), the send happens
+   OUTSIDE any database transaction (bounded by 10s/10s/30s transport
+   timeouts; requireTLS whenever credentials ride a non-implicit-TLS port),
+   then the outcome is written. Stale 'Sending' claims (>10 min = a crash
+   mid-send) are swept back to the queue on the next run, converging on
+   'Failed' via the already-counted attempts (at-least-once delivery). A row
+   that fails is not re-claimed within the same run — retries ride
+   subsequent polls. `ParamsMail` is NOT mirrored — the Database-Mail profile is
+   meaningless here; its `ContextURL` deep-link base is replaced by the
+   `notifications.baseUrl` setting (links into ERP1 web routes,
+   `?focus=<id>` form). The BullMQ worker was deliberately NOT used for
+   dispatch: single-node deployment, and a DB-queue poller has the same
+   semantics with no cross-process bootstrap.
+2. **Imported legacy EmailSent rows are history, never dispatched** — the
+   processor only touches ids ≥ 1e9. Without that guard a fresh install
+   with working SMTP would mass-mail 516 four-year-old order notices.
+3. **Master switch semantics**: emitters ALWAYS queue (the log doubles as a
+   dry-run trail); `notifications.enabled` gates only delivery. Seeded false.
+4. **Rule codes are the install's literal strings** (e.g. 'MFO Created
+   Notification', not the UG prose 'Manufacturing Order Created
+   Notification') — the engine matches rules by exact code and imports keep
+   legacy rows working unmodified. The catalog (38 codes) marks which codes
+   ERP1 fires natively; unwired codes remain configurable for parity and are
+   annotated with the evidence for deferral.
+5. **Revision publish fires BOTH 'Order Edit Publish Notification' (the UG
+   code) and 'MFO Created Notification'** — the legacy subject reads
+   "created / edited" and the Batching Order (edit) program was what
+   generated all 516 live e-mails, so a plant that re-enables its old rule
+   keeps getting the edits it used to.
+6. **Reweigh Outside Threshold maps to inventory adjustment**: ERP1 has no
+   container reweigh transaction; the legacy global
+   `ParamsInventory.ReweighThreshold` (live value 5.0%) becomes the
+   `inventory.reweighThreshold` setting checked in `inventory.adjust`
+   (percent of the pre-adjust quantity; 0 disables; not computable against a
+   zero base).
+7. **Planning notifications fire at the end of a native recalc** (legacy ran
+   them as overnight procedures over the nightly plan — same moment in
+   ERP1's lifecycle): Short (aggregated per item), Expedite (late `+`
+   supply rows), Testing Required (PlanTraceStatus 'Retest'), each a single
+   `@Table` summary; Area = the site owner entity.
+8. **Recipient resolution**: rule Send To + the FIRST owner up the entity
+   parent chain with NotificationDetail rows (UG: Area → Site → Installation
+   → CMS) + event-contextual addresses (order placer / receiver / item
+   creator = the acting user's e-mail) unless Use Sendto List Only; parsed
+   on `;`/`,`, must contain '@', case-insensitive dedupe; empty → not queued
+   (UG: "If a Send To cannot be determined then the notification is not
+   sent"). SecurityGroup resolution = exact match then '*', like the tax
+   engine's exact→blank rule.
+9. **smtp.password lives in app_settings** (admin.config-gated) for
+   operability; deployments that refuse a DB-stored password set the
+   `SMTP_URL` env var, which overrides all smtp.* settings.
+10. **ERP1 owns notification-rule config after the first full import.**
+   `Notification`/`NotificationDetail` are copied by the FULL import but are
+   NOT in the sync re-copy set: they are never change-logged, so the only
+   sync mechanism would be wholesale re-copy — which would silently revert
+   every rule edit made in ERP1 on every sync (review finding). This
+   install's legacy rows are frozen 2022 config, so nothing is lost;
+   `EmailSent` (append-only history) does keep re-copying.
+11. **Review round 1 (2026-07-05, 5 lenses → 2 adversarial verifiers each,
+   both-must-confirm kill):** 15 confirmed findings (9 unique defects), all
+   fixed — the batch-transaction dispatcher (a rollback un-marked
+   already-delivered mail → duplicate-delivery loop; rebuilt per #1); an
+   ABBA advisory-lock inversion in four emitter placements (emit takes the
+   native-id lock, audit the audit-chain lock, every allocating path orders
+   native-id FIRST — those sites now emit before audit and the engine
+   docblock states the order); missing SMTP timeouts (a blackholed relay
+   would pin the dispatcher ~10 min); sync reverting rule edits (#10);
+   'Tests Completed' re-firing on every post-completion correction (now
+   transition-only); planning Expedite/Retest tables showing an arbitrary
+   demand slice's qty/date (now aggregated per supply/sublot);
+   PATCH-with-explicit-null 500s + a null ownerId guard; the mail-settings
+   card silently rendering empty without admin.config; a stale e-mail
+   preview after requeue. From the disputed pile, accepted as-is: pre-tx
+   item reads in adjust (static reference data, existing decoration
+   pattern); hardened anyway: requireTLS with credentials. Fixing the
+   dispatcher surfaced one more real bug the re-run caught: the claim loop
+   re-claimed a just-failed row and burned all 5 attempts in one tick (now
+   excluded per run — retries wait for the next poll).

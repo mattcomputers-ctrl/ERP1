@@ -7,6 +7,7 @@ import { ESignatureService } from '../audit/esignature.service';
 import { AuthService } from '../auth/auth.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { PermissionService } from '../auth/permission.service';
+import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { ApproveDispositionDto, RejectDispositionDto } from './dto/approve-disposition.dto';
 import type { DispositionDto } from './dto/disposition.dto';
@@ -61,6 +62,7 @@ export class ReleasesService {
     private readonly permissions: PermissionService,
     private readonly approvalPolicy: ApprovalPolicyService,
     private readonly approvalRequests: ApprovalRequestService,
+    private readonly notifications: NotificationEngineService,
   ) {}
 
   /** The effective e-signature/reason requirements for a QA disposition. */
@@ -390,6 +392,36 @@ export class ReleasesService {
       }
     }
     const u = await tx.release.update({ where: { id: release.id }, data });
+
+    // UG §22.2.3 'Release Sublot Notification' — "A Sublot has been approved
+    // or rejected. It is sent by Release Sublot." Fired from the shared apply
+    // helper so both the direct-enact and the approve-request paths notify.
+    const sublot = u.sublotId != null
+      ? await tx.sublot.findUnique({ where: { id: u.sublotId }, select: { lot: true, sublotCode: true } })
+      : null;
+    const lotRow = sublot?.lot ? await tx.lot.findUnique({ where: { lot: sublot.lot }, select: { itemId: true } }) : null;
+    const item = lotRow?.itemId != null
+      ? await tx.item.findUnique({
+          where: { id: lotRow.itemId },
+          select: { itemCode: true, description: true, securityGroup: true, ownerId: true },
+        })
+      : null;
+    await this.notifications.emit(tx, 'Release Sublot Notification', {
+      securityGroup: item?.securityGroup,
+      ownerId: item?.ownerId,
+      params: {
+        Release: release.id,
+        ItemCode: item?.itemCode,
+        ItemDescription: item?.description,
+        Lot: sublot?.lot,
+        Sublot: sublot?.sublotCode ?? sublot?.lot,
+        Status: snap.status,
+        Grade: snap.grade ?? null,
+        ReleasedBy: releasedBy,
+      },
+      links: sublot?.lot ? { Lot: `/lot-tracking?focus=${encodeURIComponent(sublot.lot)}` } : undefined,
+    });
+
     return { u, changes };
   }
 
@@ -527,6 +559,44 @@ export class ReleasesService {
         changes.push({ tableName: 'LocationSampleTest', recordId: String(row.id), fieldName: `Result:${row.test}`, oldValue: row.result, newValue: result });
       }
       if (!changes.length) throw new BadRequestException('None of the given tests belong to this release.');
+
+      // UG §22.2.3 'Tests Completed Notification' — "All tests for a Sublot
+      // are now complete... It is sent by Enter Test Results." Fire only on
+      // the TRANSITION to complete: this save must have filled the last open
+      // result (a later correction to an already-complete set must not
+      // re-notify). Emitted BEFORE the audit row (native-id lock before
+      // audit-chain lock — the system-wide advisory-lock order).
+      const remaining = await tx.locationSampleTest.count({
+        where: { sampleSetId: release.sampleSetId, result: null },
+      });
+      const filledThisSave = items.some((item) => {
+        const row = rowById.get(item.id);
+        return row && row.result == null && item.result?.trim();
+      });
+      if (remaining === 0 && filledThisSave) {
+        const sublot = release.sublotId != null
+          ? await tx.sublot.findUnique({ where: { id: release.sublotId }, select: { lot: true, sublotCode: true } })
+          : null;
+        const lotRow = sublot?.lot ? await tx.lot.findUnique({ where: { lot: sublot.lot }, select: { itemId: true } }) : null;
+        const item = lotRow?.itemId != null
+          ? await tx.item.findUnique({
+              where: { id: lotRow.itemId },
+              select: { itemCode: true, description: true, securityGroup: true, ownerId: true },
+            })
+          : null;
+        await this.notifications.emit(tx, 'Tests Completed Notification', {
+          securityGroup: item?.securityGroup,
+          ownerId: item?.ownerId,
+          params: {
+            Release: releaseId,
+            ItemCode: item?.itemCode,
+            ItemDescription: item?.description,
+            Lot: sublot?.lot,
+            Sublot: sublot?.sublotCode ?? sublot?.lot,
+          },
+          links: sublot?.lot ? { Lot: `/lot-tracking?focus=${encodeURIComponent(sublot.lot)}` } : undefined,
+        });
+      }
 
       await this.audit.record(
         {

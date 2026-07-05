@@ -3,6 +3,7 @@ import { AuditService } from '../audit/audit.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
+import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { AdjustInventoryDto } from './dto/adjust-inventory.dto';
 import type { ReverseReceiptDto } from './dto/reverse-receipt.dto';
@@ -33,6 +34,7 @@ export class InventoryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationEngineService,
   ) {}
 
   /**
@@ -55,7 +57,12 @@ export class InventoryService {
     // Decoration for a readable audit summary (item / lot / location) — reference
     // data, resolved outside the transaction.
     const [item, sublot, location] = await Promise.all([
-      parcel.itemId != null ? this.prisma.item.findUnique({ where: { id: parcel.itemId }, select: { itemCode: true } }) : Promise.resolve(null),
+      parcel.itemId != null
+        ? this.prisma.item.findUnique({
+            where: { id: parcel.itemId },
+            select: { itemCode: true, description: true, unit: true, securityGroup: true, ownerId: true },
+          })
+        : Promise.resolve(null),
       parcel.sublotId != null ? this.prisma.sublot.findUnique({ where: { id: parcel.sublotId }, select: { lot: true } }) : Promise.resolve(null),
       parcel.locationId != null ? this.prisma.location.findUnique({ where: { id: parcel.locationId }, select: { locationCode: true } }) : Promise.resolve(null),
     ]);
@@ -93,6 +100,37 @@ export class InventoryService {
         },
         tx,
       );
+
+      // UG §22.2.1 'Reweigh Outside Threshold': an adjustment beyond the
+      // configured percentage of the original quantity (legacy
+      // ParamsInventory.ReweighThreshold; ERP1 inventory.reweighThreshold,
+      // seeded with this plant's live value 5%). Only computable against a
+      // positive original quantity; 0 disables.
+      const thresholdRaw = (await tx.appSetting.findUnique({ where: { key: 'inventory.reweighThreshold' } }))?.value;
+      const threshold = Number(thresholdRaw ?? '5');
+      if (Number.isFinite(threshold) && threshold > 0 && oldQty > 0) {
+        const maxVariance = (oldQty * threshold) / 100;
+        if (Math.abs(delta) > maxVariance) {
+          const r6 = (n: number) => Math.round(n * 1e6) / 1e6;
+          await this.notifications.emit(tx, 'Reweigh Outside Threshold', {
+            securityGroup: item?.securityGroup,
+            ownerId: item?.ownerId,
+            params: {
+              Container: parcel.id,
+              Adjustment: r6(delta),
+              ReweighThreshold: threshold,
+              MaxVariance: r6(maxVariance),
+              OriginalQty: oldQty,
+              Unit: item?.unit,
+              ItemCode: item?.itemCode,
+              Description: item?.description,
+              Lot: sublot?.lot,
+            },
+            links: sublot?.lot ? { Lot: `/lot-tracking?focus=${encodeURIComponent(sublot.lot)}` } : undefined,
+          });
+        }
+      }
+
       return { inventoryId: parcel.id, oldQty, newQty: dto.newQty, delta, changeSetId: csId };
     });
   }
@@ -280,6 +318,26 @@ export class InventoryService {
         },
         tx,
       );
+
+      // UG §22.2.6 'Reverse purchase receipt' / 'Reverse miscellaneous receipt'.
+      const item = receipt.itemId != null
+        ? await tx.item.findUnique({
+            where: { id: receipt.itemId },
+            select: { itemCode: true, description: true, altDescription: true, securityGroup: true, ownerId: true },
+          })
+        : null;
+      const sublot = await tx.sublot.findUnique({ where: { id: sublotId }, select: { lot: true } });
+      await this.notifications.emit(tx, cs.context === 'PO' ? 'Reverse purchase receipt' : 'Reverse miscellaneous receipt', {
+        securityGroup: item?.securityGroup,
+        ownerId: item?.ownerId,
+        params: {
+          Area: null, Ordr: cs.ordrId, PONumber: null, Receipt: changeSetId,
+          Item: item?.itemCode, Description: item?.description, AltDescription: item?.altDescription,
+          Supplier: null, SupName: null, SupLot: null, Manufacturer: null, ManfName: null, ManfLot: null,
+          Lot: sublot?.lot, Sublot: sublot?.lot,
+        },
+      });
+
       return { changeSetId, reversedBy: csId, removedQty: parcel ? received : 0, context: cs.context };
     });
   }

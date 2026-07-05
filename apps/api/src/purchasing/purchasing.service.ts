@@ -8,6 +8,7 @@ import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { maxRawLotNumber } from '../common/lot-numbers';
 import { ValuationService } from '../inventory/valuation.service';
+import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
@@ -70,6 +71,7 @@ export class PurchasingService {
     private readonly priceVersions: PriceVersionService,
     private readonly approvalPolicy: ApprovalPolicyService,
     private readonly approvalRequests: ApprovalRequestService,
+    private readonly notifications: NotificationEngineService,
   ) {}
 
   /** Browse purchase orders (Ordr Context='PO') with supplier name + line total. */
@@ -911,6 +913,10 @@ export class PurchasingService {
       return price;
     };
 
+    // Supplier display name for the receipt notification (static master data —
+    // safe to resolve before the transaction).
+    const supplier = po.entityId ? (await this.party.resolve([po.entityId])).get(po.entityId) : undefined;
+
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
@@ -925,7 +931,7 @@ export class PurchasingService {
       // On-hand for received stock lands in the configured receiving location.
       const receivingLocationId = await this.valuation.resolveLocationId(tx, RECEIVING_LOCATION_SETTING);
 
-      const created: { lot: string; manufacturerLot: string; ordDetailId: number; qty: number }[] = [];
+      const created: { lot: string; manufacturerLot: string; ordDetailId: number; qty: number; changeSetId: number }[] = [];
       const incByLine = new Map<number, number>();
       for (const dl of dto.lines) {
         const line = lineById.get(dl.ordDetailId)!;
@@ -982,7 +988,7 @@ export class PurchasingService {
             },
           });
           incByLine.set(dl.ordDetailId, (incByLine.get(dl.ordDetailId) ?? 0) + lot.qty);
-          created.push({ lot: lotNumber, manufacturerLot: lot.manufacturerLot, ordDetailId: dl.ordDetailId, qty: lot.qty });
+          created.push({ lot: lotNumber, manufacturerLot: lot.manufacturerLot, ordDetailId: dl.ordDetailId, qty: lot.qty, changeSetId: newCsId });
         }
       }
 
@@ -1013,6 +1019,35 @@ export class PurchasingService {
         },
         tx,
       );
+
+      // UG §22.2.6 'Purchase receipt' — one notification per received lot
+      // (mirrors the legacy per-receipt-line @params: Item / Lot / Sublot).
+      const areaCode = po.ownerId
+        ? (await tx.entity.findUnique({ where: { id: po.ownerId }, select: { entityCode: true } }))?.entityCode
+        : null;
+      const receiverEmail = (await tx.user.findUnique({ where: { id: actor.id }, select: { email: true } }))?.email;
+      for (const c of created) {
+        const line = lineById.get(c.ordDetailId)!;
+        const item = line.itemId != null
+          ? await tx.item.findUnique({
+              where: { id: line.itemId },
+              select: { itemCode: true, description: true, altDescription: true, securityGroup: true },
+            })
+          : null;
+        await this.notifications.emit(tx, 'Purchase receipt', {
+          securityGroup: item?.securityGroup,
+          ownerId: po.ownerId,
+          contextEmails: [receiverEmail],
+          params: {
+            Area: areaCode, Ordr: id, PONumber: po.poNumber, Receipt: c.changeSetId,
+            Item: item?.itemCode, Description: item?.description, AltDescription: item?.altDescription,
+            Supplier: supplier?.entityCode, SupName: supplier?.name,
+            SupLot: c.manufacturerLot, Manufacturer: null, ManfName: null, ManfLot: c.manufacturerLot,
+            Lot: c.lot, Sublot: c.lot,
+          },
+          links: { Ordr: `/purchasing?focus=${id}` },
+        });
+      }
 
       return { id, received: created.length, lots: created };
     });

@@ -14,6 +14,7 @@ import { Dashboard } from './pages/Dashboard';
 import { DispositionApprovals } from './pages/DispositionApprovals';
 import { Entities } from './pages/Entities';
 import { ImportPage } from './pages/ImportPage';
+import { Notifications } from './pages/Notifications';
 import { Inventory } from './pages/Inventory';
 import { InvoiceDoc } from './pages/InvoiceDoc';
 import { Invoices } from './pages/Invoices';
@@ -99,6 +100,7 @@ export function App() {
         <Route path="/disposition-approvals" element={<DispositionApprovals />} />
         <Route path="/order-approvals" element={<OrderEditApprovals />} />
         <Route path="/line-approvals" element={<LineEditApprovals />} />
+        <Route path="/notifications" element={<Notifications />} />
         <Route path="/audit" element={<Audit />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/change-password" element={<ChangePassword />} />
@@ -138,6 +140,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/roles', label: 'Roles' },
     { to: '/secured-items', label: 'Secured Items' },
     { to: '/approval-policies', label: 'Approval Policies' },
+    { to: '/notifications', label: 'Notifications' },
     { to: '/audit', label: 'Audit' },
     { to: '/import', label: 'Import' },
   ];

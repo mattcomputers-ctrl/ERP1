@@ -4,6 +4,7 @@ import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { maxRawLotNumber } from '../common/lot-numbers';
+import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ValuationService } from './valuation.service';
 import type { CreateMiscReceiptDto } from './dto/misc-receipt.dto';
@@ -27,13 +28,14 @@ export class MiscReceiptService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly valuation: ValuationService,
+    private readonly notifications: NotificationEngineService,
   ) {}
 
   async receive(dto: CreateMiscReceiptDto, actor: Actor) {
     const itemIds = [...new Set(dto.lines.map((l) => l.itemId))];
     const items = await this.prisma.item.findMany({
       where: { id: { in: itemIds } },
-      select: { id: true, itemCode: true, unit: true },
+      select: { id: true, itemCode: true, unit: true, description: true, altDescription: true, securityGroup: true, ownerId: true },
     });
     const itemById = new Map(items.map((i) => [i.id, i]));
     const missing = itemIds.filter((id) => !itemById.has(id));
@@ -47,7 +49,7 @@ export class MiscReceiptService {
       let lotSeq = await maxRawLotNumber(tx);
       const receivingLocationId = await this.valuation.resolveLocationId(tx, RECEIVING_LOCATION_SETTING);
 
-      const created: { lot: string; itemId: number; qty: number; manufacturerLot: string | null }[] = [];
+      const created: { lot: string; itemId: number; qty: number; manufacturerLot: string | null; changeSetId: number }[] = [];
       for (const l of dto.lines) {
         const item = itemById.get(l.itemId)!;
         const lotNumber = String((lotSeq += 1));
@@ -86,7 +88,7 @@ export class MiscReceiptService {
             numberOfContainers: l.numberOfContainers ?? 1,
           },
         });
-        created.push({ lot: lotNumber, itemId: l.itemId, qty: l.qty, manufacturerLot: mfrLot });
+        created.push({ lot: lotNumber, itemId: l.itemId, qty: l.qty, manufacturerLot: mfrLot, changeSetId: newCsId });
       }
 
       await this.audit.record(
@@ -108,6 +110,25 @@ export class MiscReceiptService {
         },
         tx,
       );
+
+      // UG §22.2.6 'Miscellaneous receipt' — one notification per created lot.
+      const receiverEmail = (await tx.user.findUnique({ where: { id: actor.id }, select: { email: true } }))?.email;
+      for (const c of created) {
+        const item = itemById.get(c.itemId)!;
+        await this.notifications.emit(tx, 'Miscellaneous receipt', {
+          securityGroup: item.securityGroup,
+          ownerId: item.ownerId,
+          contextEmails: [receiverEmail],
+          params: {
+            Area: null, Ordr: null, PONumber: null, Receipt: c.changeSetId,
+            Item: item.itemCode, Description: item.description, AltDescription: item.altDescription,
+            Supplier: null, SupName: null, SupLot: c.manufacturerLot,
+            Manufacturer: null, ManfName: null, ManfLot: c.manufacturerLot,
+            Lot: c.lot, Sublot: c.lot,
+          },
+          links: { Lot: `/lot-tracking?focus=${encodeURIComponent(c.lot)}` },
+        });
+      }
 
       return { received: created.length, lots: created };
     });

@@ -168,7 +168,8 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 ## 17. Notifications (UG ch.22)
 | Feature | Status | Notes |
 |---|---|---|
-| Configurable email notifications (containers, items, lots/sublots, orders, planning, receipts, resources, workflows) | ⬜ | `Notification`/`EmailNotification` |
+| Configurable email notifications (containers, items, lots/sublots, orders, planning, receipts, resources, workflows) | ✅ | `Notification`/`NotificationDetail`/`EmailSent` mirrored + imported (never-logged wholesale copies); rule engine (exact security-group → `*` fallback, Send To + per-owner detail walk + contextual placer, `@Field`/`@Table` queue-time HTML rendering with `notifications.baseUrl` deep links); rules CRUD page (`notifications.config`) + e-mail log viewer + requeue; SMTP dispatcher (nodemailer behind a `MailTransport` seam, `smtp.*`/`notifications.enabled` settings or `SMTP_URL` env, 60 s in-API poller, advisory-lock guarded, 5-attempt park, **legacy history rows never dispatched** — all 516 imported rows were stuck 'Not sent' since 2022, the plant's Database Mail never worked). 15 codes wired natively: MFO Created (the only kind this install ever fired) + Released + Complete + Order Edit Publish, Purchase/Misc receipt + both reversals, New Item, Reweigh Outside Threshold (`inventory.reweighThreshold`, live value 5%), Release Sublot, Tests Completed, and post-recalc Inventory Short / Expedite / Testing Required `@Table` summaries. Remaining catalog codes configurable but ⏸️ with evidence per code (workflows 0-row, no waybill/stability/resource/label/PPE/sample-receipt modules, zero reconciliation tolerances, no native sample-set creation) |
+| `EmailNotification` ad-hoc e-mail templates | ⏸️ | 0 rows in this install — table not mirrored |
 
 ## 18. Viewers & set viewers (UG ch.23)
 | Feature | Status | Notes |

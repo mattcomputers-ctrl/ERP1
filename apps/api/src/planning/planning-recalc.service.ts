@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { Actor } from '../auth/current-user.decorator';
 import { AuditService } from '../audit/audit.service';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
+import { NotificationEngineService, wallClockDate } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 // §10 Planning slice 2: the NATIVE Recalculate Plan Trace engine (vendor UG
@@ -128,6 +129,7 @@ export class PlanningRecalcService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationEngineService,
   ) {}
 
   async recalculate(actor: Actor) {
@@ -708,6 +710,101 @@ export class PlanningRecalcService {
           },
           tx,
         );
+
+        // Planning notifications (UG §22.2.5 + the plan-driven §22.2.3 one).
+        // Legacy sends these from overnight procedures over the fresh plan;
+        // ERP1's equivalent moment is the completed recalc. Each is a single
+        // summary e-mail with an @Table listing, emitted only when non-empty.
+        const area = siteOwnerId != null
+          ? (await tx.entity.findUnique({ where: { id: siteOwnerId }, select: { entityCode: true } }))?.entityCode
+          : null;
+
+        // Short inventory, aggregated per item (a Short row exists per unfilled
+        // demand slice; the notification lists each item once).
+        const shortByItem = new Map<number, { qty: number; required: Date | null; orderBy: Date | null }>();
+        for (const r of shortRows) {
+          const cur = shortByItem.get(r.itemId) ?? { qty: 0, required: null, orderBy: null };
+          cur.qty += r.quantity;
+          if (r.dateRequired && (!cur.required || r.dateRequired < cur.required)) cur.required = r.dateRequired;
+          if (r.orderByDate && (!cur.orderBy || r.orderByDate < cur.orderBy)) cur.orderBy = r.orderByDate;
+          shortByItem.set(r.itemId, cur);
+        }
+        if (shortByItem.size) {
+          await this.notifications.emit(tx, 'Inventory Short Notification', {
+            ownerId: siteOwnerId,
+            params: { Area: area },
+            table: {
+              columns: ['Item', 'Short Qty', 'Required', 'Order By'],
+              rows: [...shortByItem.entries()].map(([itemId, s]) => [
+                metaByItem.get(itemId)?.itemCode ?? String(itemId),
+                Math.round(s.qty * 1000) / 1000,
+                wallClockDate(s.required),
+                wallClockDate(s.orderBy),
+              ]),
+            },
+          });
+        }
+
+        // Expedite: supply the plan consumed that arrives LATE (the '+' suffix
+        // on MF#/PO# references). One line per (supply order, item),
+        // AGGREGATED across the demand slices drawing on it (earliest need
+        // date — a first-row-wins pick would show an arbitrary slice's date).
+        const lateAgg = new Map<string, { itemId: number; reference: string; arrival: Date | null; required: Date | null }>();
+        for (const r of rows) {
+          if (!r.reference?.endsWith('+')) continue;
+          const key = `${r.reference}|${r.itemId}`;
+          const cur = lateAgg.get(key) ?? { itemId: r.itemId, reference: r.reference, arrival: r.arrivalDate ?? null, required: null };
+          if (r.dateRequired && (!cur.required || r.dateRequired < cur.required)) cur.required = r.dateRequired;
+          lateAgg.set(key, cur);
+        }
+        if (lateAgg.size) {
+          await this.notifications.emit(tx, 'Inventory Expedite Notification', {
+            ownerId: siteOwnerId,
+            params: { Area: area },
+            table: {
+              columns: ['Item', 'Supply', 'Arrival', 'Required'],
+              rows: [...lateAgg.values()].map((l) => [
+                metaByItem.get(l.itemId)?.itemCode ?? String(l.itemId),
+                l.reference,
+                wallClockDate(l.arrival),
+                wallClockDate(l.required),
+              ]),
+            },
+          });
+        }
+
+        // Testing required: quarantined (Hold/Expired) stock the plan assumed
+        // approved — PlanTraceStatus 'Retest' (§14.1). One line per sublot,
+        // aggregated: total quantity the plan is counting on, earliest need.
+        const retestAgg = new Map<number, { itemId: number; qty: number; required: Date | null }>();
+        for (const r of rows) {
+          if (r.planTraceStatus !== 'Retest' || r.sublotId == null) continue;
+          const cur = retestAgg.get(r.sublotId) ?? { itemId: r.itemId, qty: 0, required: null };
+          cur.qty += r.quantity;
+          if (r.dateRequired && (!cur.required || r.dateRequired < cur.required)) cur.required = r.dateRequired;
+          retestAgg.set(r.sublotId, cur);
+        }
+        if (retestAgg.size) {
+          const sublots = await tx.sublot.findMany({
+            where: { id: { in: [...retestAgg.keys()] } },
+            select: { id: true, lot: true, sublotCode: true },
+          });
+          const subById = new Map(sublots.map((s) => [s.id, s]));
+          await this.notifications.emit(tx, 'Testing Required Notification', {
+            ownerId: siteOwnerId,
+            params: { Area: area },
+            table: {
+              columns: ['Item', 'Lot', 'Sublot', 'Qty', 'Required'],
+              rows: [...retestAgg.entries()].map(([sublotId, r]) => [
+                metaByItem.get(r.itemId)?.itemCode ?? String(r.itemId),
+                subById.get(sublotId)?.lot ?? '',
+                subById.get(sublotId)?.sublotCode ?? String(sublotId),
+                Math.round(r.qty * 1000) / 1000,
+                wallClockDate(r.required),
+              ]),
+            },
+          });
+        }
       },
       { timeout: 60_000 },
     );
