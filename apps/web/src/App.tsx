@@ -13,6 +13,7 @@ import { CofADoc } from './pages/CofADoc';
 import { Dashboard } from './pages/Dashboard';
 import { DispositionApprovals } from './pages/DispositionApprovals';
 import { Entities } from './pages/Entities';
+import { Configuration } from './pages/Configuration';
 import { ImportPage } from './pages/ImportPage';
 import { Notifications } from './pages/Notifications';
 import { Inventory } from './pages/Inventory';
@@ -101,6 +102,7 @@ export function App() {
         <Route path="/order-approvals" element={<OrderEditApprovals />} />
         <Route path="/line-approvals" element={<LineEditApprovals />} />
         <Route path="/notifications" element={<Notifications />} />
+        <Route path="/configuration" element={<Configuration />} />
         <Route path="/audit" element={<Audit />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/change-password" element={<ChangePassword />} />
@@ -141,6 +143,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/secured-items', label: 'Secured Items' },
     { to: '/approval-policies', label: 'Approval Policies' },
     { to: '/notifications', label: 'Notifications' },
+    { to: '/configuration', label: 'Configuration' },
     { to: '/audit', label: 'Audit' },
     { to: '/import', label: 'Import' },
   ];

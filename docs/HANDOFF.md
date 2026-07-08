@@ -24,12 +24,17 @@ end with a fresh handoff prompt.
   bash `export PATH="$HOME/tools/node22:$PATH"`.
 - **Integration tests**: need Docker Desktop running (if the Linux engine
   won't start, disable Docker AI — see memory). Disposable Postgres:
-  `docker run -d --name erp1-itest-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=erp1_test -p 55432:5432 postgres:16`
+  `docker run -d --name erp1-itest-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=erp1_test -p 54332:5432 postgres:16`
   (usually already exists — `docker start erp1-itest-pg`), then
   `pnpm --filter @erp1/db migrate:deploy` and
   `pnpm --filter @erp1/api test:integration` with
-  `DATABASE_URL=postgresql://postgres:postgres@localhost:55432/erp1_test?schema=public`.
+  `DATABASE_URL=postgresql://postgres:postgres@localhost:54332/erp1_test?schema=public`.
   Run one suite: `pnpm exec vitest run --config vitest.integration.config.ts test/integration/<file>` from apps/api.
+  If the container won't start with "ports are not available … access
+  permissions", Windows reserved the port after a reboot — check
+  `netsh int ipv4 show excludedportrange protocol=tcp`, recreate the
+  container on a port outside every range, and use that port in
+  DATABASE_URL (this bit 55432 on 2026-07-05; the recipe moved to 54332).
 - **Generating a migration**: `prisma migrate dev` is interactive-only (fails
   headless). Use: edit schema →
   `npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --script > prisma/migrations/<yyyymmddhhmmss>_<name>/migration.sql`
@@ -122,13 +127,9 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. **Verify CI green for the §17 notifications commit** (fix first if red).
-2. **§14 config tabs** (UG ch.19, `Params*` tables — the app_settings
-   foundation + SettingsService exist; build the tabbed admin UI over the
-   real Params* values incl. the new `accounting.*Account`, `smtp.*`,
-   `notifications.*`, `inventory.reweighThreshold` keys — the Notifications
-   page's Mail-settings card is a stopgap subset).
-3. **§18 viewer library** (batch-build set viewers on DataGrid), **§15 i18n**
+1. **Verify CI green for the §14 configuration commit** (§17 notifications
+   f947061 is confirmed green; fix first if red).
+2. **§18 viewer library** (batch-build set viewers on DataGrid), **§15 i18n**
    (`Vocabulary`), **§19 handheld PWA** — in that rough order.
 4. Background chip pending: enforce secured-item PERFORM grant on
    order.complete + release.disposition (+ order.revise now).
@@ -142,6 +143,31 @@ schedule **Sync changes** during parallel running).
    `POST /import/sync` against the real legacy DB (seam-fake tested only);
    disable the PlanTrace import spec (the native plan takes over — setting
    `planning.source` already flips on first recalc).
+
+## State of the world (as of 2026-07-05 later, §14 configuration)
+
+- **§14 Configuration tabs ✅**: typed settings REGISTRY
+  (apps/api/src/settings/settings-registry.ts — only LIVE keys, grouped like
+  the legacy Configuration Update tabs) + `GET /settings/registry` + typed
+  PUT validation (blank/negative REFUSED for number keys — a cleared field
+  must never silently zero the lockout) + `/configuration` tabbed page
+  (admin.config). Live wires: `security.*` → AuthService (lockout count/
+  duration + password min length; blank/negative stored values fall back to
+  defaults, only an explicit 0 disables lockout;
+  `AuthService.assertPasswordPolicy` is the single enforcement point — DTOs
+  carry only the floor 6 — and applies to admin-created initial passwords);
+  `receiving.manfLotRequired` → purchase receiving (legacy ran False, ERP1
+  defaults true; PO detail response carries the policy for the client form;
+  null-supLot lots classify 'raw' via supplierId in genealogy);
+  `batchExecution.yieldTolerancePercent` → complete() warnings[] (advisory,
+  surfaced in the web completion flow). Params* NOT mirrored as tables —
+  live values seeded as defaults; load-bearing conventions (lot-code
+  yyMMdd+3, recipe version .NN) stay deliberately hardcoded (ASSUMPTIONS
+  §14). Workstation/agent/bins/zones/location-groups/storage-rules ⏸️ with
+  row-count evidence; legacy Job table note in OPEN_QUESTIONS.
+- **Environment note**: Windows reserved port 55432 after a reboot
+  (excluded-port ranges) — the itest Postgres recipe moved to **54332**.
+- Suites: 113 unit + 351 integration green.
 
 ## State of the world (as of 2026-07-05, §17 notifications)
 

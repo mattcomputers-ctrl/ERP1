@@ -164,6 +164,20 @@ const DEFAULT_SETTINGS = [
   // adjustment beyond this percentage of the container quantity fires the
   // "Reweigh Outside Threshold" notification.
   { key: 'inventory.reweighThreshold', value: '5', description: 'Percent variance on an inventory adjustment beyond which the Reweigh Outside Threshold notification fires. 0 disables the check.' },
+  // §14 Configuration (legacy Params* live values where a counterpart exists;
+  // full catalog + descriptions in apps/api/src/settings/settings-registry.ts).
+  { key: 'batchExecution.yieldTolerancePercent', value: '5', description: 'Completion yield deviation (vs planned batch size) beyond this percent returns a warning. 0 disables.' },
+  { key: 'receiving.manfLotRequired', value: 'true', description: 'Require a manufacturer lot number on every received lot (the recall key).' },
+  { key: 'security.passwordMinLength', value: '12', description: 'Minimum password length enforced on password change (floor 6).' },
+  { key: 'security.lockoutCount', value: '5', description: 'Consecutive failed logins before temporary lockout. 0 disables.' },
+  { key: 'security.lockoutDurationMinutes', value: '15', description: 'How long a locked account stays locked.' },
+  { key: 'accounting.arAccount', value: 'Accounts Receivable', description: 'External account debited by exported invoices.' },
+  { key: 'accounting.apAccount', value: 'Accounts Payable', description: 'External account credited by exported purchase-receipt bills.' },
+  { key: 'accounting.taxAccount1', value: 'Sales Tax Payable', description: 'Account credited with level-1 tax on exported invoices.' },
+  { key: 'accounting.taxAccount2', value: 'Sales Tax Payable', description: 'Account credited with level-2 tax on exported invoices.' },
+  { key: 'accounting.taxAccount3', value: 'Sales Tax Payable', description: 'Account credited with level-3 tax on exported invoices.' },
+  { key: 'accounting.freightAccount', value: 'Freight Income', description: 'Account credited with freight lines on exported invoices.' },
+  { key: 'accounting.fallbackAccount', value: 'Uncategorized', description: 'Account used (with a warning) when a GL mapping cannot resolve.' },
 ];
 
 async function main() {

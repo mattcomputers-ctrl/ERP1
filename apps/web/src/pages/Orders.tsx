@@ -1500,7 +1500,7 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
 
   const m = useMutation({
     mutationFn: () =>
-      api.post(`/orders/${orderId}/complete`, {
+      api.post<{ warnings?: string[] }>(`/orders/${orderId}/complete`, {
         actualBatchSize: batchSize ? Number(batchSize) : undefined,
         reason: reason || undefined,
         password: password || undefined,
@@ -1508,7 +1508,12 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
         witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
         witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
       }),
-    onSuccess: onDone,
+    onSuccess: (res) => {
+      // Advisory yield warning (batchExecution.yieldTolerancePercent) — the
+      // completion succeeded; make sure the operator sees the deviation.
+      if (res.warnings?.length) window.alert(res.warnings.join('\n'));
+      onDone();
+    },
   });
 
   // Mirror the server's requirements so the button can't be clicked into a 400.

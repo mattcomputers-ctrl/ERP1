@@ -43,6 +43,9 @@ export class UsersService {
       roleId = role.id;
     }
 
+    // The configured minimum applies to admin-set initial passwords too (the
+    // DTO only enforces the static floor).
+    await this.auth.assertPasswordPolicy(dto.initialPassword);
     const passwordHash = await this.auth.hashPassword(dto.initialPassword);
 
     // The user mutation and its audit record commit together (or not at all).

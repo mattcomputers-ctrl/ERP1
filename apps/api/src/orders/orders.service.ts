@@ -1488,6 +1488,28 @@ export class OrdersService {
       witnessNotPermitted: 'That user is not permitted to witness order completion.',
     });
 
+    // Yield check (legacy ParamsBatchExecution.YieldTolerance, live value 5%):
+    // an actual batch size deviating from the PLANNED size (ActualBatchSize
+    // holds the planned size until completion) beyond the tolerance is
+    // surfaced as a warning on the response — advisory, never blocking
+    // (matching how the legacy execution flagged yield).
+    const warnings: string[] = [];
+    const yieldTolerance = await this.settings.getNumber('batchExecution.yieldTolerancePercent', 5);
+    if (
+      yieldTolerance > 0 &&
+      dto.actualBatchSize != null &&
+      order.actualBatchSize != null &&
+      order.actualBatchSize > 0
+    ) {
+      const deviation = (Math.abs(dto.actualBatchSize - order.actualBatchSize) / order.actualBatchSize) * 100;
+      if (deviation > yieldTolerance) {
+        warnings.push(
+          `Yield ${dto.actualBatchSize} deviates ${Math.round(deviation * 10) / 10}% from the planned ` +
+            `${order.actualBatchSize} (tolerance ${yieldTolerance}%).`,
+        );
+      }
+    }
+
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
       // Re-assert Released under the row lock: a completion that stalled in the
@@ -1584,7 +1606,7 @@ export class OrdersService {
 
       await this.notifications.emitOrderEvent(tx, 'Mark Manufacturing Order Complete', id, actor);
 
-      return { id, status: u.status, signed: req.requireSignature, witness: witness?.label ?? null };
+      return { id, status: u.status, signed: req.requireSignature, witness: witness?.label ?? null, warnings };
     });
   }
 

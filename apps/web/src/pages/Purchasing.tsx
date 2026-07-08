@@ -289,6 +289,8 @@ interface PurchaseOrderDetail {
   supplier: { name: string | null } | null;
   lines: DetailLine[];
   receipts: Receipt[];
+  /** Server receiving policy (receiving.manfLotRequired) — the form mirrors it. */
+  manfLotRequired?: boolean;
 }
 
 const num3 = (n: number | null) => (n == null ? '' : Number(n.toFixed(3)).toString());
@@ -313,7 +315,9 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
 
   const activeEntries = (data?.lines ?? []).flatMap((l) => entriesFor(l).filter((e) => Number(e.qty) > 0));
   const anyToReceive = activeEntries.length > 0;
-  const missingManfLot = activeEntries.some((e) => !e.manfLot.trim());
+  // Mirror the server policy (default required when the detail hasn't loaded).
+  const manfLotRequired = data?.manfLotRequired ?? true;
+  const missingManfLot = manfLotRequired && activeEntries.some((e) => !e.manfLot.trim());
   const canSubmit = anyToReceive && !missingManfLot;
 
   const m = useMutation({
@@ -327,7 +331,7 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
               const c = Math.floor(Number(e.containers));
               return {
                 qty: Number(e.qty),
-                manufacturerLot: e.manfLot.trim(),
+                manufacturerLot: e.manfLot.trim() || undefined,
                 numberOfContainers: Number.isFinite(c) && c >= 1 ? c : undefined,
               };
             }),
@@ -397,7 +401,7 @@ function ReceivingPanel({ poId, data, loading, onClose }: { poId: number; data?:
                       <thead className="text-left text-xs text-slate-400">
                         <tr>
                           <th className="py-0.5 pr-2 font-medium">Qty {l.unit ? `(${l.unit})` : ''}</th>
-                          <th className="py-0.5 pr-2 font-medium">Manufacturer lot *</th>
+                          <th className="py-0.5 pr-2 font-medium">Manufacturer lot{manfLotRequired ? ' *' : ''}</th>
                           <th className="py-0.5 pr-2 font-medium">Containers</th>
                           <th />
                         </tr>

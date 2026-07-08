@@ -4,6 +4,10 @@ import { PrismaService } from '../prisma/prisma.service';
 
 // OWASP-recommended Argon2id parameters.
 const ARGON_OPTS = { memoryCost: 19456, timeCost: 2, parallelism: 1 };
+// Policy DEFAULTS — the operator can tune these via the security.* settings
+// (§14 Configuration / legacy ParamsUser); the floors below keep a bad value
+// from disabling the control entirely (except lockoutCount 0 = explicitly
+// disabled, matching the legacy semantics of an unset LockoutCount).
 const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
 const MIN_PASSWORD_LENGTH = 12;
@@ -20,6 +24,32 @@ function getDummyHash(): Promise<string> {
 @Injectable()
 export class AuthService {
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Operator-tunable auth policy (security.* app settings; direct reads to
+   * keep AuthService free of a SettingsModule dependency — Settings' own
+   * controller guards import from THIS module).
+   */
+  private async securityPolicy() {
+    const rows = await this.prisma.appSetting.findMany({
+      where: { key: { in: ['security.passwordMinLength', 'security.lockoutCount', 'security.lockoutDurationMinutes'] } },
+    });
+    // Defense in depth vs the write path: a blank, non-numeric, or negative
+    // stored value is a BAD value and falls back to the default — it must
+    // never read as the 0 that means "lockout explicitly disabled". Only a
+    // literal non-negative number is honored.
+    const num = (key: string, fallback: number) => {
+      const raw = rows.find((r) => r.key === key)?.value?.trim();
+      if (!raw) return fallback;
+      const v = Number(raw);
+      return Number.isFinite(v) && v >= 0 ? Math.trunc(v) : fallback;
+    };
+    return {
+      minPasswordLength: Math.max(6, num('security.passwordMinLength', MIN_PASSWORD_LENGTH)),
+      lockoutCount: num('security.lockoutCount', MAX_FAILED), // an explicit 0 disables lockout
+      lockMinutes: Math.max(1, num('security.lockoutDurationMinutes', LOCK_MINUTES)),
+    };
+  }
 
   async validateUser(email: string, password: string, updateLastLogin = true) {
     const user = await this.prisma.user.findUnique({ where: { email } });
@@ -68,13 +98,16 @@ export class AuthService {
 
     const ok = await verify(user.passwordHash as string, password).catch(() => false);
     if (!ok) {
+      const policy = await this.securityPolicy();
       const failed = priorFailed + 1;
       await this.prisma.user.update({
         where: { id: user.id },
         data: {
           failedLoginCount: failed,
           lockedUntil:
-            failed >= MAX_FAILED ? new Date(Date.now() + LOCK_MINUTES * 60_000) : null,
+            policy.lockoutCount > 0 && failed >= policy.lockoutCount
+              ? new Date(Date.now() + policy.lockMinutes * 60_000)
+              : null,
         },
       });
       throw new UnauthorizedException('Invalid credentials');
@@ -94,14 +127,24 @@ export class AuthService {
     return hash(plain, ARGON_OPTS);
   }
 
+  /**
+   * Enforce the operator-configured password policy. Shared by password
+   * change AND admin user creation — every path that accepts a new password
+   * must call this (DTOs only carry the static floor of 6).
+   */
+  async assertPasswordPolicy(password: string): Promise<void> {
+    const { minPasswordLength } = await this.securityPolicy();
+    if (password.length < minPasswordLength) {
+      throw new BadRequestException(`Password must be at least ${minPasswordLength} characters`);
+    }
+  }
+
   async changePassword(userId: string, current: string, next: string): Promise<void> {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user || !user.passwordHash) throw new UnauthorizedException();
     const ok = await verify(user.passwordHash, current).catch(() => false);
     if (!ok) throw new BadRequestException('Current password is incorrect');
-    if (next.length < MIN_PASSWORD_LENGTH) {
-      throw new BadRequestException(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
-    }
+    await this.assertPasswordPolicy(next);
     const passwordHash = await this.hashPassword(next);
     await this.prisma.user.update({
       where: { id: userId },

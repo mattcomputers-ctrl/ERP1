@@ -11,8 +11,10 @@ export class CreateUserDto {
   @IsString()
   username?: string;
 
+  // Floor only — the operator-configured minimum (security.passwordMinLength)
+  // is enforced in the service via AuthService.assertPasswordPolicy.
   @IsString()
-  @MinLength(12)
+  @MinLength(6)
   initialPassword!: string;
 
   @IsOptional()

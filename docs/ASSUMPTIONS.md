@@ -953,3 +953,59 @@ Trans CI 22,083 still minted daily through 2026-07-02).
    dispatcher surfaced one more real bug the re-run caught: the claim loop
    re-claimed a just-failed row and burned all 5 attempts in one tick (now
    excluded per run — retries wait for the next poll).
+
+## Configuration tabs (§14 / UG ch.19, built 2026-07-05)
+
+1. **Params* are not mirrored as tables — configuration is app_settings.**
+   Legacy stores plant config in ten `Params*` tables (per-Owner rows with
+   NULL-inherits-parent semantics; live: Owner 1 sets nearly everything, the
+   two site rows override only a skin color and default locations). ERP1
+   keeps its established key/value `app_settings` + a typed REGISTRY
+   (settings-registry.ts) grouped to mirror the legacy tab layout. Only LIVE
+   keys are registered — every entry is read by some code path, so the
+   Configuration page never shows dead knobs. Live legacy values were
+   surveyed (2026-07-05) and became the seeded defaults where a counterpart
+   exists.
+2. **Load-bearing legacy values stay hardcoded, deliberately**: lot-code
+   format yyMMdd + 3 digits (ParamsInventory.LotCodePrefix/Length), recipe
+   version separator '.' + length 2 + SingleActiveRecipe
+   (ParamsRecipeManager), container prefixes. These are verified plant
+   conventions the parallel-running import depends on; a runtime knob would
+   invite corruption. If a second install ever needs different values,
+   promote them then.
+3. **New live wires** (each returns real behavior, tested):
+   security.passwordMinLength / lockoutCount / lockoutDurationMinutes drive
+   AuthService (lockoutCount 0 = disabled, matching legacy unset; floors keep
+   bad values from disabling controls); receiving.manfLotRequired gates the
+   manufacturer-lot requirement in purchase receiving (legacy ran False —
+   ERP1 defaults TRUE because the manufacturer lot is the recall key; lots
+   received without one are recall-findable by supplier only);
+   batchExecution.yieldTolerancePercent returns a completion warning when
+   actual yield deviates from planned beyond the tolerance (legacy live 5%) —
+   advisory, never blocking, like the legacy execution flag.
+4. **AuthService reads security.* via Prisma directly**, not SettingsService —
+   SettingsModule's controller imports auth guards, so the reverse dependency
+   would be a module cycle.
+5. ParamsHost (QuickBooks COM bridge config) and ParamsPrint (label XML) map
+   to nothing in ERP1 (§13 replaced the bridge; labels not built) — not
+   mirrored, values recorded in the discovery notes. ParamsCMS oddities
+   (skin styles, ClickOnce paths, Softek license) are desktop-client
+   artifacts.
+6. **Review round (2026-07-05, 4 lenses → 2 adversarial verifiers each,
+   both-must-confirm):** 13 confirmed findings (6 unique defects), all
+   fixed — the big one: number-typed setting writes accepted ''/whitespace/
+   negatives (Number('') === 0), so CLEARING the lockout field in the new
+   Configuration page would have silently disabled the brute-force lockout;
+   fixed at BOTH layers (PUT rejects blank/negative for number keys;
+   AuthService.securityPolicy treats blank/negative as unset → default,
+   never as the explicit-0 disable sentinel). Also: ChangePasswordDto/
+   CreateUserDto @MinLength(12) pre-empted a configured minimum below 12
+   (DTOs now carry only the floor 6; AuthService.assertPasswordPolicy is
+   the single enforcement point, applied to admin-created initial passwords
+   too); the web receiving form hard-required a manufacturer lot regardless
+   of policy (the PO detail response now carries manfLotRequired — the
+   receiving user can't read admin settings); genealogy classified
+   null-supLot received lots as 'other' instead of 'raw' (supplierId is now
+   an equal raw marker); the Configuration save loop reported total failure
+   on partial success (per-key saves — successes leave the edit buffer,
+   failures stay with their message).

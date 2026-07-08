@@ -282,10 +282,11 @@ export class GenealogyService {
         lot: l.lot,
         itemCode: l.itemId != null ? (itemById.get(l.itemId)?.itemCode ?? null) : null,
         itemDescription: l.itemId != null ? (itemById.get(l.itemId)?.description ?? null) : null,
-        // A raw-material lot is the one carrying a supplier lot (SupLot is set by
-        // receiving + lot-tracking enablement); a lot with a producing order is a
+        // A raw-material lot carries a supplier lot OR a supplier (a lot
+        // received without a manufacturer lot — receiving.manfLotRequired off
+        // — still has its Supplier stamped); a lot with a producing order is a
         // produced (batch/packout) lot; otherwise unknown.
-        kind: l.supLot ? 'raw' : ordr?.context ? 'produced' : 'other',
+        kind: l.supLot || l.supplierId != null ? 'raw' : ordr?.context ? 'produced' : 'other',
         manufacturerLot: l.supLot ?? null,
         unitCost: l.unitCost != null ? Number(l.unitCost) : null,
         producedByOrderId: ordr?.id ?? null,

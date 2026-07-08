@@ -4,7 +4,6 @@ import {
   ArrayMinSize,
   IsArray,
   IsInt,
-  IsNotEmpty,
   IsNumber,
   IsOptional,
   IsPositive,
@@ -16,9 +15,10 @@ import {
 } from 'class-validator';
 
 // One received lot of an item: a quantity tagged with the supplier's
-// (manufacturer's) lot number, which is required so we can run a recall by
-// manufacturer lot. Each lot is assigned its own sequential system lot number
-// at receiving.
+// (manufacturer's) lot number — the recall key. Whether the lot number is
+// REQUIRED is operator policy (`receiving.manfLotRequired`, default true —
+// legacy ParamsPurchaseReceipt.ManfLotRequired; this plant ran it off), so
+// the DTO allows omission and the service enforces the setting.
 export class ReceiveLotDto {
   /** Quantity received in this lot (in the line's unit). Over-receipt is allowed. */
   @IsNumber()
@@ -26,11 +26,12 @@ export class ReceiveLotDto {
   @Max(1_000_000_000)
   qty!: number;
 
-  /** Manufacturer's / supplier's lot number — REQUIRED (recall key). */
+  /** Manufacturer's / supplier's lot number (recall key — required unless the
+   *  receiving.manfLotRequired setting is off). */
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   @MaxLength(50)
-  manufacturerLot!: string;
+  manufacturerLot?: string;
 
   /** Number of physical containers in this lot (defaults to 1). */
   @IsOptional()

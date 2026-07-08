@@ -63,3 +63,13 @@ would UPSERT that legacy id over the ERP1-native item (or vice versa). Low
 likelihood (item creation is rare there) but the same decision shape as the
 native-lot marker: either move items.create to the native-id allocation
 pattern or accept and watch during parallel running.
+
+## Legacy Job 'Export COGS to QuickBooks' still enabled (noted 2026-07-05)
+
+The legacy `Job` table (3 rows) shows 'Export COGS to QuickBooks' enabled and
+"Succeeded" daily (last 2026-07-02) even though the QB bridge produced only 7
+transactions in 2018–19 (§13 discovery) — i.e. it runs as a no-op against the
+QBW file share. 'Export GL changes' is disabled; 'Notify Waybill Documents'
+is enabled but has never run to an outcome. No ERP1 action needed (the §13
+IIF/CSV export replaces this), but before cutover confirm the plant disables
+these SQL Agent-driven jobs so nothing keeps touching the QuickBooks file.

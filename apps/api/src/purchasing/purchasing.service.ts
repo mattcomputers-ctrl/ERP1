@@ -310,6 +310,9 @@ export class PurchasingService {
       lines: docLines,
       totals: { subtotal, total: subtotal },
       receipts,
+      // Receiving policy for the client form (purchasing users cannot read the
+      // admin settings endpoint) — mirrors what receive() will enforce.
+      manfLotRequired: (await this.settings.get('receiving.manfLotRequired', 'true')) === 'true',
     };
   }
 
@@ -913,6 +916,20 @@ export class PurchasingService {
       return price;
     };
 
+    // Operator policy: is the manufacturer lot (the recall key) mandatory?
+    // (receiving.manfLotRequired — default true; legacy ran it off.)
+    const manfLotRequired = (await this.settings.get('receiving.manfLotRequired', 'true')) === 'true';
+    if (manfLotRequired) {
+      for (const dl of dto.lines) {
+        if (dl.lots.some((l) => !l.manufacturerLot?.trim())) {
+          throw new BadRequestException(
+            `Line ${dl.ordDetailId}: a manufacturer lot number is required on every received lot ` +
+              `(receiving.manfLotRequired is on).`,
+          );
+        }
+      }
+    }
+
     // Supplier display name for the receipt notification (static master data —
     // safe to resolve before the transaction).
     const supplier = po.entityId ? (await this.party.resolve([po.entityId])).get(po.entityId) : undefined;
@@ -931,7 +948,7 @@ export class PurchasingService {
       // On-hand for received stock lands in the configured receiving location.
       const receivingLocationId = await this.valuation.resolveLocationId(tx, RECEIVING_LOCATION_SETTING);
 
-      const created: { lot: string; manufacturerLot: string; ordDetailId: number; qty: number; changeSetId: number }[] = [];
+      const created: { lot: string; manufacturerLot: string | null; ordDetailId: number; qty: number; changeSetId: number }[] = [];
       const incByLine = new Map<number, number>();
       for (const dl of dto.lines) {
         const line = lineById.get(dl.ordDetailId)!;
@@ -939,15 +956,18 @@ export class PurchasingService {
           const lotNumber = String((lotSeq += 1));
           const newSubId = (subId += 1);
           const newCsId = (csId += 1);
-          // The lot of record: tagged with the supplier + manufacturer lot for recall.
+          const mfrLot = lot.manufacturerLot?.trim() || null;
+          // The lot of record: tagged with the supplier + manufacturer lot for
+          // recall (null when the receiving.manfLotRequired policy is off and
+          // none was given — such lots are recall-findable by supplier only).
           await tx.lot.create({
             data: {
               lot: lotNumber,
               context: 'LOT',
               itemId: line.itemId,
               supplierId: po.entityId,
-              supLot: lot.manufacturerLot,
-              manfLot: lot.manufacturerLot,
+              supLot: mfrLot,
+              manfLot: mfrLot,
               receivedDate: at,
               unitCost: unitCostOf(dl.ordDetailId, line.price),
             },
@@ -988,7 +1008,7 @@ export class PurchasingService {
             },
           });
           incByLine.set(dl.ordDetailId, (incByLine.get(dl.ordDetailId) ?? 0) + lot.qty);
-          created.push({ lot: lotNumber, manufacturerLot: lot.manufacturerLot, ordDetailId: dl.ordDetailId, qty: lot.qty, changeSetId: newCsId });
+          created.push({ lot: lotNumber, manufacturerLot: mfrLot, ordDetailId: dl.ordDetailId, qty: lot.qty, changeSetId: newCsId });
         }
       }
 
@@ -1014,7 +1034,7 @@ export class PurchasingService {
             recordId: c.lot,
             fieldName: 'received',
             oldValue: null,
-            newValue: `OrdDetail ${c.ordDetailId}: ${c.qty} (mfr lot ${c.manufacturerLot})`,
+            newValue: `OrdDetail ${c.ordDetailId}: ${c.qty}${c.manufacturerLot ? ` (mfr lot ${c.manufacturerLot})` : ''}`,
           })),
         },
         tx,
