@@ -129,8 +129,21 @@ schedule **Sync changes** during parallel running).
 
 1. **Verify CI green for the §14 configuration commit** (§17 notifications
    f947061 is confirmed green; fix first if red).
-2. **§18 viewer library** (batch-build set viewers on DataGrid), **§15 i18n**
-   (`Vocabulary`), **§19 handheld PWA** — in that rough order.
+2. **§18 viewer library**. Discovery done (2026-07-05): legacy set viewers
+   have NO config tables — they're client-defined grids over SQL views, so
+   ERP1 should build a DECLARATIVE viewer platform (per-viewer config:
+   columns/query/filters + one generic API endpoint + one generic grid page
+   with CSV export) and implement the plant's ACTUAL working set, ranked
+   from the legacy Log (update-side counts, reads don't log — relative
+   signal only): Shipment Detail (396), Open Shipping Order Detail (290),
+   Open MF Order Detail (153), **Inventory Movement (153 — InvMovement is
+   NOT yet mirrored, schema first)**, Purchase History (61), Batching Order
+   (44), Where Used (21 — recipe ingredient usage), Inventory (21 — browser
+   exists, add at-date/history), Inventory Cost (15), Complete MF Orders
+   (14). Many others already have ERP1 equivalents (orders/inventory/
+   planning/invoices browsers) — map rather than duplicate; the long tail
+   (~40 never-used viewers) ⏸️ with the usage evidence.
+3. **§15 i18n** (`Vocabulary` table), **§19 handheld PWA** — in that order.
 4. Background chip pending: enforce secured-item PERFORM grant on
    order.complete + release.disposition (+ order.revise now).
 5. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
