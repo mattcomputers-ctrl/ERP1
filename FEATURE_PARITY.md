@@ -195,7 +195,7 @@ Legacy set viewers have NO config tables — they're client-defined grids over v
 ## 19. Mobile / handheld (UG "Handheld Functions" — 49 programs)
 | Feature | Status | Notes |
 |---|---|---|
-| Barcode-driven warehouse ops (adjust, consume, move, container info, dispose/reverse, verify location, remeasure, packaging reservation, change area) | ⬜ | Responsive PWA |
+| Handheld/barcode warehouse ops (all 49 `Handheld Functions` folder programs: consume, move container, container info, verify location, reweigh, packout express/weigh, transfer cans, sanitization, label-printer scans, …) | ⏸️ | **Closed by evidence 2026-07-08**: every one of the 49 programs has ZERO uses in 15 years of retained Log; no Log.Program ever contains "Palm" (the handheld UI's window titles); `Log.Application` only ever 'Chemical Management System'/'None' (no handheld client); every Log workstation is a named PC/laptop; no handheld-side tables exist. This plant ran all warehouse ops (receipts 9,134 / inventory counts 3,129 / waybills 70,738) from desktops — ERP1's web UI is reachable from any mobile browser, and the §18/§5 inventory adjust/move/receipt APIs already back those flows. Barcode-first screens would be a NEW feature, not parity (see ASSUMPTIONS §19) |
 
 ---
 

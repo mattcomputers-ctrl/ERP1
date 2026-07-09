@@ -132,20 +132,13 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. **Verify CI green for the §18 docs follow-up commit** (§18 8fdcd77 is
-   confirmed green; fix first if red).
-2. **§19 handheld PWA** (UG "Handheld Functions", 49 programs — scope to the
-   plant's ACTUAL usage first via the legacy Log, same method as §18). The
-   movement/inventory viewers + inventory adjust/move APIs now exist to back
-   the handheld flows. **§15 i18n is DONE-by-evidence** (2026-07-08: all
-   4,305 Vocabulary rows are en-US 1033 — the desktop client's own string
-   cache; no Entity.Language set; AltDescription already mirrored/shown) —
-   FEATURE_PARITY §15 rows closed ⏸️/✅.
-3. **Native InvMovement emission** (OPEN_QUESTIONS 2026-07-08): ERP1's
+1. **Native InvMovement emission** (OPEN_QUESTIONS 2026-07-08): ERP1's
    inventory writers don't emit movement rows, so the §18 movement/at-date
    viewers stop gaining data at cutover. Retrofit a movement-recorder at the
    depleter/acquirer seam (native ids ≥ 1e9) — its own increment, touches
-   locked concurrency paths.
+   locked concurrency paths. **§19 handheld is CLOSED-by-evidence**
+   (2026-07-08: all 49 'Handheld Functions' programs have zero Log uses in
+   15 years; no Palm client ever logged in — ASSUMPTIONS §19).
 4. Background chip pending: enforce secured-item PERFORM grant on
    order.complete + release.disposition (+ order.revise now).
 5. OPEN_QUESTIONS: native-Lot marker column if parallel running shows

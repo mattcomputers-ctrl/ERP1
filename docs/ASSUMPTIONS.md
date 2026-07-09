@@ -1122,3 +1122,33 @@ no Vocabulary mirror, no translation UI. `Item.AltDescription` (7,379 rows)
 and per-line Description overrides — the "translatable user data" — are
 already mirrored and displayed. If a second language is ever needed, i18n
 starts from the web app's own string catalog, not from Vocabulary.
+
+## Handheld functions (§19, closed by evidence 2026-07-08)
+
+The legacy `Program` catalog has a `Folder = 'Handheld Functions'` group of
+exactly 49 programs (`actPlm*` / `GeneralPlm*` / `Plm*` — Palm-era barcode
+flows: consume, move container, container info, verify location, reweigh,
+packout express/with-weighing, transfer cans, sanitization, ship container,
+label-printer scans). Four independent evidence lines say this plant NEVER
+used any of them:
+
+1. All 49 programs: **zero** `Log` rows in the 15 years of retained history
+   (exact `Program` name match — the same join that ranks fine for
+   `PrintContainerLabel` 25,434 / `QuickBooksImportVendors` 454).
+2. Handheld window titles all carry a "(Palm)" suffix; **no** `Log.Program`
+   value has ever contained "Palm" (title-style logging is the norm for
+   desktop programs, so this closes the naming-mismatch loophole).
+3. `Log.Application` only ever holds 'Chemical Management System' / 'None' —
+   no handheld client application ever logged in.
+4. Every `Log.Workstation` is a named desktop/laptop (CS-PC, ROD-LAPTOP, …);
+   no scanner/handheld device names. The UG's only handheld content is a
+   Remote-Desktop display-glitch note (§24.4.1) — legacy handhelds were RDP
+   thin clients into the same desktop app, so their usage WOULD have logged.
+
+The plant runs receiving (9,134 Purchase Receipt uses), inventory counts
+(3,129), and shipping (70,738 Waybill) from desktops. ERP1's web UI already
+loads in any mobile browser and the inventory adjust/move/receipt APIs +
+§18 viewers back every warehouse flow, so §19 ships ⏸️: no dedicated PWA,
+no barcode screens. If barcode-first operation is ever wanted, it is a NEW
+feature over the existing APIs (camera/wedge scanning into the existing
+lot/location lookups), not legacy parity.
