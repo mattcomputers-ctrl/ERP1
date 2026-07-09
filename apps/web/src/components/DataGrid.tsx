@@ -23,6 +23,9 @@ interface DataGridProps<T> {
   onSearch?: (q: string) => void;
   rowKey: (row: T) => string | number;
   exportName?: string;
+  /** Replaces the built-in client CSV (current page only) with a custom
+   * export — e.g. the viewers' server-side full-set download. */
+  onExport?: () => void;
   toolbar?: React.ReactNode;
 }
 
@@ -33,7 +36,7 @@ interface DataGridProps<T> {
 export function DataGrid<T>(props: DataGridProps<T>) {
   const {
     columns, rows, total, page, pageSize, loading, sort,
-    onSortChange, onPageChange, q, onSearch, rowKey, exportName, toolbar,
+    onSortChange, onPageChange, q, onSearch, rowKey, exportName, onExport, toolbar,
   } = props;
   const [search, setSearch] = useState(q ?? '');
   const pages = Math.max(1, Math.ceil(total / pageSize));
@@ -74,7 +77,7 @@ export function DataGrid<T>(props: DataGridProps<T>) {
         </div>
         <div className="flex items-center gap-3 text-sm text-slate-500">
           <span>{total.toLocaleString()} rows</span>
-          <button onClick={exportCsv} className="rounded-md border border-slate-300 px-2 py-1 hover:bg-slate-50">
+          <button onClick={onExport ?? exportCsv} className="rounded-md border border-slate-300 px-2 py-1 hover:bg-slate-50">
             Export CSV
           </button>
         </div>

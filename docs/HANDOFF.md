@@ -101,7 +101,12 @@ end with a fresh handoff prompt.
   canonicalized to physical casing; tables absent from the change feed live
   in NEVER_LOGGED_ALWAYS/PROXIED (wholesale re-copy); `replaceStale` specs
   (PlanTrace) additionally prune vanished legacy-range rows — but an EMPTY
-  snapshot against a non-empty mirror skips the prune (mid-rewrite guard).
+  snapshot against a non-empty mirror skips the prune (mid-rewrite guard);
+  `appendOnlySync` specs (InvMovement family, insert-only + never logged)
+  top up past a PERSISTED per-table anchor (`import.appendWatermark.<T>`)
+  advanced ONLY on zero-reject batches — anchoring on the mirror's max id
+  loses rejected lower-id rows (2026-07-08 review); the top-up runs even on
+  quiet-log syncs.
 - **Qualification and pricing must use the same row**: when a rule filters
   candidates (e.g. manufacturer-aware supplier pricing), the row that
   QUALIFIES the candidate must be the row that gets USED — a second,
@@ -127,23 +132,15 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. **Verify CI green for the §14 configuration commit** (§17 notifications
-   f947061 is confirmed green; fix first if red).
-2. **§18 viewer library**. Discovery done (2026-07-05): legacy set viewers
-   have NO config tables — they're client-defined grids over SQL views, so
-   ERP1 should build a DECLARATIVE viewer platform (per-viewer config:
-   columns/query/filters + one generic API endpoint + one generic grid page
-   with CSV export) and implement the plant's ACTUAL working set, ranked
-   from the legacy Log (update-side counts, reads don't log — relative
-   signal only): Shipment Detail (396), Open Shipping Order Detail (290),
-   Open MF Order Detail (153), **Inventory Movement (153 — InvMovement is
-   NOT yet mirrored, schema first)**, Purchase History (61), Batching Order
-   (44), Where Used (21 — recipe ingredient usage), Inventory (21 — browser
-   exists, add at-date/history), Inventory Cost (15), Complete MF Orders
-   (14). Many others already have ERP1 equivalents (orders/inventory/
-   planning/invoices browsers) — map rather than duplicate; the long tail
-   (~40 never-used viewers) ⏸️ with the usage evidence.
-3. **§15 i18n** (`Vocabulary` table), **§19 handheld PWA** — in that order.
+1. **Verify CI green for the §18 viewer-library commit** (fix first if red).
+2. **§15 i18n** (`Vocabulary` table), then **§19 handheld PWA** — in that
+   order. For §19, the movement/inventory viewers + inventory adjust/move
+   APIs now exist to back the handheld flows.
+3. **Native InvMovement emission** (OPEN_QUESTIONS 2026-07-08): ERP1's
+   inventory writers don't emit movement rows, so the §18 movement/at-date
+   viewers stop gaining data at cutover. Retrofit a movement-recorder at the
+   depleter/acquirer seam (native ids ≥ 1e9) — its own increment, touches
+   locked concurrency paths.
 4. Background chip pending: enforce secured-item PERFORM grant on
    order.complete + release.disposition (+ order.revise now).
 5. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
@@ -153,9 +150,41 @@ schedule **Sync changes** during parallel running).
    items.create uses plain autoincrement, not the native-id range (new,
    2026-07-05).
 6. Before cutover: one real install pass on the actual Proxmox VM; a live
-   `POST /import/sync` against the real legacy DB (seam-fake tested only);
-   disable the PlanTrace import spec (the native plan takes over — setting
+   `POST /import/sync` against the real legacy DB (seam-fake tested only —
+   NOTE: the first sync after upgrading now also pulls the full 609K+972K
+   InvMovement family if the full import predates the mirror); disable the
+   PlanTrace import spec (the native plan takes over — setting
    `planning.source` already flips on first recalc).
+
+## State of the world (as of 2026-07-08, §18 viewer library)
+
+- **§18 Viewer library ✅**: legacy set viewers have no config tables (client
+  grids over vendor SQL views), so ERP1 ships a DECLARATIVE platform —
+  per-viewer defs (`apps/api/src/viewers/viewer-registry.ts`: SQL fragment
+  constants + typed columns + param builders; values bound, sort via column
+  whitelist) behind ONE generic endpoint (`GET /viewers/:id/rows`, full-set
+  CSV `GET /viewers/:id/export` with formula-injection guard incl.
+  e-notation) and ONE generic web grid (`/viewers/:id`, remounts per id).
+  Program-per-viewer (`viewers.*`) checked IN-SERVICE (dynamic :id — the
+  http-layer 403 invariant excludes these four routes via
+  DYNAMIC_PROGRAM_ROUTES; viewers.http.spec.ts pins the behavior instead).
+  Nine viewers = the plant's usage-ranked working set (Shipment Detail 396,
+  Open Shipping Order Detail 290, Inventory Movement 153, Open MF Order
+  Detail 153, Purchase History 61, Batching Order 44, Where Used 21,
+  Inventory At Date, Complete MF Orders 14); ~35 never-used viewers ⏸️ with
+  Log evidence; Inventory Cost ⏸️ (GetInventoryCosts returns ZERO rows
+  install-wide, verified). Encrypted vendor functions reconstructed +
+  validated LIVE: at-date = Σ non-B movement legs < asOf+1d (exact);
+  order actual cost = Σ MK/MKCA/MKB/MKBCA leg values (12/12 exact — bulk
+  orders post cost as CA/MKBCA); uncommitted = balance − committed
+  (committed = QtyCommitted + positive commit edges). `InvMovement` +
+  `InvMovementDtl` mirrored lean (dead columns dropped with live evidence;
+  `Ordr.EarliestStartDate` + Salesman columns added after review caught the
+  over-trim). Sync = append-only top-up (see import invariants). Review
+  round: 6 lenses → 12/13 confirmed by dual adversarial verifiers, all
+  fixed (details ASSUMPTIONS §18.11 — the major: persisted append
+  watermark).
+- Suites: 113 unit + 372 integration green.
 
 ## State of the world (as of 2026-07-05 later, §14 configuration)
 

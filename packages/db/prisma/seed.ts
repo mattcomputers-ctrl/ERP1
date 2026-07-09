@@ -70,6 +70,16 @@ const BASELINE_PROGRAMS = [
   { key: 'accounting.export', name: 'Accounting Export', folder: 'Master Tables/Accounting' },
   { key: 'sales.invoice', name: 'Generate Invoice', folder: 'Transactions/Sales' },
   { key: 'notifications.config', name: 'Notification Update', folder: 'Administration' },
+  // §18 set viewers — one program per viewer, mirroring legacy security.
+  { key: 'viewers.shipmentDetail', name: 'Shipment Detail Viewer', folder: 'Viewers' },
+  { key: 'viewers.openShippingOrderDetail', name: 'Open Shipping Order Detail Viewer', folder: 'Viewers' },
+  { key: 'viewers.openMfOrderDetail', name: 'Open MF Order Detail Viewer', folder: 'Viewers' },
+  { key: 'viewers.inventoryMovement', name: 'Inventory Movement Viewer', folder: 'Viewers' },
+  { key: 'viewers.purchaseHistory', name: 'Purchase History Viewer', folder: 'Viewers' },
+  { key: 'viewers.batchingOrder', name: 'Batching Order Viewer', folder: 'Viewers' },
+  { key: 'viewers.whereUsed', name: 'Where Used Viewer', folder: 'Viewers' },
+  { key: 'viewers.inventoryAtDate', name: 'Inventory At Date Viewer', folder: 'Viewers' },
+  { key: 'viewers.completeMfOrders', name: 'Complete MF Orders Viewer', folder: 'Viewers' },
 ];
 
 // Secured items = granular actions with a response level (reason / signature /

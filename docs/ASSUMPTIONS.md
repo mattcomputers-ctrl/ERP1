@@ -1009,3 +1009,104 @@ Trans CI 22,083 still minted daily through 2026-07-02).
    an equal raw marker); the Configuration save loop reported total failure
    on partial success (per-key saves — successes leave the edit buffer,
    failures stay with their message).
+
+## Viewer library — declarative set-viewer platform (§18 / UG ch.23, built 2026-07-08)
+
+1. **No config tables exist in legacy** — set viewers are client-defined grids
+   over vendor SQL views. ERP1's parity shape is a DECLARATIVE registry
+   (`apps/api/src/viewers/viewer-registry.ts`): per-viewer columns/params/query
+   fragments served by one generic endpoint + one generic web grid with
+   full-set CSV export. SQL fragments are code constants (Prisma.raw); only
+   values are bound; sort keys resolve through the column whitelist.
+2. **Scope = usage-ranked working set** from the legacy `Log` (update-side
+   counts, reads don't log — relative signal only): Shipment Detail 396,
+   Open Shipping Order Detail 290, Inventory Movement 153, Open MF Order
+   Detail 153, Purchase History 61, Batching Order 44, Where Used 21,
+   Inventory 21(+Global 17, at-date), Inventory Cost 15, Complete MF Orders
+   14. Everything at ≤20 uses that maps onto an existing ERP1 browser is
+   mapped, the ~35 never-used viewers are ⏸️ with this evidence (query:
+   `SELECT Program, COUNT(*) FROM Log WHERE Program LIKE '%Viewer%' GROUP BY
+   Program`).
+3. **InvMovement/InvMovementDtl mirrored lean** (609K + 972K rows). Columns
+   dropped with live 0-use evidence: header Scale/GLCode/Comment/QtyEntered/
+   TareEntered/GrossQtyEntered, detail Division/StandardValue(0 everywhere)/
+   WeighAndAdd; detail ReplacementValue and InventoryCost (532K refs) dropped
+   because nothing mirrored consumes them — the InventoryCost table stays
+   unmirrored (its only consumers are the dead cost viewer and a Receipts
+   view column; Receipts Set Viewer has zero usage).
+4. **Sync strategy: append-only top-up.** LogResult NEVER names
+   InvMovement/InvMovementDtl (verified live; only ChangeSet + InventoryCost
+   from that family are logged). Movement history is insert-only, so sync
+   pulls rows past the mirror's max legacy-range id with a 1,000-id re-walk
+   lag (allocation order ≠ commit order), same idempotent-upsert guarantees.
+   A Comment edit on an old header would be missed — accepted (column not
+   mirrored; movements are immutable history in practice).
+5. **Encrypted vendor functions reconstructed and validated live**:
+   - `GetInventoryAtDate(date)` = Σ Qty/Value of NON-WIP legs (dtl context
+     MK/MKCA/US/USCA/ADJ/SCRAP; B-suffixed legs are commingle WIP) over
+     movements with ChangeDate < date+1d — reproduces Qty AND ActualValue
+     exactly (validated on CTA1184: 6240.1376003872 / 8562.86).
+     StandardValue is 0 on every row in this install; ReplacementValue needs
+     the vendor's current-cost lookup (qty × replacement cost ≠ any movement
+     sum) — both columns dropped.
+   - `GetQtyMade` costing = Σ Value of MK/MKCA/MKB/MKBCA legs of the order's
+     ChangeSets — validated 12/12 EXACT against CompleteManufacturingOrders.
+     ActualCost (bulk orders post their cost as a CA/MKBCA leg; packouts as
+     PCKAGE MK/MKCA legs).
+   - `GetUncommittedQty` = (QtyReqd − QtyUsed) − committed, floored at 0,
+     where committed = QtyCommitted + positive OrdDetailCommit edges (the
+     formula the open-detail views inline for [Committed]).
+   - `GetInventoryCosts` returns ZERO rows for every item in this install
+     (tried null and real item ids incl. items with stock) — the Inventory
+     Cost Set Viewer renders empty in legacy; ⏸️ with at-date value coverage.
+6. **Column trims verified against live data** (all zero rows): ItemCustom
+   .Type, OrdrCustom.BatchNbr, YieldOutsideToleranceMemo, Ordr.OpsPlanner/
+   Requester/ManfLot/SalesPerson/ExecutionHold/PrepaidAmount/FirstPeriodDate,
+   OrdDetail.WeighRule/MustPreweigh/Manufacturer/pinned Sublot/DateFollowUp/
+   PromisedBy, Item.BillTo, Location.TransferCan, InvMovementDtl.Division.
+   Single-currency install → AltCurrencyToBaseCurrency factor = 1, dropped.
+   DatePromised (7,329) and UserHold (1,873) are live — kept.
+7. **Deviations from the vendor views** (deliberate): OpenShippingOrderDetail
+   pkg count divides by the line's own OrdDetailPricing.QtyPerEntityQty
+   (legacy used ItemUnit.BaseQty — ItemUnit unmirrored, per-line packaging is
+   the better truth); ChangeSetShipment joins LEFT (legacy INNER would hide a
+   SH movement whose changeset lacks the shipment row); LogDate column
+   dropped (legacy Log table not mirrored — ChangeDate is the business date);
+   where-used hides rd.Inactive lines (ERP1 revisions mark-don't-delete, so
+   removed baseline lines exist that legacy never had).
+8. **Server applies param defaults** ('today' resolves at request time, UTC
+   digits = plant wall-clock) so a bare API call behaves like the grid's
+   initial view; required-with-default params therefore never 400 in
+   practice.
+9. **Entity display names** resolve through the Main-address lateral
+   (AddressReference → Address.Name) — legacy keeps no name on Entity. These
+   laterals live in `selectOnlyFrom` so COUNT queries skip them.
+10. The shared CSV builder (`apps/api/src/common/csv.ts`) carries the
+    formula-injection guard; `journal-format.ts` now imports it (behavior
+    unchanged).
+11. **Review round (2026-07-08, 6 lenses → dedup → 2 adversarial verifiers
+    each, both-must-confirm): 12 of 13 findings confirmed, all fixed.** The
+    two majors: (a) the append-only sync anchored on the MIRROR's max id, so
+    a batch where higher ids upserted but lower ids rejected would advance
+    past the rejected rows and lose them once beyond the re-walk lag — the
+    anchor is now a PERSISTED per-table watermark
+    (`import.appendWatermark.<Table>`) advanced only on zero-reject batches
+    (and seeded by a clean full import); (b) the original trim list wrongly
+    dropped `Ordr.Salesman` (the int FK, set on 98% of shipping orders —
+    distinct from the always-empty `SalesPerson` varchar this section's item
+    6 refers to) — salesman code/name columns restored on Shipment Detail +
+    Open Shipping Order Detail. Also fixed: quiet-log syncs skipped the
+    append top-up entirely (now they run it; the log walk + never-logged
+    re-copies still skip); `Ordr.EarliestStartDate` mirrored + shown on Open
+    MF Order Detail (populated on 98% of that viewer's rows — no 0-use
+    evidence covered it); calendar-impossible/9999+ dates now 400 instead of
+    a Postgres cast 500; extreme `page` values 400 instead of an int64
+    OFFSET overflow 500; duplicated query params (Express array parsing)
+    read as absent instead of crashing `.trim()`; ILIKE search and the
+    where-used ingredient filter escape `% _ \` (literal matching); the CSV
+    formula-injection guard's numeric exemption now covers e-notation
+    (negative float-noise qtys were getting a corrupting apostrophe); the
+    web grid remounts per viewer id (state no longer leaks across viewers),
+    refuses to export while required filters are unset (it would silently
+    export the server-default window), and surfaces network failures during
+    export. Killed finding: UTF-8-BOM-for-Excel (no contract; deliberate).

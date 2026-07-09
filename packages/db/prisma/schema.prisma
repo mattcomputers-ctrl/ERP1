@@ -773,6 +773,52 @@ model Inventory {
   @@map("Inventory")
 }
 
+// Legacy inventory-movement EVENT HEADER: one row per stock-affecting posting
+// under a ChangeSet (contexts observed live: PCKAGE/CMNGL/CA/SH/PICK/SAMPLE/
+// COUNT/PO/RVSSH/TRNSFR/MISC/RS). Mirrored for the §18 movement / at-date
+// viewers. Columns the plant never populated are NOT mirrored — Scale/GLCode/
+// Comment/QtyEntered et al are 0-use in this install (ASSUMPTIONS §18).
+// Never change-logged (verified live: zero LogResult rows) — sync top-ups are
+// append-only from the mirror's max legacy id (movement history is immutable).
+model InvMovement {
+  id          BigInt  @id @default(autoincrement()) @map("InvMovement")
+  context     String? @map("Context") @db.VarChar(6)
+  changeSetId Int     @map("ChangeSet")
+  sublotId    Int?    @map("Sublot")
+  releaseId   Int?    @map("Release")
+  itemId      Int?    @map("Item")
+  step        Int?    @map("Step")
+
+  @@index([changeSetId])
+  @@index([itemId])
+  @@index([context])
+  @@map("InvMovement")
+}
+
+// Legacy inventory-movement DETAIL: the signed qty/value legs of a movement.
+// Detail contexts observed live: MK/US (on-hand make/use), MKCA/USCA (cost
+// adjustments, qty NULL), and B-suffixed WIP legs (MKB/USB/MKBCA/USBCA —
+// commingled batch material, NOT on-hand). Summing Qty/Value over the non-B
+// contexts up to a date reproduces the encrypted GetInventoryAtDate() output
+// exactly (validated live, discovery 2026-07-08). Division/StandardValue/
+// ReplacementValue/WeighAndAdd/InventoryCost are dropped (0-use or
+// unreconstructable — ASSUMPTIONS §18).
+model InvMovementDtl {
+  id            Int      @id @default(autoincrement()) @map("InvMovementDtl")
+  invMovementId BigInt   @map("InvMovement")
+  context       String   @map("Context") @db.VarChar(6)
+  ownerId       Int      @map("Owner")
+  locationId    Int?     @map("Location")
+  ordDetailId   Int?     @map("OrdDetail")
+  qty           Float?   @map("Qty")
+  value         Decimal? @map("Value") @db.Money
+
+  @@index([invMovementId])
+  @@index([ordDetailId])
+  @@index([context])
+  @@map("InvMovementDtl")
+}
+
 // ===========================================================================
 // Manufacturing recipes (mirrors legacy). Recipe header (Context RMBA batching
 // / RMPP packaging) + RecipeDetail lines. The RecipeDetail rows ARE the
@@ -901,6 +947,8 @@ model Ordr {
   dateCompleted   DateTime? @map("DateCompleted")
   dateScheduled   DateTime? @map("DateScheduled")
   planStartDate   DateTime? @map("PlanStartDate")
+  // Scheduling floor (set on 98% of open MF rows — §18 review evidence).
+  earliestStartDate DateTime? @map("EarliestStartDate")
   actualBatchSize Float?    @map("ActualBatchSize")
   leadTime        Int?      @map("LeadTime")
   manfLot         String?   @map("ManfLot") @db.VarChar(256)

@@ -7,6 +7,8 @@
 // header account's signed amount (debit positive), each SPL row the opposite
 // side; every transaction must sum to zero.
 
+import { csvCell } from '../common/csv';
+
 export type JournalEntryType = 'INVOICE' | 'BILL' | 'GENERAL JOURNAL';
 
 export interface JournalLine {
@@ -72,15 +74,6 @@ export function toIif(entries: JournalEntry[]): string {
   }
   return out.join('\r\n') + '\r\n';
 }
-
-const csvCell = (v: string | number | null | undefined) => {
-  let s = v == null ? '' : String(v);
-  // Formula-injection guard: free text (PO numbers, memos, entity codes) must
-  // never open as a formula in a spreadsheet. Plain numbers (debit/credit
-  // columns) are exempt.
-  if (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) s = `'${s}`;
-  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
 
 /** Generic journal CSV: one row per line, debit/credit split into columns. */
 export function toCsv(entries: JournalEntry[]): string {

@@ -533,6 +533,7 @@ describe('legacy import of the notification tables (never-logged wholesale copie
         async tableColumns(t: string) { return self.columns.get(t) ?? []; },
         async fetchAll(t: string) { return self.tables.get(t) ?? []; },
         async fetchByKeys() { return []; },
+        async fetchNewRows() { return []; },
         async countRows(t: string) { return (self.tables.get(t) ?? []).length; },
         async close() {},
       };

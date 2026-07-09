@@ -70,6 +70,12 @@ class FakeLegacy {
         };
         return rows.filter((r) => values.some((tuple) => columns.every((c, i) => String(resolve(r, c)) === tuple[i])));
       },
+      async fetchNewRows(legacyTable: string, idColumn: string, fromId: number) {
+        const rows = self.tables.get(legacyTable) ?? [];
+        return rows
+          .filter((r) => Number(r[idColumn]) > fromId)
+          .sort((a, b) => Number(a[idColumn]) - Number(b[idColumn]));
+      },
       async countRows(legacyTable: string) {
         return (self.tables.get(legacyTable) ?? []).length;
       },
@@ -96,6 +102,14 @@ const itemRow = (id: number, code: string, desc = 'x') => ({ Item: id, ItemCode:
 // Physical casing is 'Sublot' — LogResult logs it as 'SubLot' (live quirk).
 const SUBLOT_COLS = ['Sublot', 'Version', 'Release', 'Lot', 'SublotCode', 'Context'];
 const sublotRow = (id: number, lot: string) => ({ Sublot: id, Version: 1, Release: null, Lot: lot, SublotCode: lot, Context: 'LOT' });
+const INVM_COLS = ['InvMovement', 'Context', 'ChangeSet', 'Sublot', 'Release', 'Item', 'Step'];
+const invmRow = (id: number, changeSet: number, item: number, ctx = 'PO') => ({
+  InvMovement: id, Context: ctx, ChangeSet: changeSet, Sublot: null, Release: null, Item: item, Step: 1,
+});
+const INVMD_COLS = ['InvMovementDtl', 'InvMovement', 'Context', 'Owner', 'Location', 'OrdDetail', 'Qty', 'Value'];
+const invmdRow = (id: number, invMovement: number, qty: number, ctx = 'MK') => ({
+  InvMovementDtl: id, InvMovement: invMovement, Context: ctx, Owner: 4, Location: 1, OrdDetail: null, Qty: qty, Value: qty * 2,
+});
 
 async function watermark(): Promise<string | null> {
   const row = await prisma.appSetting.findUnique({ where: { key: 'import.logWatermark' } });
@@ -341,6 +355,8 @@ describe('incremental sync', () => {
     expect(await prisma.inventory.findUnique({ where: { id: 901 } })).toBeNull();
 
     // And the sync's proxy-gated Inventory re-copy honors the same rule.
+    // (InvMovement is itself mirrored now — give the keyed re-pull a table.)
+    fake.setTable('dbo.InvMovement', INVM_COLS, []);
     fake.maxLog = 1010;
     fake.touches = [{ tableName: 'InvMovement', fieldName: 'InvMovement', fieldValue: '9', log: 1005 }];
     await imp.sync('tester');
@@ -361,14 +377,14 @@ describe('incremental sync', () => {
     ]);
     fake.touches = [
       { tableName: 'AddressRef', fieldName: 'Reference,TableID,TableName', fieldValue: 'SupplierAddress,500,Ordr', log: 1005 },
-      { tableName: 'InvMovement', fieldName: 'InvMovement', fieldValue: '123', log: 1006 }, // unmirrored (but an Inventory proxy)
+      { tableName: 'Scale', fieldName: 'Scale', fieldValue: 'SC-1', log: 1006 }, // unmirrored
     ];
 
     const res = await imp.sync('tester');
     const ar = await prisma.addressReference.findFirst({ where: { tableName: 'Ordr', tableId: 500 } });
     expect(ar).not.toBeNull();
     expect(ar!.address).toBe(42);
-    expect(res.skipped).toEqual([{ tableName: 'InvMovement', touches: 1 }]);
+    expect(res.skipped).toEqual([{ tableName: 'Scale', touches: 1 }]);
   });
 
   it('re-copies the never-logged tables: the tiny ones always, Inventory when a proxy was touched', async () => {
@@ -395,11 +411,94 @@ describe('incremental sync', () => {
 
     // Window 2: an InvMovement touch (the stock-movement proxy) — Inventory
     // re-copied now.
+    fake.setTable('dbo.InvMovement', INVM_COLS, []);
     fake.maxLog = 1020;
     fake.touches = [{ tableName: 'InvMovement', fieldName: 'InvMovement', fieldValue: '55', log: 1015 }];
     const res2 = await imp.sync('tester');
     expect(await prisma.inventory.findUnique({ where: { id: 900 } })).not.toBeNull();
     expect(res2.tables.some((t) => t.name === 'Inventory (re-copy)')).toBe(true);
+  });
+
+  it('tops up append-only tables (InvMovement family) past the mirror max, never wholesale', async () => {
+    const fake = new FakeLegacy();
+    fake.maxLog = 1000;
+    fake.setTable('dbo.InvMovement', INVM_COLS, [invmRow(10, 100, 1), invmRow(11, 101, 1)]);
+    fake.setTable('dbo.InvMovementDtl', INVMD_COLS, [invmdRow(20, 10, 5), invmdRow(21, 11, 7)]);
+    const imp = importer(fake);
+    await imp.run('tester');
+    expect(await prisma.invMovement.count()).toBe(2);
+    expect(await prisma.invMovementDtl.count()).toBe(2);
+
+    // Legacy appends new movements; NOTHING names them in the change feed.
+    fake.maxLog = 1010;
+    fake.touches = []; // empty window — the top-up must still run
+    fake.setTable('dbo.InvMovement', INVM_COLS, [invmRow(10, 100, 1), invmRow(11, 101, 1), invmRow(12, 102, 2)]);
+    fake.setTable('dbo.InvMovementDtl', INVMD_COLS, [
+      invmdRow(20, 10, 5), invmdRow(21, 11, 7), invmdRow(22, 12, 9), invmdRow(23, 12, -9, 'US'),
+    ]);
+    const res = await imp.sync('tester');
+    expect(await prisma.invMovement.count()).toBe(3);
+    expect(await prisma.invMovementDtl.count()).toBe(4);
+    const dtl = await prisma.invMovementDtl.findUnique({ where: { id: 23 } });
+    expect(dtl!.context).toBe('US');
+    expect(Number(dtl!.invMovementId)).toBe(12);
+    // Reported as an append, and the re-walk lag re-pulled the whole small
+    // set (idempotent upserts — still only 3/4 rows in the mirror).
+    expect(res.tables.some((t) => t.name === 'InvMovement (append)')).toBe(true);
+    expect(res.tables.some((t) => t.name === 'InvMovementDtl (append)')).toBe(true);
+
+    // A native-range movement row (ERP1's own, future emission) is never
+    // overwritten by the top-up.
+    await prisma.invMovement.create({ data: { id: 1_000_000_001, context: 'ERP1', changeSetId: 999 } });
+    fake.maxLog = 1020;
+    fake.setTable('dbo.InvMovement', INVM_COLS, [
+      invmRow(10, 100, 1), invmRow(11, 101, 1), invmRow(12, 102, 2),
+      { InvMovement: 1_000_000_001, Context: 'BOGUS', ChangeSet: 1, Sublot: null, Release: null, Item: 1, Step: 1 },
+    ]);
+    await imp.sync('tester');
+    const native = await prisma.invMovement.findUnique({ where: { id: 1_000_000_001 } });
+    expect(native!.context).toBe('ERP1');
+
+    // A QUIET legacy log must not stall the top-up: movements are invisible
+    // to the Log, so new rows arrive even when no logged operation ran.
+    fake.setTable('dbo.InvMovement', INVM_COLS, [
+      invmRow(10, 100, 1), invmRow(11, 101, 1), invmRow(12, 102, 2), invmRow(14, 103, 2),
+    ]);
+    const quiet = await imp.sync('tester'); // maxLog unchanged (1020)
+    expect((quiet as { upToDate?: boolean }).upToDate).toBeUndefined();
+    expect(await prisma.invMovement.findUnique({ where: { id: 14 } })).not.toBeNull();
+  });
+
+  it('append anchor is a persisted watermark: held by a rejected batch, advanced only on success', async () => {
+    const WM = 'import.appendWatermark.InvMovement';
+    const fake = new FakeLegacy();
+    fake.maxLog = 1000;
+    fake.setTable('dbo.InvMovement', INVM_COLS, [invmRow(10, 100, 1), invmRow(11, 101, 1)]);
+    const imp = importer(fake);
+    await imp.run('tester');
+    expect((await prisma.appSetting.findUnique({ where: { key: WM } }))!.value).toBe('11');
+
+    // Legacy appends a valid row 12 and a poison row 13 (NULL ChangeSet — the
+    // mirror column is NOT NULL, so its upsert rejects). The run must FAIL and
+    // the anchor must HOLD, even though row 12 pushed the mirror max past it.
+    fake.maxLog = 1010;
+    fake.setTable('dbo.InvMovement', INVM_COLS, [
+      invmRow(10, 100, 1), invmRow(11, 101, 1), invmRow(12, 102, 2),
+      { InvMovement: 13, Context: 'PO', ChangeSet: null, Sublot: null, Release: null, Item: 2, Step: 1 },
+    ]);
+    await expect(imp.sync('tester')).rejects.toThrow(/could not be applied/);
+    expect((await prisma.appSetting.findUnique({ where: { key: WM } }))!.value).toBe('11');
+    expect(await prisma.invMovement.findUnique({ where: { id: 12 } })).not.toBeNull(); // the hazard: mirror max ran ahead
+
+    // Legacy fixes the row; the retry re-pulls from the HELD anchor and now
+    // lands everything, advancing the watermark.
+    fake.setTable('dbo.InvMovement', INVM_COLS, [
+      invmRow(10, 100, 1), invmRow(11, 101, 1), invmRow(12, 102, 2), invmRow(13, 103, 2),
+    ]);
+    const res = await imp.sync('tester');
+    expect(res.status).toBe('success');
+    expect(await prisma.invMovement.findUnique({ where: { id: 13 } })).not.toBeNull();
+    expect((await prisma.appSetting.findUnique({ where: { key: WM } }))!.value).toBe('13');
   });
 
   it('keeps PK-keyed deletes when another touch forces the full-recopy fallback', async () => {

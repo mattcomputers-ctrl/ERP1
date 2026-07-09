@@ -160,6 +160,7 @@ describe('import: ItemEntity mirror (planning knobs source)', () => {
           async tableColumns() { return []; },
           async fetchAll(legacyTable: string) { return legacyTable === 'dbo.ItemEntity' ? rows : []; },
           async fetchByKeys() { return []; },
+          async fetchNewRows() { return []; },
           async countRows(legacyTable: string) { return legacyTable === 'dbo.ItemEntity' ? rows.length : 0; },
           async close() {},
         };
@@ -192,6 +193,7 @@ describe('import replaceStale (PlanTrace re-copy prunes vanished rows)', () => {
             return legacyTable === 'dbo.PlanTrace' ? snapshot() : [];
           },
           async fetchByKeys() { return []; },
+          async fetchNewRows() { return []; },
           async countRows(legacyTable: string) {
             return legacyTable === 'dbo.PlanTrace' ? snapshot().length : 0;
           },

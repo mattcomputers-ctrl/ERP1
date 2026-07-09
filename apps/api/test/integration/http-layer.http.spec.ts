@@ -33,6 +33,18 @@ const PUBLIC_ROUTES = new Set(['POST /auth/login', 'POST /auth/logout', 'GET /he
 // the anonymous 401 invariant; excluded only from the zero-program 403 invariant.
 const SESSION_ONLY_ROUTES = new Set(['GET /auth/me', 'POST /auth/change-password']);
 
+// Routes whose program key is DYNAMIC (one route serves many viewers, each with
+// its own program) so authorization runs in the service, not @RequireProgram —
+// the zero-program probe's ':id'→'1' fill hits the 404 before the 403. The
+// per-viewer 401/403/404 behaviour is pinned in viewers.http.spec.ts; the list
+// route is session-only by design (it FILTERS by the user's programs).
+const DYNAMIC_PROGRAM_ROUTES = new Set([
+  'GET /viewers',
+  'GET /viewers/:id',
+  'GET /viewers/:id/rows',
+  'GET /viewers/:id/export',
+]);
+
 function normalize(method: string, path: string): string {
   return `${method.toUpperCase()} ${path.replace(/^\/api/, '')}`;
 }
@@ -95,7 +107,7 @@ describe('ProgramGuard authorization', () => {
     const agent = await loginAgent(app, 'none@test.local', PASSWORD);
     const routes = listRoutes(app).filter((r) => {
       const key = normalize(r.method, r.path);
-      return !PUBLIC_ROUTES.has(key) && !SESSION_ONLY_ROUTES.has(key);
+      return !PUBLIC_ROUTES.has(key) && !SESSION_ONLY_ROUTES.has(key) && !DYNAMIC_PROGRAM_ROUTES.has(key);
     });
 
     expect(routes.length).toBeGreaterThan(20);

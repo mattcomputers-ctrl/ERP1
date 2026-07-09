@@ -40,6 +40,7 @@ import { Roles } from './pages/Roles';
 import { SecuredItems } from './pages/SecuredItems';
 import { Units } from './pages/Units';
 import { Users } from './pages/Users';
+import { ViewerPage, ViewersIndex } from './pages/Viewers';
 
 export function App() {
   const { data: me, isLoading } = useMe();
@@ -103,6 +104,8 @@ export function App() {
         <Route path="/line-approvals" element={<LineEditApprovals />} />
         <Route path="/notifications" element={<Notifications />} />
         <Route path="/configuration" element={<Configuration />} />
+        <Route path="/viewers" element={<ViewersIndex />} />
+        <Route path="/viewers/:id" element={<ViewerPage />} />
         <Route path="/audit" element={<Audit />} />
         <Route path="/import" element={<ImportPage />} />
         <Route path="/change-password" element={<ChangePassword />} />
@@ -142,6 +145,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/roles', label: 'Roles' },
     { to: '/secured-items', label: 'Secured Items' },
     { to: '/approval-policies', label: 'Approval Policies' },
+    { to: '/viewers', label: 'Viewers' },
     { to: '/notifications', label: 'Notifications' },
     { to: '/configuration', label: 'Configuration' },
     { to: '/audit', label: 'Audit' },

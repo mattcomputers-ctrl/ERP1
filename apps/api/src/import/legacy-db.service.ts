@@ -38,6 +38,13 @@ export interface LegacyConnection {
    * be validated against tableColumns() — they are interpolated.
    */
   fetchByKeys(legacyTable: string, columns: string[], values: string[][]): Promise<Record<string, unknown>[]>;
+  /**
+   * The rows of a legacy table whose numeric id column exceeds `fromId` —
+   * the append-only top-up path (movement history is insert-only and never
+   * change-logged). `idColumn` is a registry constant, never derived from
+   * legacy data.
+   */
+  fetchNewRows(legacyTable: string, idColumn: string, fromId: number): Promise<Record<string, unknown>[]>;
   /** Authoritative row count of a legacy table (reconciliation). */
   countRows(legacyTable: string): Promise<number>;
   close(): Promise<void>;
@@ -139,6 +146,14 @@ export class LegacyDbService {
           out.push(...(r.recordset as Record<string, unknown>[]));
         }
         return out;
+      },
+
+      async fetchNewRows(legacyTable: string, idColumn: string, fromId: number) {
+        const r = await pool
+          .request()
+          .input('from', sql.BigInt, fromId)
+          .query(`SELECT * FROM ${legacyTable} WHERE [${idColumn}] > @from ORDER BY [${idColumn}]`);
+        return r.recordset as Record<string, unknown>[];
       },
 
       async countRows(legacyTable: string) {

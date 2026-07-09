@@ -22,6 +22,7 @@ import { SalesModule } from './sales/sales.module';
 import { SettingsModule } from './settings/settings.module';
 import { StatsModule } from './stats/stats.module';
 import { UsersModule } from './users/users.module';
+import { ViewersModule } from './viewers/viewers.module';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { UsersModule } from './users/users.module';
     QaModule,
     AccountingModule,
     NotificationsModule,
+    ViewersModule,
   ],
 })
 export class AppModule {}

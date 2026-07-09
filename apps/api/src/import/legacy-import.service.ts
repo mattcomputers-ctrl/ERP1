@@ -36,6 +36,12 @@ interface TableSpec {
   // longer contains. Requires idColumn; native rows (id >= NATIVE_ID_BASE)
   // are never touched.
   replaceStale?: boolean;
+  // APPEND-ONLY history the change feed never names (zero LogResult rows,
+  // verified live) and that legacy only ever INSERTS (movement events are
+  // immutable — corrections post new rows). Sync tops these up from the
+  // mirror's max legacy-range id instead of re-copying wholesale (the
+  // InvMovement family is ~1.6M rows). Requires idColumn.
+  appendOnlySync?: boolean;
   where: (data: Record<string, unknown>) => Record<string, unknown>;
   map: (row: Record<string, any>) => Record<string, unknown>;
 }
@@ -345,7 +351,8 @@ const TABLES: TableSpec[] = [
       reference: r.Reference, placedBy: r.PlacedBy, terms: r.Terms, securityGroup: r.SecurityGroup,
       dateOrdered: r.DateOrdered, dateRequired: r.DateRequired, dateReleased: r.DateReleased,
       dateStarted: r.DateStarted, dateCompleted: r.DateCompleted, dateScheduled: r.DateScheduled,
-      planStartDate: r.PlanStartDate, actualBatchSize: r.ActualBatchSize, leadTime: r.LeadTime, manfLot: r.ManfLot,
+      planStartDate: r.PlanStartDate, earliestStartDate: r.EarliestStartDate,
+      actualBatchSize: r.ActualBatchSize, leadTime: r.LeadTime, manfLot: r.ManfLot,
       labourHours: r.LabourHours, machineHours: r.MachineHours, parentId: r.Parent,
       revision: r.Revision, comment: r.Comment,
     }),
@@ -517,6 +524,28 @@ const TABLES: TableSpec[] = [
       psQtyEntered: r.PSQtyEntered, qtyPerPsQty: r.QtyPerPSQty, numberOfContainers: r.NumberOfContainers,
     }),
   },
+  {
+    // Movement event headers (§18 viewers). After ChangeSet (parent). Only the
+    // live columns are mirrored — Scale/GLCode/Comment/*Entered are 0-use in
+    // this install (ASSUMPTIONS §18).
+    name: 'InvMovement', legacyTable: 'dbo.InvMovement', delegate: 'invMovement', idColumn: 'InvMovement',
+    appendOnlySync: true,
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: BigInt(r.InvMovement), context: r.Context, changeSetId: r.ChangeSet, sublotId: r.Sublot,
+      releaseId: r.Release, itemId: r.Item, step: r.Step,
+    }),
+  },
+  {
+    // Movement qty/value legs. After InvMovement (parent).
+    name: 'InvMovementDtl', legacyTable: 'dbo.InvMovementDtl', delegate: 'invMovementDtl', idColumn: 'InvMovementDtl',
+    appendOnlySync: true,
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.InvMovementDtl, invMovementId: BigInt(r.InvMovement), context: r.Context, ownerId: r.Owner,
+      locationId: r.Location, ordDetailId: r.OrdDetail, qty: r.Qty, value: r.Value,
+    }),
+  },
 ];
 
 // LogResult TableName -> registry name, where they differ. `AddressRef` is the
@@ -534,6 +563,20 @@ const LOG_TABLE_ALIASES: Record<string, string> = {
 // succeeds (sync refuses to run without that foundation — Log history was
 // purged pre-2014, so the log walk is a top-up, never the baseline).
 const WATERMARK_KEY = 'import.logWatermark';
+
+// Append-only top-ups re-walk this many ids BELOW their anchor: identity
+// allocation order is not commit order, so a legacy transaction that
+// allocated a lower id but committed after the previous sync's read would
+// otherwise be skipped forever. Idempotent upserts make the overlap free.
+const APPEND_REWALK_LAG = 1_000;
+
+// Per-table anchor for the append-only top-up (app_settings key prefix +
+// spec name). A PERSISTED watermark, advanced only when a batch applies with
+// ZERO rejects — anchoring on the mirror's max id would advance past rejected
+// lower-id rows whenever higher ids upserted successfully, losing them
+// forever once they fall behind the re-walk lag (2026-07-08 review finding).
+// Absent (fresh upgrade): seeded from the mirror's max legacy-range id.
+const APPEND_WATERMARK_PREFIX = 'import.appendWatermark.';
 
 // Each sync re-walks this many Log ids BEFORE the watermark. MAX(Log) returns
 // the highest COMMITTED id, but identity allocation order is not commit
@@ -561,8 +604,10 @@ const NEVER_LOGGED_ALWAYS = [
   'Currency', 'TestGroup', 'Address', 'SublotParent', 'PlanTrace', 'EmailSent',
 ];
 const NEVER_LOGGED_PROXIED: Array<{ name: string; proxies: string[] }> = [
-  // Every legacy stock movement posts InvMovement rows (logged) under a
-  // ChangeSet — either touch means Inventory balances moved.
+  // Every legacy stock movement posts under a logged ChangeSet — that touch
+  // means Inventory balances moved. ('invmovement' kept defensively; verified
+  // live 2026-07-08 that LogResult never names InvMovement/InvMovementDtl —
+  // those mirrors are topped up by the appendOnlySync path instead.)
   { name: 'Inventory', proxies: ['invmovement', 'changeset'] },
   // CofA headers change with their Release.
   { name: 'ReleaseCofA', proxies: ['release', 'releasecofa'] },
@@ -693,6 +738,34 @@ export class LegacyImportService {
     return /^\d+$/.test(value) ? Number(value) : null;
   }
 
+  private async getAppendWatermark(name: string): Promise<number | null> {
+    const row = await this.prisma.appSetting.findUnique({ where: { key: APPEND_WATERMARK_PREFIX + name } });
+    const value = row?.value?.trim() ?? '';
+    return /^\d+$/.test(value) ? Number(value) : null;
+  }
+
+  private async setAppendWatermark(name: string, id: number) {
+    await this.prisma.appSetting.upsert({
+      where: { key: APPEND_WATERMARK_PREFIX + name },
+      create: {
+        key: APPEND_WATERMARK_PREFIX + name,
+        value: String(id),
+        description: `Append-only sync anchor for ${name}: the highest legacy id fully reflected in the mirror. Managed by the import engine; lower it to re-pull recent rows.`,
+      },
+      update: { value: String(id) },
+    });
+  }
+
+  /** Highest legacy-range id in a batch of raw source rows (0 if none). */
+  private maxLegacyId(spec: TableSpec, rows: Record<string, any>[]): number {
+    let max = 0;
+    for (const r of rows) {
+      const id = Number(r[spec.idColumn!]);
+      if (Number.isFinite(id) && id < NATIVE_ID_BASE && id > max) max = id;
+    }
+    return max;
+  }
+
   private async setWatermark(logId: number) {
     await this.prisma.appSetting.upsert({
       where: { key: WATERMARK_KEY },
@@ -780,6 +853,11 @@ export class LegacyImportService {
         const { processed, rejected } = await this.upsertRows(spec, rows);
         const pruned = spec.replaceStale ? await this.pruneVanished(spec, rows) : 0;
         if (spec.idColumn) await this.resetSequence(spec.name, spec.idColumn);
+        // A CLEAN full copy anchors the append top-up at the snapshot's max;
+        // with rejects the old anchor holds so the next sync re-pulls them.
+        if (spec.appendOnlySync && spec.idColumn && rejected === 0) {
+          await this.setAppendWatermark(spec.name, this.maxLegacyId(spec, rows));
+        }
         const delegate = (this.prisma as unknown as Record<string, any>)[spec.delegate];
         const target = await delegate.count();
         tables.push({ name: spec.name, source: rows.length, target, processed, rejected });
@@ -856,14 +934,11 @@ export class LegacyImportService {
       conn = await this.legacyDb.open();
       const toLog = await conn.maxLogId();
 
-      if (toLog <= fromLog) {
-        const report = { fromLog, toLog, touches: 0, tables: [], skipped: [], upToDate: true };
-        await this.prisma.importRun.update({
-          where: { id: runRecord.id },
-          data: { status: 'success', finishedAt: new Date(), report },
-        });
-        return { id: runRecord.id.toString(), status: 'success', ...report };
-      }
+      // A quiet log (toLog <= fromLog) skips the log walk and the never-logged
+      // re-copies, but NOT the append-only top-up below: the movement tables
+      // are invisible to the Log, so gating them on Log movement would stall
+      // their self-heal (and their normal top-up) whenever legacy is idle.
+      const logQuiet = toLog <= fromLog;
 
       // Walk from BELOW the watermark: MAX(Log) is the highest COMMITTED id,
       // and identity allocation order is not commit order — a legacy
@@ -871,7 +946,7 @@ export class LegacyImportService {
       // capture would otherwise be skipped forever. Re-processing the overlap
       // is harmless (idempotent upserts; deletes re-check the source).
       const walkFrom = Math.max(0, fromLog - REWALK_LAG);
-      const touches = await conn.logDelta(walkFrom, toLog);
+      const touches = logQuiet ? [] : await conn.logDelta(walkFrom, toLog);
 
       // Group touches by registry table (via aliases); collect unmirrored
       // TableNames for the report. Plain pushes — a single legacy bulk op
@@ -991,9 +1066,10 @@ export class LegacyImportService {
       // Wholesale re-copy of the never-logged tables (the change feed cannot
       // see them): the tiny ones every sync, the bigger ones when a proxy
       // table that always accompanies their changes appeared in the window
-      // (including unmirrored proxies like InvMovement).
+      // (including unmirrored proxies like InvMovement). Skipped entirely on
+      // a quiet log — no legacy operation ran, so nothing moved.
       const touchedLower = new Set(touches.map((t) => t.tableName.toLowerCase()));
-      for (const spec of TABLES) {
+      for (const spec of logQuiet ? [] : TABLES) {
         const proxied = NEVER_LOGGED_PROXIED.find((p) => p.name === spec.name);
         const always = NEVER_LOGGED_ALWAYS.includes(spec.name);
         if (!always && !proxied) continue;
@@ -1004,6 +1080,42 @@ export class LegacyImportService {
         if (spec.idColumn) await this.resetSequence(spec.name, spec.idColumn);
         touchedNames.add(spec.name);
         tables.push({ name: `${spec.name} (re-copy)`, keys: rows.length, upserted: res.processed, deleted: pruned, rejected: res.rejected });
+      }
+
+      // Append-only top-up for insert-only history the change feed never
+      // names (InvMovement family): pull everything past the PERSISTED
+      // per-table anchor (minus a re-walk lag — allocation order is not
+      // commit order). The anchor only advances on a zero-reject batch, so
+      // rejected rows are re-pulled by the next sync no matter how far the
+      // mirror's max id ran ahead. A missing anchor (table added after the
+      // last full import) seeds from the mirror's max legacy-range id — an
+      // empty mirror self-heals with one heavy pull. Runs on quiet logs too.
+      for (const spec of TABLES) {
+        if (!spec.appendOnlySync || !spec.idColumn) continue;
+        const stored = await this.getAppendWatermark(spec.name);
+        let anchor = stored;
+        if (anchor == null) {
+          const delegate = (this.prisma as unknown as Record<string, any>)[spec.delegate];
+          const agg = await delegate.aggregate({ _max: { id: true }, where: { id: { lt: NATIVE_ID_BASE } } });
+          anchor = Number(agg._max.id ?? 0);
+        }
+        const rows = (await conn.fetchNewRows(
+          spec.legacyTable,
+          spec.idColumn,
+          Math.max(0, anchor - APPEND_REWALK_LAG),
+        )) as Record<string, any>[];
+        if (rows.length) {
+          const res = await this.upsertRows(spec, rows);
+          await this.resetSequence(spec.name, spec.idColumn);
+          touchedNames.add(spec.name);
+          tables.push({ name: `${spec.name} (append)`, keys: rows.length, upserted: res.processed, deleted: 0, rejected: res.rejected });
+          if (res.rejected === 0) {
+            await this.setAppendWatermark(spec.name, Math.max(anchor, this.maxLegacyId(spec, rows)));
+          }
+        } else if (stored == null) {
+          // Seed the anchor so later runs don't re-derive it from the mirror.
+          await this.setAppendWatermark(spec.name, anchor);
+        }
       }
 
       // Deletes, children before parents (reverse registry order).
@@ -1040,6 +1152,7 @@ export class LegacyImportService {
         tables,
         skipped,
         totalRejected,
+        ...(logQuiet && tables.length === 0 ? { upToDate: true } : {}),
         ...(genealogyEdges != null ? { genealogyEdges } : {}),
       };
 
@@ -1057,7 +1170,9 @@ export class LegacyImportService {
         throw new BadRequestException(message);
       }
 
-      await this.setWatermark(toLog);
+      // Never LOWER the watermark: on a quiet log toLog can trail fromLog
+      // (MAX(Log) is the committed high-water mark, not monotone vs captures).
+      await this.setWatermark(Math.max(fromLog, toLog));
       await this.prisma.importRun.update({
         where: { id: runRecord.id },
         data: { status: 'success', finishedAt: new Date(), report },
