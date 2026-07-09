@@ -1110,3 +1110,15 @@ Trans CI 22,083 still minted daily through 2026-07-02).
     refuses to export while required filters are unset (it would silently
     export the server-default window), and surfaces network failures during
     export. Killed finding: UTF-8-BOM-for-Excel (no contract; deliberate).
+
+## Multi-language (§15 / UG ch.20, closed by evidence 2026-07-08)
+
+The legacy `Vocabulary` table holds 4,305 rows — EVERY one with LANGUAGE
+1033 (en-US). It is the desktop client's own string cache (UI labels, log
+messages, SDS section headings cached by hash), not operator translations;
+`LanguageCodes` lists 34 codes but no `Entity.Language` is set anywhere.
+This install never ran a second language, so ERP1 ships single-language:
+no Vocabulary mirror, no translation UI. `Item.AltDescription` (7,379 rows)
+and per-line Description overrides — the "translatable user data" — are
+already mirrored and displayed. If a second language is ever needed, i18n
+starts from the web app's own string catalog, not from Vocabulary.

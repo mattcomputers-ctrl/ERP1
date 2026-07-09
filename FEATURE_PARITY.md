@@ -156,8 +156,8 @@ Maps every functional area of the legacy Mar-Kov CMS to its build status in the 
 ## 15. Multi-language (UG ch.20)
 | Feature | Status | Notes |
 |---|---|---|
-| Static UI text translation | ⬜ | `Vocabulary` |
-| Translatable user data (items, recipes, libraries, order edits) | ⬜ | `Item.AltDescription` etc. |
+| Static UI text translation | ⏸️ | Verified live 2026-07-08: ALL 4,305 `Vocabulary` rows are LANGUAGE 1033 (en-US) — the table is only the desktop client's English string cache (log messages, SDS headings, field labels), never a translation; no `Entity.Language` is set anywhere (0 rows). The plant runs single-language; nothing to migrate |
+| Translatable user data (items, recipes, libraries, order edits) | ✅ | `Item.AltDescription` (7,379 items carry one) is mirrored and surfaced (item data + §18 viewer columns); per-line `Description` overrides are mirrored on OrdDetail/RecipeDetail. That is the full extent of alt-language user data in this install |
 
 ## 16. Security (UG ch.21) — *also tracked under §0 foundations*
 | Feature | Status | Notes |
