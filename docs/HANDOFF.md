@@ -137,11 +137,12 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. **APPLY THE PARITY SWEEP** (docs/PARITY_SWEEP_2026-07-09.md — a 7-agent
-   evidence sweep dispositioned ALL 66 open FEATURE_PARITY rows: 31
-   FLIP_DONE + 17 DEFER are pure note edits with verified evidence text
-   ready to paste; do these first, they close 48 rows in one docs commit).
-   Movement emission (0111be1) is CI-GREEN (run #115).
+1. ~~APPLY THE PARITY SWEEP~~ **DONE 2026-07-09**: all 66 dispositions
+   applied to FEATURE_PARITY.md (48 rows closed → 60 ✅ / 28 ⏸️ / 18 open,
+   all queued builds). 9-agent verification of the application confirmed 7
+   findings (3 broken-pipe table cells, stale phrases, one overstated gap —
+   Item.CostingRecipe was ALREADY imported), all fixed. Note: L62/L19-style
+   rows stay ⬜ when nothing is built yet even under a SPLIT disposition.
 2. **Build the genuine gaps the sweep confirmed** (details + sizes in the
    sweep doc), grouped by module: (a) QA sampling — native sample-set/
    Release creation at the receipt/completion seams + Test-catalog admin
