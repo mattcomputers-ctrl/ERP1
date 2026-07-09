@@ -15,7 +15,7 @@ import { NATIVE_ID_BASE } from '../common/locks';
  *   at-date reconstruction sums only non-B legs, so this keeps the at-date
  *   view exactly equal to the Inventory trajectory.
  * - Header contexts stay inside the legacy set (PO/MISC/COUNT/TRNSFR/SH/
- *   CMNGL/PCKAGE) — the movement viewer's type filter is a whitelist.
+ *   CMNGL/PCKAGE/SAMPLE) — the movement viewer's type filter is a whitelist.
  *   Reversals keep the FORWARD context under the reversing change set
  *   (legacy idiom: PCKAGE movements under RVSMFP change sets).
  * - Legs of one event are written US-first with consecutive ids (legacy
@@ -133,7 +133,9 @@ export class MovementRecorderService {
           changeSetId: ev.changeSetId,
           itemId: ev.itemId ?? null,
           sublotId: ev.sublotId ?? null,
-          releaseId: null,
+          // Stamped on SAMPLE movements (the legacy sample shape carries the
+          // sublot's Hold release); null everywhere else.
+          releaseId: ev.releaseId ?? null,
           step: null,
         },
       });
@@ -169,11 +171,15 @@ export interface MovementLeg {
 }
 
 export interface MovementEvent {
-  /** Header context — legacy vocabulary only (the viewer filter whitelist). */
-  context: 'PO' | 'MISC' | 'COUNT' | 'TRNSFR' | 'SH' | 'CMNGL' | 'PCKAGE';
+  /** Header context — legacy vocabulary only (the viewer filter whitelist).
+   * SAMPLE = the QC retained-sample draw (legacy: 25,416 movements, one per
+   * sample set; ERP1 emits it at the completion sampling seam). */
+  context: 'PO' | 'MISC' | 'COUNT' | 'TRNSFR' | 'SH' | 'CMNGL' | 'PCKAGE' | 'SAMPLE';
   changeSetId: number;
   itemId?: number | null;
   sublotId?: number | null;
+  /** The sublot's release — stamped on SAMPLE movements (legacy shape). */
+  releaseId?: number | null;
   /** US leg first, MK second (legacy id ordering); 1–2 legs. */
   legs: MovementLeg[];
 }

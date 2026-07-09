@@ -1509,6 +1509,26 @@ model DispositionApproval {
   @@map("disposition_approval")
 }
 
+// QC sample set (mirrors legacy; 25,416 rows, in the LogResult change feed).
+// Legacy creates one per tested sublot at the batch IPT step; ERP1 creates one
+// natively at order completion for tested products. There is no business number
+// — the id IS the number. Release.SampleSet / LocationSampleTest.SampleSet join
+// to it by bare integer (legacy has no FK either).
+model SampleSet {
+  id             Int       @id @map("SampleSet")
+  version        Int?      @map("Version")
+  sublotId       Int       @map("Sublot")
+  beingTested    Boolean   @map("BeingTested")
+  grade          String    @map("Grade") @db.VarChar(6)
+  expiryDate     DateTime? @map("ExpiryDate")
+  destructDate   DateTime? @map("DestructDate")
+  iptOrdDetailId Int?      @map("IptOrdDetail")
+  isStability    Boolean?  @map("IsStability")
+
+  @@index([sublotId])
+  @@map("SampleSet")
+}
+
 // QA disposition of a sublot (mirrors legacy). The release gate: Status
 // (Approved/Hold/Rejected), Grade, Purity, ExpiryDate, ReleasedBy. Linked from
 // Sublot.releaseId; surfaced as the QA status on the Lot Trace.

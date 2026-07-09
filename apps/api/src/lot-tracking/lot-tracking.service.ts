@@ -6,6 +6,7 @@ import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { maxRawLotNumber } from '../common/lot-numbers';
 import { MovementRecorderService, type MovementEvent } from '../inventory/movement-recorder.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { SamplingService } from '../qa/sampling.service';
 import type { EnableLotTrackingDto } from './dto/enable-lot-tracking.dto';
 
 @Injectable()
@@ -14,6 +15,7 @@ export class LotTrackingService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly movements: MovementRecorderService,
+    private readonly sampling: SamplingService,
   ) {}
 
   /** Items with their lot-tracking status (for the enabling screen). */
@@ -123,6 +125,26 @@ export class LotTrackingService {
     return this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
 
+      // An in-flight native QC sample (Hold release + retained SMP parcel from
+      // a completion) pins the item: the wipe below would destroy the physical
+      // sample a pending disposition refers to. Dispositioned samples are
+      // history and wipe like any other prior on-hand (the shipped semantic
+      // already wiped LEGACY retained-sample parcels). Serialized by the alloc
+      // lock — completions/dispositions/reversals all hold it.
+      const holdSample = await tx.$queryRaw<{ id: number }[]>`
+        SELECT r."Release" AS id
+        FROM "Release" r
+        JOIN "Sublot" s ON s."Sublot" = r."Sublot"
+        JOIN "Lot" l ON l."Lot" = s."Lot"
+        WHERE l."Item" = ${itemId} AND r."Release" >= ${NATIVE_ID_BASE}
+          AND r."SampleSet" IS NOT NULL AND r."Status" = 'Hold'
+        LIMIT 1`;
+      if (holdSample.length) {
+        throw new BadRequestException(
+          'This item has an undispositioned QC sample from a native batch completion — disposition it (or reverse the batch) before enabling lot tracking.',
+        );
+      }
+
       // Wipe the item's prior (legacy / non-lot) on-hand; the entered lots become
       // the on-hand of record. The parcels are locked FIRST in one ascending-id
       // scan — the system-wide parcel lock order (see ValuationService.
@@ -199,6 +221,10 @@ export class LotTrackingService {
           await tx.inventory.create({
             data: { id: (invId += 1), itemId, sublotId, locationId: g.locationId, qty: e.qty, status: null },
           });
+          // QA release at birth for opening-stock sublots — Approved (this is
+          // stock the plant already owns and uses); idempotent for reused
+          // imported FG sublots that already carry a release (ASSUMPTIONS §21).
+          await this.sampling.createApprovedRelease(tx, { sublotId, actorLabel: actor.label ?? actor.id, at });
           created.push({ lot: lotNumber, vendorLot: e.vendorLot?.trim() ?? null, qty: e.qty, unitCost, locationId: g.locationId, raw, sublotId });
         }
       }

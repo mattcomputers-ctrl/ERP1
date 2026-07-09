@@ -13,6 +13,7 @@ import { MovementRecorderService, type MovementEvent } from '../inventory/moveme
 import { ValuationService, type ParcelTake } from '../inventory/valuation.service';
 import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { SamplingService } from '../qa/sampling.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
 import { computePassed, fgLotPrefix, formatSpec, toleranceWarning } from './order-format';
@@ -127,6 +128,7 @@ export class OrdersService {
     private readonly approvalPolicy: ApprovalPolicyService,
     private readonly approvalRequests: ApprovalRequestService,
     private readonly notifications: NotificationEngineService,
+    private readonly sampling: SamplingService,
   ) {}
 
   async list(query: OrdersListQuery) {
@@ -1586,11 +1588,51 @@ export class OrdersService {
         }));
       }
 
+      // QA seam: every produced sublot gets its release at completion — tested
+      // products (the item HAS ItemTest rows — the legacy gate) are Held with a
+      // native sample set (retained sample split off the minted parcel, result
+      // rows pre-created, 'New Sample set' queued); untested products are
+      // Approved at birth. See SamplingService / ASSUMPTIONS §21.
+      const qaCreated: { lot: string; releaseId: number; held: boolean; sampleSetId?: number; sampleQty?: number }[] = [];
+      if (minted.length) {
+        const iptLine = await tx.ordDetail.findFirst({
+          where: { ordrId: id, context: 'IPT' },
+          select: { id: true },
+          orderBy: { id: 'asc' },
+        });
+        const qaLegOwner = await this.movements.defaultOwnerId(tx);
+        for (const m of minted) {
+          const res = await this.sampling.createCompletionRelease(tx, {
+            sublotId: m.sublotId,
+            itemId: m.itemId,
+            lot: m.lot,
+            ordrId: id,
+            ordDetailId: m.ordDetailId,
+            iptOrdDetailId: iptLine?.id ?? null,
+            producedParcel: m.mintedId != null ? { inventoryId: m.mintedId, locationId: m.locationId, qty: m.qty } : null,
+            legOwner: qaLegOwner,
+            actorLabel: actor.label ?? actor.id,
+            at,
+          });
+          if (res) {
+            qaCreated.push({
+              lot: m.lot, releaseId: res.releaseId, held: res.held,
+              sampleSetId: res.held ? res.sampleSetId : undefined,
+              sampleQty: res.held ? res.sampleQty : undefined,
+            });
+          }
+        }
+      }
+
       const changes = [
         { tableName: 'Ordr', recordId: String(id), fieldName: 'Status', oldValue: order.status, newValue: 'CMP' },
         { tableName: 'Ordr', recordId: String(id), fieldName: 'DateCompleted', oldValue: null, newValue: at.toISOString() },
         ...minted.map((mn) => ({
           tableName: 'Inventory', recordId: mn.lot, fieldName: 'onHand', oldValue: null, newValue: String(mn.qty),
+        })),
+        ...qaCreated.map((q) => ({
+          tableName: 'Release', recordId: String(q.releaseId), fieldName: 'Status', oldValue: null as string | null,
+          newValue: q.held ? `Hold (sample set ${q.sampleSetId})` : 'Approved',
         })),
       ];
       if (dto.actualBatchSize != null) {
@@ -1637,7 +1679,7 @@ export class OrdersService {
 
       await this.notifications.emitOrderEvent(tx, 'Mark Manufacturing Order Complete', id, actor);
 
-      return { id, status: u.status, signed: req.requireSignature, witness: witness?.label ?? null, warnings };
+      return { id, status: u.status, signed: req.requireSignature, witness: witness?.label ?? null, warnings, qa: qaCreated };
     });
   }
 
@@ -1865,11 +1907,58 @@ export class OrdersService {
         }
       }
 
+      // --- native QA artifacts completion created for the produced sublots
+      // (SamplingService): QA work that already began pins the batch — recorded
+      // results or a disposition mean the release record is load-bearing.
+      const producedSubIds = producedCodes.flatMap((c) => subsByLot.get(c) ?? []);
+      const qaSampleSets = producedSubIds.length
+        ? await tx.sampleSet.findMany({
+            where: { sublotId: { in: producedSubIds }, id: { gte: NATIVE_ID_BASE } },
+            select: { id: true, sublotId: true },
+          })
+        : [];
+      const qaLstRows = qaSampleSets.length
+        ? await tx.locationSampleTest.findMany({
+            where: { sampleSetId: { in: qaSampleSets.map((s) => s.id) } },
+            select: { id: true, locationId: true, testedTime: true },
+          })
+        : [];
+      if (qaLstRows.some((r) => r.testedTime != null)) {
+        throw new BadRequestException(
+          'Cannot reverse — test results were already recorded against the produced lot’s sample set.',
+        );
+      }
+      const qaReleases = producedSubIds.length
+        ? await tx.release.findMany({
+            where: { sublotId: { in: producedSubIds }, id: { gte: NATIVE_ID_BASE } },
+            select: { id: true, status: true, grade: true, purity: true, expiryDate: true, suspend: true, releaseDate: true, sampleSetId: true },
+          })
+        : [];
+      // A disposition (applyDispositionToRelease) always stamps releaseDate and
+      // may rewrite status/grade/purity/expiry — so refuse when ANY native
+      // release differs from its BORN shape: tested = Hold/HOLD, undated;
+      // untested = Approved/GMP, no purity/expiry. Detecting by "status left
+      // Hold" alone missed Hold→Hold re-dispositions and quarantines of
+      // untested releases (2026-07-09 review). An IDENTICAL re-approval of an
+      // untested release is indistinguishable from birth — acceptable: its
+      // e-signature + audit rows survive the unwind, so nothing is lost.
+      const qaDirty = qaReleases.find((r) =>
+        r.sampleSetId != null
+          ? r.status !== 'Hold' || r.grade !== 'HOLD' || r.releaseDate != null || r.purity != null || r.expiryDate != null || r.suspend === true
+          : r.status !== 'Approved' || r.grade !== 'GMP' || r.purity != null || r.expiryDate != null || r.suspend === true,
+      );
+      if (qaDirty) {
+        throw new BadRequestException(`Cannot reverse — the produced lot's QA release was already dispositioned (${qaDirty.status}).`);
+      }
+      const sampleLocationIds = new Set(qaLstRows.map((r) => r.locationId));
+
       // Untouched check per produced lot (the vendor's 7.17 unpackage guard):
-      // exactly the one parcel completion minted, still holding the full
-      // produced quantity — or no parcel at all (completion had no location to
-      // mint into, or no sublot was ever created).
+      // exactly the one parcel completion minted — plus, for a tested product,
+      // the one retained-sample parcel the sampling seam split off — together
+      // still holding the full produced quantity; or no parcel at all
+      // (completion had no location to mint into, or no sublot was created).
       const removedOnHand: { lot: string; qty: number; parcelId: number; sublotId: number; itemId: number | null; locationId: number | null }[] = [];
+      const removedSamples: { lot: string; qty: number; parcelId: number; sublotId: number; itemId: number | null; locationId: number | null }[] = [];
       const qtyReqdByPk = new Map(pkLines.map((l) => [l.id, l.qtyReqd ?? 0]));
       for (const pl of producedLots) {
         const expected =
@@ -1880,17 +1969,30 @@ export class OrdersService {
               : 0;
         const parcels = parcelsByLot.get(pl.lot) ?? [];
         if (!parcels.length) continue; // minted nothing — nothing to remove
+        const sampleParcels = parcels.filter((p) => p.locationId != null && sampleLocationIds.has(p.locationId));
+        const mainParcels = parcels.filter((p) => !(p.locationId != null && sampleLocationIds.has(p.locationId)));
         const totalOnHand = parcels.reduce((s, p) => s + (p.qty ?? 0), 0);
-        if (parcels.length > 1 || (parcels[0].qty ?? 0) !== expected) {
+        // The sample split re-adds in floating point ((full − s) + s), so the
+        // sum check tolerates representation error only — not real deltas.
+        const intact = Math.abs(totalOnHand - expected) <= 1e-9 * Math.max(1, Math.abs(expected));
+        if (mainParcels.length > 1 || sampleParcels.length > 1 || !intact) {
           throw new BadRequestException(
             `Cannot reverse — produced lot ${pl.lot} has since been moved, split, consumed, or adjusted ` +
               `(on hand ${totalOnHand}, produced ${expected}).`,
           );
         }
-        removedOnHand.push({
-          lot: pl.lot, qty: parcels[0].qty ?? 0, parcelId: parcels[0].id,
-          sublotId: parcels[0].sublotId, itemId: parcels[0].itemId, locationId: parcels[0].locationId,
-        });
+        if (mainParcels[0]) {
+          removedOnHand.push({
+            lot: pl.lot, qty: mainParcels[0].qty ?? 0, parcelId: mainParcels[0].id,
+            sublotId: mainParcels[0].sublotId, itemId: mainParcels[0].itemId, locationId: mainParcels[0].locationId,
+          });
+        }
+        if (sampleParcels[0]) {
+          removedSamples.push({
+            lot: pl.lot, qty: sampleParcels[0].qty ?? 0, parcelId: sampleParcels[0].id,
+            sublotId: sampleParcels[0].sublotId, itemId: sampleParcels[0].itemId, locationId: sampleParcels[0].locationId,
+          });
+        }
       }
 
       // --- un-mint the produced on-hand (identity Lot/Sublot rows are kept,
@@ -1901,6 +2003,46 @@ export class OrdersService {
       }
       if (producedCodes.length) {
         await tx.lot.updateMany({ where: { lot: { in: producedCodes } }, data: { unitCost: null } });
+      }
+
+      // --- unwind the completion's QA artifacts (no results, no disposition —
+      // asserted above): retained-sample parcels, pre-created result rows, the
+      // sample sets, the native releases (Sublot.releaseId cleared with them)
+      // and the per-sample SMP locations. Re-completion recreates them fresh.
+      for (const r of removedSamples) {
+        await tx.inventory.delete({ where: { id: r.parcelId } });
+      }
+      if (qaLstRows.length) {
+        await tx.locationSampleTest.deleteMany({ where: { id: { in: qaLstRows.map((r) => r.id) } } });
+      }
+      if (qaSampleSets.length) {
+        await tx.sampleSet.deleteMany({ where: { id: { in: qaSampleSets.map((s) => s.id) } } });
+      }
+      if (qaReleases.length) {
+        const releaseIds = qaReleases.map((r) => r.id);
+        await tx.sublot.updateMany({ where: { releaseId: { in: releaseIds } }, data: { releaseId: null } });
+        // The identical-re-approval edge can have minted a CofA header — it
+        // must not outlive its release.
+        await tx.releaseCofA.deleteMany({ where: { releaseId: { in: releaseIds } } });
+        await tx.release.deleteMany({ where: { id: { in: releaseIds } } });
+        // A PENDING disposition request against a deleted release must not
+        // survive either: native MAX+1 id reuse could let a stale request
+        // later enact onto a re-completed batch's fresh release. (CAS on
+        // PENDING — a concurrently-decided request is left alone.)
+        await tx.approvalRequest.updateMany({
+          where: { kind: 'release.disposition', state: 'PENDING', targetId: { in: releaseIds.map(String) } },
+          data: {
+            state: 'REJECTED',
+            decidedById: actor.id,
+            decidedByLabel: actor.label ?? null,
+            decidedAt: at,
+            decisionReason: `Batch #${id} completion reversed — the target release no longer exists.`,
+          },
+        });
+      }
+      const nativeSampleLocIds = [...sampleLocationIds].filter((v): v is number => v != null && v >= NATIVE_ID_BASE);
+      if (nativeSampleLocIds.length) {
+        await tx.location.deleteMany({ where: { id: { in: nativeSampleLocIds } } });
       }
 
       // --- restore the consumed materials. Each lot's quantity is credited to
@@ -2028,6 +2170,16 @@ export class OrdersService {
           }],
         });
       }
+      // Retained-sample negation: the forward SAMPLE pair was US(−s @prod) +
+      // MK(+s @smp), both valueless; the produced parcel's PCKAGE negation
+      // above already nets the prod location (its parcel held full − s), so
+      // only the SMP side needs a leg.
+      for (const r of removedSamples) {
+        negationEvents.push({
+          context: 'SAMPLE', changeSetId: csId, itemId: r.itemId, sublotId: r.sublotId,
+          legs: [{ context: 'MK', ownerId: owner, locationId: r.locationId, qty: -r.qty, value: null }],
+        });
+      }
       await this.movements.record(tx, negationEvents);
 
       const reason = dto.reason?.trim();
@@ -2042,6 +2194,8 @@ export class OrdersService {
             `restored ${restored.length} consumed lot${restored.length === 1 ? '' : 's'}` +
             `${skippedRestores.length ? ` (${skippedRestores.length} not restorable)` : ''}, ` +
             `reset ${linesReset} line${linesReset === 1 ? '' : 's'}` +
+            `${qaSampleSets.length ? `, unwound ${qaSampleSets.length} sample set${qaSampleSets.length === 1 ? '' : 's'}` : ''}` +
+            `${qaReleases.length ? `, removed ${qaReleases.length} QA release${qaReleases.length === 1 ? '' : 's'}` : ''}` +
             `${reason ? ` — ${reason}` : ''}` +
             (witness ? ` (witnessed by ${witness.label}${dto.witnessExplanation ? `: ${dto.witnessExplanation}` : ''})` : ''),
           changes: [

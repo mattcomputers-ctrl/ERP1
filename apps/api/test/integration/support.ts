@@ -5,6 +5,7 @@ import { ApprovalPolicyService } from '../../src/approval/approval-policy.servic
 import { ApprovalRequestService } from '../../src/approval/approval-request.service';
 import { AuditService } from '../../src/audit/audit.service';
 import { ReleasesService } from '../../src/qa/releases.service';
+import { SamplingService } from '../../src/qa/sampling.service';
 import { ESignatureService } from '../../src/audit/esignature.service';
 import { AuthService } from '../../src/auth/auth.service';
 import type { Actor } from '../../src/auth/current-user.decorator';
@@ -123,8 +124,10 @@ export function services(prisma: PrismaClient) {
   const approvalRequests = new ApprovalRequestService(p);
   const recipeEditor = new RecipeEditorService(p, audit, esign, auth, permissions);
   const notifications = new NotificationEngineService(p);
-  const purchasing = new PurchasingService(p, settings, audit, party, valuation, movements, priceVersions, approvalPolicy, approvalRequests, notifications);
+  const sampling = new SamplingService(movements, notifications);
+  const purchasing = new PurchasingService(p, settings, audit, party, valuation, movements, priceVersions, approvalPolicy, approvalRequests, notifications, sampling);
   return {
+    sampling,
     settings,
     audit,
     party,
@@ -132,14 +135,14 @@ export function services(prisma: PrismaClient) {
     movements,
     priceVersions,
     salesPricing,
-    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation, movements, approvalPolicy, approvalRequests, notifications),
+    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation, movements, approvalPolicy, approvalRequests, notifications, sampling),
     approvalRequests,
     purchasing,
     shipping: new ShippingService(p, audit, party, salesPricing, approvalPolicy, approvalRequests),
     genealogy: new GenealogyService(p, party),
     inventory: new InventoryService(p, audit, movements, notifications),
-    lotTracking: new LotTrackingService(p, audit, movements),
-    miscReceipt: new MiscReceiptService(p, audit, valuation, movements, notifications),
+    lotTracking: new LotTrackingService(p, audit, movements, sampling),
+    miscReceipt: new MiscReceiptService(p, audit, valuation, movements, notifications, sampling),
     approvalPolicy,
     notifications,
     notificationRules: new NotificationsService(p, audit),

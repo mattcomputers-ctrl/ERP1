@@ -437,6 +437,18 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    // QC sample sets — in the LogResult change feed (76K rows), standard
+    // log-driven spec. Native rows (ERP1 completion-seam sets, ids ≥ 1e9) are
+    // untouchable by sync per the engine invariants.
+    name: 'SampleSet', legacyTable: 'dbo.SampleSet', delegate: 'sampleSet', idColumn: 'SampleSet',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.SampleSet, version: r.Version, sublotId: r.Sublot, beingTested: b(r.BeingTested) ?? false,
+      grade: r.Grade ?? 'GMP', expiryDate: r.ExpiryDate, destructDate: r.DestructDate,
+      iptOrdDetailId: r.IptOrdDetail, isStability: b(r.IsStability),
+    }),
+  },
+  {
     name: 'ReleaseCofA', legacyTable: 'dbo.ReleaseCofA', delegate: 'releaseCofA',
     where: (d) => ({ releaseId: d.releaseId }),
     map: (r) => ({

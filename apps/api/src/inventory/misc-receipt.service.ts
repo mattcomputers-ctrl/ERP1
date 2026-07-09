@@ -6,6 +6,7 @@ import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { maxRawLotNumber } from '../common/lot-numbers';
 import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { SamplingService } from '../qa/sampling.service';
 import { MovementRecorderService } from './movement-recorder.service';
 import { ValuationService } from './valuation.service';
 import type { CreateMiscReceiptDto } from './dto/misc-receipt.dto';
@@ -31,6 +32,7 @@ export class MiscReceiptService {
     private readonly valuation: ValuationService,
     private readonly movements: MovementRecorderService,
     private readonly notifications: NotificationEngineService,
+    private readonly sampling: SamplingService,
   ) {}
 
   async receive(dto: CreateMiscReceiptDto, actor: Actor) {
@@ -100,6 +102,8 @@ export class MiscReceiptService {
             numberOfContainers: l.numberOfContainers ?? 1,
           },
         });
+        // QA release at birth — Approved, like purchase receiving (ASSUMPTIONS §21).
+        await this.sampling.createApprovedRelease(tx, { sublotId: newSubId, actorLabel: actor.label ?? actor.id, at });
         created.push({ lot: lotNumber, itemId: l.itemId, qty: l.qty, manufacturerLot: mfrLot, changeSetId: newCsId });
       }
 

@@ -1319,3 +1319,114 @@ per-context emission contract in the discovery record):
    precision exactly on the NUM rows) and is cleared when a test flips to
    BOOL. `prototype` follows the boolean-mirror convention (explicit false;
    an explicit-null PATCH body is coerced, not stored).
+
+## Native QA sampling (§21 / L130+L132+L133, built 2026-07-09)
+
+Live discovery first (read-only legacy DB) — it REFUTED two assumptions the
+2026-07-09 parity sweep had baked into the build plan:
+
+1. **Receipts never created sample sets — or even sublots — in this install.**
+   `ChangeSetReceipt.Sublot` is NULL on 100% of the 9,074 PO + 424 MISC rows;
+   receipt InvMovements carry no sublot. ALL 55,856 sublots originate from
+   batching programs, and ALL 25,416 sample sets from exactly one seam:
+   `Batch Execution Express → InProcessTesting` (the IPT step), 2019→2026.
+2. **`ItemTest.OnReceipt`/`OnProduction` carry zero signal** — both flags are 1
+   on all 13,524 rows (OnRetest 0). The real gate is simply "the item HAS
+   ItemTest rows": such items' orders get an IPT step; executing it creates
+   the set. (Verified: order 190006/tested → 1 IPT step; 190090/untested → 0.)
+
+Other legacy facts the design rests on: Release is APPEND-ONLY history
+(creation row Hold/HOLD undated for tested items, Approved/GMP dated for
+untested; disposition INSERTS a new row carrying the SampleSet id, flips the
+old to Context='HISTORY', repoints Sublot.Release; every sublot has ≥1 row).
+Set creation moves REAL stock — one SAMPLE-context movement, USB(−) from the
+batch VESSEL parcel, MK(+) into a NEW per-sample SMP Location (6-digit sample
+sequence, max '030186'; parent 'BRECEIVE' LCN id 2), qty = TestGroup.SampleSize
+0.005 kg = 0.011023113109243879 lb; the SMP parcel persists (retained sample).
+`SampleSetTestSpec` freezes the ItemTest specs at creation;
+`LocationSampleTest` rows are inserted AT RESULT ENTRY (zero untested rows
+exist). `Container` is a VIEW over the SMP parcels. `SampleSet` IS in the
+LogResult change feed (76,396 rows).
+
+**ERP1-native design (deliberate deviations, each recorded):**
+
+1. **Release-at-birth for every native sublot** at all four minting seams
+   (purchase receive, misc receipt, lot-enablement, completion) — closes the
+   real gap: native sublots had NO release, so QA disposition/results/CofA
+   (all keyed off `Sublot.releaseId`) were invisible for everything ERP1
+   creates. Receiving/opening seams create **Approved/GMP dated** releases even
+   for tested items (legacy parity: receiving never quarantined stock here; QA
+   can still disposition manually). Idempotent: a sublot with a release is
+   skipped (reused imported FG sublots at lot-enable).
+2. **One MUTABLE release row** (Context='CURRENT'), not legacy's append-only
+   history — ERP1's shipped disposition updates in place; the audit trail is
+   the history. Disposition therefore finds the sample-set id already on the
+   release (legacy stamped it on the disposition row).
+3. **Sample set at COMPLETION** (not order release / IPT execution): ERP1
+   mints the produced sublot at completion, and has no vessel model to sample
+   from mid-execution. Tested products: Hold/HOLD release + native `SampleSet`
+   (mirrored + imported now — log-driven spec) with `IptOrdDetail` = the
+   order's IPT line; untested: Approved at birth. Same daily loop
+   (sample → results → disposition), one seam later.
+4. **Retained-sample stock split**: sample qty = max TestGroup.SampleSize over
+   the item's test groups, kg→lb ×2.2046226218487757 (item unit 'kg' taken
+   as-is; other units → no stock move — record-only set); split off the minted
+   parcel into a native SMP Location continuing the legacy 6-digit sample
+   sequence, parented at imported BRECEIVE when present. ONE SAMPLE-context
+   movement (context added to the recorder whitelist; the viewer already
+   filters it), legs US(−@prod)/MK(+@SMP), **valueless** (the legacy majority
+   shape — 20,054 of 25,416 sample legs carry no value), release id stamped on
+   the header (legacy shape). No stock move when the parcel is missing or
+   ≤ the sample qty. SMP parcels stay non-nettable (planning already excludes
+   SMP contexts).
+5. **Result rows pre-created** (one per ItemTest row, untested) — legacy
+   created them lazily at entry, but ERP1's shipped `enterResults` UPDATES
+   rows keyed by sampleSetId, and pre-creation gives pending-work visibility
+   legacy lacked. Pass/fail evaluates against the CURRENT ItemTest spec
+   (legacy froze a copy; ERP1 keeps specs live — `SampleSetTestSpec` /
+   `SampleSetLocationSample` / `LocationSample` NOT mirrored, nothing consumes
+   them).
+6. **'New Sample set' notification** (the install's configured rule #10 —
+   SecurityGroup '*', no SendTo list) emitted at set creation inside the tx —
+   the last configured QA code, now wired.
+7. **Reversal (un-complete) unwinds the QA artifacts**: refuses once any
+   result is recorded or the release left Hold (rejected releases refuse too);
+   otherwise deletes the pre-created result rows, the set, the native
+   release(s) (clearing Sublot.releaseId), the retained-sample parcel and its
+   native SMP location, and posts the SMP-side MK negation under the RVSMFP
+   change set (the prod side is compensated by the main parcel's PCKAGE
+   negation, which held full − sample). The untouched check now accepts
+   main + sample parcels summing to the produced qty (float-tolerant 1e-9
+   relative — the split re-adds in floating point).
+8. **Receipt-seam sampling NOT built** — refuted by the evidence in (1); a
+   manual create-sample-set action would be a new ask, not parity. ZEROQTY
+   test group (SampleSize 0) → set without stock, matching legacy.
+9. **Review round (5 lenses → dedup → 2 adversarial verifiers each,
+   both-must-confirm)**: 20 raw findings, 16 confirmed entries = **8 unique
+   defects, all fixed** — the tests had missed every one:
+   (a) the reversal disposition guard detected only status-left-Hold, missing
+   Hold→Hold re-dispositions and quarantines of untested releases → replaced
+   with a born-shape comparison (tested = Hold/HOLD undated; untested =
+   Approved/GMP no purity/expiry; an IDENTICAL re-approval of an untested
+   release remains indistinguishable — accepted, its e-sig/audit rows survive);
+   (b) reverse() vs enterResults/disposition were unserialized (check-then-
+   delete could destroy committed results; latent ABBA deadlock) → both QA
+   writers now take NATIVE_ID_ALLOC_LOCK at tx start and re-read their target
+   rows IN-TX (a reversal-deleted release 404s instead of resurrecting);
+   (c) lot-enablement's wipe destroyed in-flight retained samples → enable()
+   refuses while the item has an undispositioned native sample (dispositioned
+   samples wipe like the legacy ones always did);
+   (d) native sample codes continued legacy's LIVE 6-digit sequence
+   (guaranteed parallel-running collisions via sync) → native namespace
+   'E'+5 digits (prefixed codes precedented pre-2013);
+   (e) SMP retained-sample parcels were consumable by both depletion engines
+   (a full-batch packout would eat the sample) → SMP-context parcels excluded
+   from the locked scans (still one-statement, lock order unchanged);
+   (f) native releases could never print a CofA (no ReleaseCofA header
+   writer anywhere) → the approving disposition now creates the header for
+   native releases (id-gated; reversal cleans it up);
+   (g) PENDING disposition approval requests survived reversal and MAX+1 id
+   reuse could enact them onto a future release → auto-REJECTED (CAS) with a
+   system reason inside the reversal tx;
+   (h) the live 'New Sample set' template's 16 extra tokens rendered raw →
+   all supplied (nulls render blank) + @Table = the set's test/spec list.

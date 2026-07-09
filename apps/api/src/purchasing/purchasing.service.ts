@@ -11,6 +11,7 @@ import { MovementRecorderService } from '../inventory/movement-recorder.service'
 import { ValuationService } from '../inventory/valuation.service';
 import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { SamplingService } from '../qa/sampling.service';
 import { PartyService } from '../sales/party.service';
 import { SettingsService } from '../settings/settings.service';
 
@@ -74,6 +75,7 @@ export class PurchasingService {
     private readonly approvalPolicy: ApprovalPolicyService,
     private readonly approvalRequests: ApprovalRequestService,
     private readonly notifications: NotificationEngineService,
+    private readonly sampling: SamplingService,
   ) {}
 
   /** Browse purchase orders (Ordr Context='PO') with supplier name + line total. */
@@ -1024,6 +1026,9 @@ export class PurchasingService {
               }],
             }]);
           }
+          // QA release at birth — Approved (receiving never quarantined stock
+          // at this plant; QA can still disposition manually — ASSUMPTIONS §21).
+          await this.sampling.createApprovedRelease(tx, { sublotId: newSubId, actorLabel: actor.label ?? actor.id, at });
           incByLine.set(dl.ordDetailId, (incByLine.get(dl.ordDetailId) ?? 0) + lot.qty);
           created.push({ lot: lotNumber, manufacturerLot: mfrLot, ordDetailId: dl.ordDetailId, qty: lot.qty, changeSetId: newCsId });
         }

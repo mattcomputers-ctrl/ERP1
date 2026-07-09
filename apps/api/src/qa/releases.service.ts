@@ -7,6 +7,7 @@ import { ESignatureService } from '../audit/esignature.service';
 import { AuthService } from '../auth/auth.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { PermissionService } from '../auth/permission.service';
+import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { ApproveDispositionDto, RejectDispositionDto } from './dto/approve-disposition.dto';
@@ -356,11 +357,25 @@ export class ReleasesService {
    * row and the audit field-changes. `undefined` snapshot fields are left as-is. */
   private async applyDispositionToRelease(
     tx: Prisma.TransactionClient,
-    release: { id: number; status: string | null; grade: string | null; purity: number | null; expiryDate: Date | null },
+    staleRelease: { id: number; status: string | null; grade: string | null; purity: number | null; expiryDate: Date | null },
     snap: DispositionSnap,
     releasedBy: string,
     at: Date,
   ) {
+    // Serialize against the batch-reversal unwind (which deletes native
+    // releases under the alloc lock) and re-read the row IN-TX: the caller's
+    // snapshot predates the slow Argon2 signature verify, and a disposition
+    // must never land on (or diff against) a row a reversal just removed. The
+    // alloc lock FIRST also keeps the lock order alloc→audit (convention 1b) —
+    // acquiring row locks before the alloc lock deadlocks against reverse().
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+    const release = await tx.release.findUnique({
+      where: { id: staleRelease.id },
+      select: { id: true, status: true, grade: true, purity: true, expiryDate: true, sublotId: true },
+    });
+    if (!release) {
+      throw new NotFoundException('Release not found — it may have been removed by a batch reversal.');
+    }
     const data: Prisma.ReleaseUpdateInput = { status: snap.status, releaseDate: at, releasedBy };
     const changes: FieldChange[] = [
       { tableName: 'Release', recordId: String(release.id), fieldName: 'Status', oldValue: release.status, newValue: snap.status },
@@ -399,13 +414,39 @@ export class ReleasesService {
     const sublot = u.sublotId != null
       ? await tx.sublot.findUnique({ where: { id: u.sublotId }, select: { lot: true, sublotCode: true } })
       : null;
-    const lotRow = sublot?.lot ? await tx.lot.findUnique({ where: { lot: sublot.lot }, select: { itemId: true } }) : null;
+    const lotRow = sublot?.lot
+      ? await tx.lot.findUnique({
+          where: { lot: sublot.lot },
+          select: { itemId: true, manfLot: true, manfDate: true, receivedDate: true },
+        })
+      : null;
     const item = lotRow?.itemId != null
       ? await tx.item.findUnique({
           where: { id: lotRow.itemId },
           select: { itemCode: true, description: true, securityGroup: true, ownerId: true },
         })
       : null;
+
+    // Legacy inserted the ReleaseCofA header at disposition; native releases
+    // get theirs here (id-gated — imported releases carry imported headers),
+    // so the CofA endpoint can print ERP1-born lots. PK = releaseId, no id
+    // allocation; created once, on the approving disposition.
+    if (snap.status === 'Approved' && release.id >= NATIVE_ID_BASE) {
+      const existingCofa = await tx.releaseCofA.findUnique({ where: { releaseId: release.id }, select: { releaseId: true } });
+      if (!existingCofa) {
+        await tx.releaseCofA.create({
+          data: {
+            releaseId: release.id,
+            productCode: item?.itemCode ?? null,
+            description: item?.description ?? null,
+            manfDate: lotRow?.manfDate ?? lotRow?.receivedDate ?? at,
+            pkgLot: sublot?.lot ?? null,
+            manfLot: lotRow?.manfLot ?? sublot?.lot ?? null,
+            expiryDate: snap.expiry !== undefined ? snap.expiry : release.expiryDate,
+          },
+        });
+      }
+    }
     await this.notifications.emit(tx, 'Release Sublot Notification', {
       securityGroup: item?.securityGroup,
       ownerId: item?.ownerId,
@@ -525,27 +566,33 @@ export class ReleasesService {
    * Audited (no e-signature — the signed gate is the disposition).
    */
   async enterResults(releaseId: number, dto: EnterResultsDto, actor: Actor) {
-    const release = await this.prisma.release.findUnique({
-      where: { id: releaseId },
-      select: { sampleSetId: true, sublotId: true },
-    });
-    if (!release) throw new NotFoundException('Release not found');
-    if (release.sampleSetId == null) throw new BadRequestException('This release has no sample set to record results against.');
-
     const items = (dto.results ?? []).filter((r) => Number.isInteger(r.id));
     if (!items.length) throw new BadRequestException('No results to record.');
-
-    // Only rows that actually belong to this release's sample set may be updated.
-    const rows = await this.prisma.locationSampleTest.findMany({
-      where: { sampleSetId: release.sampleSetId, id: { in: items.map((r) => r.id) } },
-      select: { id: true, test: true, result: true },
-    });
-    const rowById = new Map(rows.map((r) => [r.id, r]));
-    const specByTest = await this.specsForRelease(release.sublotId);
 
     const at = new Date();
     const testedBy = actor.label ?? actor.id;
     return this.prisma.$transaction(async (tx) => {
+      // Alloc lock first, release + rows read INSIDE the tx: serializes against
+      // the batch-reversal unwind (which deletes these rows under the same
+      // lock) — a pre-tx snapshot let a reversal committing in the window
+      // silently destroy the results this save was recording (2026-07-09
+      // review). Lock order stays alloc→audit (convention 1b).
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const release = await tx.release.findUnique({
+        where: { id: releaseId },
+        select: { sampleSetId: true, sublotId: true },
+      });
+      if (!release) throw new NotFoundException('Release not found');
+      if (release.sampleSetId == null) throw new BadRequestException('This release has no sample set to record results against.');
+
+      // Only rows that actually belong to this release's sample set may be updated.
+      const rows = await tx.locationSampleTest.findMany({
+        where: { sampleSetId: release.sampleSetId, id: { in: items.map((r) => r.id) } },
+        select: { id: true, test: true, result: true },
+      });
+      const rowById = new Map(rows.map((r) => [r.id, r]));
+      const specByTest = await this.specsForRelease(release.sublotId);
+
       const changes: FieldChange[] = [];
       for (const item of items) {
         const row = rowById.get(item.id);

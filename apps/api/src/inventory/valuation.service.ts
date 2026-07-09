@@ -125,10 +125,15 @@ export class ValuationService {
     const lotBySub = new Map(subs.map((s) => [s.id, s.lot]));
 
     // The single locked scan (see the lock-order invariant above). Ascending-id
-    // order doubles as the oldest-first draw order within each lot.
+    // order doubles as the oldest-first draw order within each lot. SMP-context
+    // parcels (retained QC samples — legacy convention AND the native sampling
+    // seam's splits) are on-hand but never consumable stock: without the
+    // exclusion, exhausting a produced lot's main parcel silently ate the
+    // retained sample (2026-07-09 review).
     const rows = await tx.$queryRaw<{ id: number; itemId: number | null; sublotId: number; locationId: number | null; qty: number | null }[]>`
       SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Location" AS "locationId", "Qty" AS qty FROM "Inventory"
       WHERE "Sublot" = ANY(${subs.map((s) => s.id)}) AND "Qty" > 0
+        AND ("Location" IS NULL OR "Location" NOT IN (SELECT "Location" FROM "Location" WHERE "Context" = 'SMP'))
       ORDER BY "Inventory" ASC
       FOR UPDATE`;
     const parcelsByLot = new Map<string, { id: number; itemId: number | null; sublotId: number; locationId: number | null; qty: number }[]>();
@@ -229,10 +234,12 @@ export class ValuationService {
     if (!itemIds.length) return result;
 
     // The single locked scan (lock-order invariant — one statement, global
-    // ascending id, across ALL requested items).
+    // ascending id, across ALL requested items). SMP retained-sample parcels
+    // excluded — never consumable stock (see depleteSpecificMany).
     const rows = await tx.$queryRaw<{ id: number; itemId: number; sublotId: number | null; locationId: number | null; qty: number | null }[]>`
       SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Location" AS "locationId", "Qty" AS qty FROM "Inventory"
       WHERE "Item" = ANY(${itemIds}) AND "Qty" > 0 AND "Sublot" IS NOT NULL
+        AND ("Location" IS NULL OR "Location" NOT IN (SELECT "Location" FROM "Location" WHERE "Context" = 'SMP'))
       ORDER BY "Inventory" ASC
       FOR UPDATE`;
     if (!rows.length) return result;
