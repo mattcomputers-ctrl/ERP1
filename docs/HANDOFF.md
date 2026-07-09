@@ -137,27 +137,24 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. ~~APPLY THE PARITY SWEEP~~ **DONE 2026-07-09**: all 66 dispositions
-   applied to FEATURE_PARITY.md (48 rows closed → 60 ✅ / 28 ⏸️ / 18 open,
-   all queued builds). 9-agent verification of the application confirmed 7
-   findings (3 broken-pipe table cells, stale phrases, one overstated gap —
-   Item.CostingRecipe was ALREADY imported), all fixed. Note: L62/L19-style
-   rows stay ⬜ when nothing is built yet even under a SPLIT disposition.
-2. **Build the genuine gaps the sweep confirmed** (details + sizes in the
-   sweep doc), grouped by module: (a) QA sampling — native sample-set/
-   Release creation at the receipt/completion seams + Test-catalog admin
-   (L129/L130/L132/L133 — the plant's daily QC loop; ERP1 can't create
-   Release rows today); (b) SH staging — reserve/unreserve parcels +
+1. ~~APPLY THE PARITY SWEEP~~ **DONE 2026-07-09** (ccc4f27): 48 rows closed.
+   ~~QA module group~~ **DONE 2026-07-09**: Test-catalog admin (9d212cd,
+   L129) + native QA sampling (dac1af0, L130/L132/L133). **14 rows open, all
+   queued builds.**
+2. **Build the remaining gaps** (details + sizes in the sweep doc), grouped
+   by module — NEXT UP: (a) SH staging — reserve/unreserve parcels +
    shipping assemblies (L113, 15,855 uses, active daily; Inventory.OrdDetail
-   + ASM locations already mirrored); (c) warehouse transfers (TI invoices,
-   182 rows, active) + returns/credits (negative SH lines + native invoice
-   reversal — 2,343 reversal pairs, growing) (L115); (d) MFA/TOTP + OIDC
-   SSO (L19 — committed greenfield security requirement, not legacy
-   parity); (e) smaller: supervisor in-place elevation (L22), item/entity
-   edit-form gaps (L31/L33/L34), price-list editor wiring (L37/L48),
-   disposal reversal (L60), count sheets/verify-location (L62), label
-   printing (L64), recipe expected-cost view (L75), doc logo/branding
-   (L153).
+   + ASM locations already mirrored; NOTE the SMP-exclusion precedent in
+   valuation depletion scans — staged ASM parcels must stay consumable at
+   ship time); (b) warehouse transfers (TI invoices, 182 rows, active) +
+   returns/credits (negative SH lines + native invoice reversal — 2,343
+   reversal pairs, growing) (L115); (c) MFA/TOTP + OIDC SSO (L19 — committed
+   greenfield security requirement, not legacy parity); (d) smaller:
+   supervisor in-place elevation (L22), item/entity edit-form gaps
+   (L31/L33/L34), supplier price-version editor (L37/L48), shipment reversal
+   (L60), count sheets (L62), label printing incl. sample labels (L64),
+   recipe expected-cost sub-recipe rollup (L75 — CostingRecipe already
+   imported, pure rollup extension), doc logo upload (L153).
 3. Background chip pending: enforce secured-item PERFORM grant on
    order.complete + release.disposition (+ order.revise now).
 4. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
@@ -174,6 +171,43 @@ schedule **Sync changes** during parallel running).
    leg values the old money column cent-rounded (ASSUMPTIONS §20.12);
    disable the PlanTrace import spec (the native plan takes over — setting
    `planning.source` already flips on first recalc).
+
+## State of the world (as of 2026-07-09 later, QA module group)
+
+- **Native QA sampling ✅** (dac1af0, ASSUMPTIONS §21): discovery REFUTED the
+  sweep's receipt-seam plan — legacy receipts never created sample sets OR
+  sublots (ChangeSetReceipt.Sublot NULL on all 9,074+424 rows); all 25,416
+  sets come from ONE seam (batch IPT execution); OnReceipt/OnProduction are
+  both=1 on all 13,524 ItemTest rows (the gate is "item HAS tests"); legacy
+  Release is append-only history; sets move REAL stock (0.005 kg vessel→SMP).
+  ERP1: **every native sublot gets a Release at birth** — Approved/GMP/dated
+  at receive/misc/lot-enable (receiving never quarantined here), and at
+  completion tested products get Hold/HOLD + native SampleSet (mirrored +
+  imported, log-driven; IptOrdDetail = the order's IPT line) + retained-sample
+  split (kg→lb ×2.2046226218487757) into a native SMP location
+  ('E'+5-digit namespace — NOT legacy's live sequence) + ONE valueless SAMPLE
+  movement (context added to MovementRecorder; releaseId stamped) +
+  pre-created LocationSampleTest rows + 'New Sample set' (rule #10, last
+  configured QA code). The approving disposition mints the native ReleaseCofA
+  header. reverse() unwinds it all; refuses via a BORN-SHAPE guard once any
+  disposition/result exists; auto-rejects stale PENDING disposition requests.
+  **New conventions from the review round (8/8 unique findings dual-confirmed,
+  fixed — §21.9)**: QA writers (enterResults / applyDispositionToRelease) take
+  NATIVE_ID_ALLOC_LOCK at tx start + re-read their target rows IN-TX
+  (serializes vs the reversal unwind; ABBA-safe); SMP-context parcels are
+  EXCLUDED from both valuation depletion scans (retained samples are never
+  consumable); lot-enable REFUSES while the item has an undispositioned
+  native sample. SamplingService lives in qa/ but is PROVIDED by
+  InventoryModule (QaModule↔InventoryModule would be circular).
+- **Test-catalog admin ✅** (9d212cd, ASSUMPTIONS Test-catalog section): CRUD
+  on the natural-key `Test` master (name ≤20 PK, case-insensitive-unique
+  in-tx under the alloc lock, NO rename — ItemTest/OrdDetailTest/LST link by
+  name), NUM|BOOL + NUM-only precision, group must exist, delete guarded by
+  ItemTest refs (case+whitespace-insensitive raw-SQL count), program
+  qa.testCatalogEdit; Catalog section on the Item Tests page. Review round
+  fixed 5 defects incl. prototype:null→NULL and a stale pre-tx read.
+- Suites: 113 unit + 413 integration green. FEATURE_PARITY: 60+4 ✅ / 28 ⏸️ /
+  14 open.
 
 ## State of the world (as of 2026-07-09, native movement emission)
 
