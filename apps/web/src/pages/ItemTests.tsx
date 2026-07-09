@@ -106,7 +106,171 @@ export function ItemTests() {
       </Card>
 
       {picked && <TestTable itemId={picked.id} tests={detail.data?.tests ?? []} loading={detail.isLoading} />}
+
+      <CatalogSection />
     </div>
+  );
+}
+
+// --- Test-catalog admin (the master `Test` list the pickers offer) -----------
+
+interface CatalogRow {
+  test: string; description: string | null; testResultType: string | null; precision: number | null;
+  testGroup: string | null; unit: string | null; prototype: boolean; usedBy: number;
+}
+interface CatalogResp { rows: CatalogRow[]; groups: { testGroup: string; description: string | null }[] }
+
+type CatalogDraft = { test: string; description: string; testResultType: string; precision: string; testGroup: string; unit: string };
+const emptyCatalogDraft = (): CatalogDraft => ({ test: '', description: '', testResultType: 'NUM', precision: '', testGroup: '', unit: '' });
+const catalogDraftFrom = (r: CatalogRow): CatalogDraft => ({
+  test: r.test, description: r.description ?? '', testResultType: r.testResultType ?? 'NUM',
+  precision: r.precision != null ? String(r.precision) : '', testGroup: r.testGroup ?? '', unit: r.unit ?? '',
+});
+function catalogBody(d: CatalogDraft, forCreate: boolean): Record<string, unknown> {
+  return {
+    ...(forCreate ? { test: d.test.trim() } : {}),
+    description: d.description.trim() || null,
+    testResultType: d.testResultType,
+    precision: d.testResultType === 'NUM' && d.precision.trim() !== '' ? Number(d.precision) : null,
+    testGroup: d.testGroup.trim(),
+    unit: d.unit.trim() || null,
+  };
+}
+
+function CatalogSection() {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const cat = useQuery({ queryKey: ['test-catalog'], queryFn: () => api.get<CatalogResp>('/item-tests/catalog'), enabled: open });
+  const refresh = () => qc.invalidateQueries({ queryKey: ['test-catalog'] });
+  const remove = useMutation({
+    mutationFn: (test: string) => api.del(`/item-tests/catalog/${encodeURIComponent(test)}`),
+    onSuccess: refresh,
+  });
+
+  return (
+    <Card className="p-0">
+      <div className="flex items-center justify-between px-4 py-2">
+        <button onClick={() => setOpen((o) => !o)} className="text-sm font-medium text-slate-600 hover:underline">
+          {open ? '▾' : '▸'} Test catalog {cat.data ? `(${cat.data.rows.length})` : ''}
+        </button>
+        {open && (
+          <button onClick={() => { setAdding((a) => !a); setEditing(null); }} className="text-sm font-medium text-indigo-600 hover:underline">
+            {adding ? 'Cancel' : '+ Add catalog test'}
+          </button>
+        )}
+      </div>
+      {open && (
+        <>
+          {adding && (
+            <div className="border-t border-slate-200 bg-slate-50 px-4 py-3">
+              <CatalogForm
+                initial={emptyCatalogDraft()}
+                groups={cat.data?.groups ?? []}
+                forCreate
+                submitLabel="Add to catalog"
+                onSubmit={(body) => api.post('/item-tests/catalog', body)}
+                onDone={() => { setAdding(false); refresh(); }}
+              />
+            </div>
+          )}
+          <table className="w-full border-t border-slate-200 text-sm">
+            <thead className="border-b border-slate-200 bg-slate-50 text-left text-slate-500">
+              <tr>
+                <th className="px-4 py-2 font-medium">Test</th>
+                <th className="px-4 py-2 font-medium">Description</th>
+                <th className="px-4 py-2 font-medium">Type</th>
+                <th className="px-4 py-2 font-medium">Precision</th>
+                <th className="px-4 py-2 font-medium">Group</th>
+                <th className="px-4 py-2 font-medium">Unit</th>
+                <th className="px-4 py-2 font-medium">Used by</th>
+                <th className="px-4 py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {cat.data?.rows.map((r) => (
+                <Fragment key={r.test}>
+                  <tr className="border-b border-slate-100 last:border-0">
+                    <td className="px-4 py-2 font-medium">{r.test}</td>
+                    <td className="px-4 py-2 text-slate-500">{r.description}</td>
+                    <td className="px-4 py-2">{r.testResultType}</td>
+                    <td className="px-4 py-2 tabular-nums">{r.precision ?? ''}</td>
+                    <td className="px-4 py-2 text-slate-500">{r.testGroup}</td>
+                    <td className="px-4 py-2 text-slate-500">{r.unit}</td>
+                    <td className="px-4 py-2 tabular-nums">{r.usedBy > 0 ? `${r.usedBy} requirement${r.usedBy === 1 ? '' : 's'}` : '—'}</td>
+                    <td className="px-4 py-2 text-right whitespace-nowrap">
+                      <button onClick={() => { setEditing(editing === r.test ? null : r.test); setAdding(false); }} className="mr-3 font-medium text-indigo-600 hover:underline">Edit</button>
+                      <button onClick={() => remove.mutate(r.test)} disabled={remove.isPending || r.usedBy > 0} title={r.usedBy > 0 ? 'Referenced by item test requirements' : undefined} className="text-slate-400 hover:text-red-600 disabled:cursor-not-allowed disabled:hover:text-slate-400">remove</button>
+                    </td>
+                  </tr>
+                  {editing === r.test && (
+                    <tr className="bg-slate-50"><td colSpan={8} className="px-4 py-3">
+                      <CatalogForm
+                        initial={catalogDraftFrom(r)}
+                        groups={cat.data?.groups ?? []}
+                        submitLabel="Save changes"
+                        onSubmit={(body) => api.patch(`/item-tests/catalog/${encodeURIComponent(r.test)}`, body)}
+                        onDone={() => { setEditing(null); refresh(); }}
+                      />
+                    </td></tr>
+                  )}
+                </Fragment>
+              ))}
+              {cat.isLoading && <tr><td colSpan={8} className="px-4 py-4 text-slate-400">Loading…</td></tr>}
+            </tbody>
+          </table>
+          {remove.isError && <p className="px-4 py-2 text-sm text-red-600">{(remove.error as Error).message}</p>}
+          <p className="border-t border-slate-100 px-4 py-2 text-xs text-slate-400">
+            The catalog feeds the test-name picker above. Editing requires the <em>Edit Test Catalog</em> right; names cannot
+            be renamed (item requirements, order specs and sample results link by name).
+          </p>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function CatalogForm({ initial, groups, forCreate = false, submitLabel, onSubmit, onDone }: {
+  initial: CatalogDraft; groups: { testGroup: string; description: string | null }[]; forCreate?: boolean;
+  submitLabel: string; onSubmit: (body: Record<string, unknown>) => Promise<unknown>; onDone: () => void;
+}) {
+  const [d, setD] = useState<CatalogDraft>(initial);
+  const set = (patch: Partial<CatalogDraft>) => setD((p) => ({ ...p, ...patch }));
+  const m = useMutation({ mutationFn: () => onSubmit(catalogBody(d, forCreate)), onSuccess: onDone });
+  const valid = (!forCreate || d.test.trim().length > 0) && d.testGroup.trim().length > 0;
+
+  return (
+    <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (valid) m.mutate(); }}>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Field label="Test name">
+          <Input value={d.test} onChange={(e) => set({ test: e.target.value })} maxLength={20} disabled={!forCreate} />
+        </Field>
+        <Field label="Description"><Input value={d.description} onChange={(e) => set({ description: e.target.value })} maxLength={256} /></Field>
+        <Field label="Result type">
+          <select value={d.testResultType} onChange={(e) => set({ testResultType: e.target.value })} className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm">
+            <option value="NUM">NUM (numeric)</option>
+            <option value="BOOL">BOOL (pass/fail)</option>
+          </select>
+        </Field>
+        <Field label="Precision (NUM only)">
+          <Input type="number" min={0} max={10} step={1} value={d.precision} onChange={(e) => set({ precision: e.target.value })} disabled={d.testResultType !== 'NUM'} />
+        </Field>
+        <Field label="Group">
+          <select value={d.testGroup} onChange={(e) => set({ testGroup: e.target.value })} className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm">
+            <option value="">— choose —</option>
+            {groups.map((g) => (
+              <option key={g.testGroup} value={g.testGroup}>{g.testGroup}{g.description ? ` — ${g.description}` : ''}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Unit"><Input value={d.unit} onChange={(e) => set({ unit: e.target.value })} maxLength={20} /></Field>
+      </div>
+      <div className="flex items-center gap-3">
+        <Button type="submit" disabled={!valid || m.isPending}>{m.isPending ? 'Saving…' : submitLabel}</Button>
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
+    </form>
   );
 }
 
@@ -114,7 +278,11 @@ function TestTable({ itemId, tests, loading }: { itemId: number; tests: TestRow[
   const qc = useQueryClient();
   const [editing, setEditing] = useState<number | null>(null);
   const [adding, setAdding] = useState(false);
-  const refresh = () => qc.invalidateQueries({ queryKey: ['item-tests', itemId] });
+  // Item-test edits change the catalog's usage counts too — refresh both.
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['item-tests', itemId] });
+    qc.invalidateQueries({ queryKey: ['test-catalog'] });
+  };
   const remove = useMutation({
     mutationFn: (testId: number) => api.del(`/item-tests/${itemId}/tests/${testId}`),
     onSuccess: refresh,

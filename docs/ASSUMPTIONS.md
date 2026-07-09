@@ -1291,3 +1291,31 @@ per-context emission contract in the discovery record):
     migrated to numeric(19,4)); the overbroad "no RVS codes in the
     whitelist" rationale (RVSSH is one); and the stale FEATURE_PARITY
     "capture-only" shipping row.
+
+## Test-catalog admin (§11 / L129, built 2026-07-09)
+
+1. **Natural-key create semantics**: `Test` is a name-keyed mirror (PK = the
+   20-char test name, no int id), so the native-id ≥ 1e9 convention cannot
+   apply. Uniqueness is enforced case-insensitively INSIDE the transaction
+   under the shared advisory lock (create/update/remove all take it — full
+   serialization of catalog writers); `version` is written 0 on native rows
+   (the legacy column is a client save counter, not consumed by anything).
+2. **No rename**: ItemTest / OrdDetailTest / LocationSampleTest reference
+   tests by NAME with no FK; renaming would orphan them silently (legacy had
+   the same property). The PATCH endpoint does not accept a name.
+3. **Delete guard scope**: deletion is refused only while `ItemTest` rows
+   reference the name (case- and whitespace-insensitively — legacy names are
+   space-padded in places). OrdDetailTest/LocationSampleTest are point-in-time
+   snapshots and deliberately NOT a guard — legacy `Test Update` deleted
+   catalog rows the same way (76 uses incl. Deletes, results kept rendering).
+4. **Import interaction**: `Test` IS in the LogResult change feed. A natively
+   created name that legacy never touches survives sync untouched; a FULL
+   re-import restores legacy-origin rows deleted natively (acceptable during
+   parallel running; deletes here are rare and audited). A name collision with
+   a future legacy insert would be overwritten by the legacy row on its next
+   sync touch — same-name-same-meaning, acceptable.
+5. **Result-type shape**: result type is constrained to the two values the
+   install ever used (NUM 18 / BOOL 17); precision is NUM-only (live data:
+   precision exactly on the NUM rows) and is cleared when a test flips to
+   BOOL. `prototype` follows the boolean-mirror convention (explicit false;
+   an explicit-null PATCH body is coerced, not stored).

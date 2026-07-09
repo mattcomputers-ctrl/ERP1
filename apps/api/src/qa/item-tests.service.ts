@@ -4,7 +4,7 @@ import type { Actor } from '../auth/current-user.decorator';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { formatSpec } from '../orders/order-format';
 import { PrismaService } from '../prisma/prisma.service';
-import type { CreateItemTestDto, UpdateItemTestDto } from './dto/item-test.dto';
+import type { CreateCatalogTestDto, CreateItemTestDto, UpdateCatalogTestDto, UpdateItemTestDto } from './dto/item-test.dto';
 
 // Viewer + editor for item testing requirements (legacy ItemTest): per item, the
 // QC tests + specifications and the stages they apply to. The same ItemTest rows
@@ -215,6 +215,185 @@ export class ItemTestsService {
         tx,
       );
       return { itemId, testId };
+    });
+  }
+
+  // --- Test-catalog admin (legacy `Test` master; program qa.testCatalogEdit) --
+  // Natural-key table (PK = the 20-char test NAME) — no native-id range applies.
+  // Legacy 'Test Update' was this editor (76 uses through 2025-12-23, still adding
+  // tests). A native row survives sync (only legacy-touched keys re-pull); a full
+  // re-import restores legacy-origin rows deleted here (documented, acceptable).
+
+  /** The full Test catalog (35 rows live) with per-name ItemTest usage counts,
+   * plus the TestGroup options for the editor's group picker. */
+  async catalog() {
+    const [tests, usage, groups] = await Promise.all([
+      this.prisma.test.findMany({ orderBy: { test: 'asc' } }),
+      this.prisma.itemTest.groupBy({ by: ['test'], where: { test: { not: null } }, _count: { _all: true } }),
+      this.prisma.testGroup.findMany({ orderBy: { testGroup: 'asc' }, select: { testGroup: true, description: true } }),
+    ]);
+    const counts = new Map<string, number>();
+    for (const u of usage) {
+      const key = (u.test as string).trim().toUpperCase();
+      counts.set(key, (counts.get(key) ?? 0) + u._count._all);
+    }
+    return {
+      rows: tests.map((t) => ({
+        test: t.test,
+        description: t.description,
+        testResultType: t.testResultType,
+        precision: t.precision,
+        testGroup: t.testGroup,
+        unit: t.unit,
+        prototype: !!t.prototype,
+        usedBy: counts.get(t.test.trim().toUpperCase()) ?? 0,
+      })),
+      groups,
+    };
+  }
+
+  /** Precision belongs to numeric results only — the live catalog has it on
+   * exactly the NUM rows. Returns the normalized precision to store. */
+  private assertCatalogShape(resultType: string, precision: number | null | undefined): number | null {
+    if (resultType !== 'NUM' && resultType !== 'BOOL') throw new BadRequestException('Result type must be NUM or BOOL.');
+    if (precision == null) return null;
+    if (!Number.isInteger(precision) || precision < 0 || precision > 10) throw new BadRequestException('Precision must be an integer from 0 to 10.');
+    if (resultType === 'BOOL') throw new BadRequestException('Precision applies to numeric (NUM) tests only.');
+    return precision;
+  }
+
+  /** Add a test to the master catalog. Uniqueness is case-insensitive (ItemTest
+   * links by name and the picker dedupes case-insensitively) and checked INSIDE
+   * the locked tx, alongside the test-group existence check. */
+  async addCatalogTest(dto: CreateCatalogTestDto, actor: Actor) {
+    const name = dto.test?.trim();
+    if (!name) throw new BadRequestException('A test name is required.');
+    const groupName = dto.testGroup?.trim();
+    if (!groupName) throw new BadRequestException('A test group is required (every catalog test carries one).');
+    const precision = this.assertCatalogShape(dto.testResultType, dto.precision);
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const existing = await tx.test.findMany({ select: { test: true } });
+      if (existing.some((t) => t.test.trim().toUpperCase() === name.toUpperCase()))
+        throw new BadRequestException(`Test '${name}' already exists in the catalog.`);
+      const group = await tx.testGroup.findUnique({ where: { testGroup: groupName }, select: { testGroup: true } });
+      if (!group) throw new BadRequestException(`Test group '${groupName}' does not exist.`);
+      await tx.test.create({
+        data: {
+          test: name,
+          version: 0,
+          description: dto.description?.trim() || null,
+          testResultType: dto.testResultType,
+          precision,
+          testGroup: group.testGroup,
+          unit: dto.unit?.trim() || null,
+          prototype: dto.prototype ?? false,
+        },
+      });
+      await this.audit.record(
+        {
+          action: 'qa.testCatalog.add',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'qa.testCatalogEdit',
+          summary: `Test '${name}' added to the catalog`,
+          changes: [{ tableName: 'Test', recordId: name, fieldName: 'Test', oldValue: null, newValue: name }],
+        },
+        tx,
+      );
+      return { test: name };
+    });
+  }
+
+  /** Update a catalog test (partial; the NAME never changes — other tables link
+   * by it). Re-asserts the DTO invariants the @IsOptional-null trap skips. The
+   * row read, shape validation and diff all run INSIDE the tx under the shared
+   * advisory lock — a pre-tx snapshot lets two concurrent PATCHes interleave
+   * into a BOOL-with-precision row, and update-vs-remove into a P2025 500. */
+  async updateCatalogTest(testName: string, dto: UpdateCatalogTestDto, actor: Actor) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const row = await tx.test.findUnique({ where: { test: testName } });
+      if (!row) throw new NotFoundException(`Test '${testName}' is not in the catalog.`);
+
+      const nextType = dto.testResultType === undefined ? (row.testResultType ?? 'NUM') : dto.testResultType;
+      if (nextType == null) throw new BadRequestException('The result type cannot be cleared.');
+      // Changing to BOOL implicitly clears a stored precision; an explicit
+      // precision must satisfy the same shape rule as create.
+      const nextPrecision =
+        dto.precision === undefined
+          ? nextType === 'BOOL'
+            ? null
+            : (row.precision ?? null)
+          : this.assertCatalogShape(nextType, dto.precision);
+      if (dto.testResultType !== undefined || dto.precision !== undefined) this.assertCatalogShape(nextType, nextPrecision);
+
+      let groupName: string | null | undefined;
+      if (dto.testGroup !== undefined) {
+        groupName = dto.testGroup?.trim() || null;
+        if (!groupName) throw new BadRequestException('A test group is required (every catalog test carries one).');
+        const group = await tx.testGroup.findUnique({ where: { testGroup: groupName }, select: { testGroup: true } });
+        if (!group) throw new BadRequestException(`Test group '${groupName}' does not exist.`);
+      }
+
+      const data: Record<string, unknown> = {};
+      const changes: FieldChange[] = [];
+      const s = (v: unknown) => (v == null ? null : String(v));
+      const set = (field: string, key: 'description' | 'testResultType' | 'precision' | 'testGroup' | 'unit' | 'prototype', next: unknown) => {
+        if (next === undefined) return;
+        const norm = typeof next === 'string' ? next.trim() || null : next;
+        if (norm === row[key]) return;
+        data[key] = norm;
+        changes.push({ tableName: 'Test', recordId: testName, fieldName: field, oldValue: s(row[key]), newValue: s(norm) });
+      };
+      set('Description', 'description', dto.description);
+      set('TestResultType', 'testResultType', dto.testResultType);
+      set('Precision', 'precision', nextPrecision === (row.precision ?? null) ? undefined : nextPrecision);
+      set('TestGroup', 'testGroup', groupName);
+      set('Unit', 'unit', dto.unit);
+      // Boolean mirror column: explicit false, never NULL — an explicit-null body
+      // value reaches here unvalidated (@IsOptional skips validators on null).
+      set('Prototype', 'prototype', dto.prototype === null ? false : dto.prototype);
+      if (!changes.length) return { test: testName, unchanged: true };
+
+      await tx.test.update({ where: { test: testName }, data });
+      await this.audit.record(
+        { action: 'qa.testCatalog.update', actorUserId: actor.id, actorLabel: actor.label, program: 'qa.testCatalogEdit', summary: `Catalog test '${testName}' updated`, changes },
+        tx,
+      );
+      return { test: testName };
+    });
+  }
+
+  /** Remove a catalog test. Refused while any ItemTest requirement references the
+   * name (case- AND whitespace-insensitive, matching how the picker/usage counts
+   * dedupe) — order/sample snapshots (OrdDetailTest, LocationSampleTest) link by
+   * copied name and are intentionally NOT a guard, matching legacy Test Update
+   * deletes. Existence + count checked inside the locked tx (a concurrent double
+   * delete must 404, not 500). */
+  async removeCatalogTest(testName: string, actor: Actor) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+      const row = await tx.test.findUnique({ where: { test: testName }, select: { test: true } });
+      if (!row) throw new NotFoundException(`Test '${testName}' is not in the catalog.`);
+      const [{ n: refs }] = await tx.$queryRaw<{ n: number }[]>`
+        SELECT COUNT(*)::int AS n FROM "ItemTest"
+        WHERE "Test" IS NOT NULL AND UPPER(TRIM("Test")) = UPPER(TRIM(${testName}))`;
+      if (refs > 0) throw new BadRequestException(`Refused: ${refs} item test requirement${refs === 1 ? '' : 's'} reference '${testName}'. Remove those first.`);
+      await tx.test.delete({ where: { test: testName } });
+      await this.audit.record(
+        {
+          action: 'qa.testCatalog.remove',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'qa.testCatalogEdit',
+          summary: `Test '${testName}' removed from the catalog`,
+          changes: [{ tableName: 'Test', recordId: testName, fieldName: 'removed', oldValue: testName, newValue: null }],
+        },
+        tx,
+      );
+      return { test: testName, removed: true };
     });
   }
 

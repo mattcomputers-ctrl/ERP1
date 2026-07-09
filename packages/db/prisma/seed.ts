@@ -51,6 +51,7 @@ const BASELINE_PROGRAMS = [
   { key: 'qa.results', name: 'Enter Test Results', folder: 'Quality' },
   { key: 'qa.itemTests', name: 'Item Test Requirements', folder: 'Quality' },
   { key: 'qa.itemTestsEdit', name: 'Edit Item Test Requirements', folder: 'Quality' },
+  { key: 'qa.testCatalogEdit', name: 'Edit Test Catalog', folder: 'Quality' },
   { key: 'inventory.browser', name: 'Inventory Browser', folder: 'Transactions/Inventory' },
   { key: 'inventory.adjust', name: 'Inventory Adjustment', folder: 'Transactions/Inventory' },
   { key: 'inventory.transfer', name: 'Inventory Transfer', folder: 'Transactions/Inventory' },
