@@ -70,6 +70,11 @@ end with a fresh handoff prompt.
      in a tx that hasn't already taken the native-id lock, emit BEFORE
      `audit.record` — the reverse is an ABBA deadlock (2026-07-05 review
      confirmed it in four emitter placements).
+  1c. **NATIVE_ID_ALLOC_LOCK before any parcel `FOR UPDATE` scan.** Movement
+     emission (2026-07-08) made every consume/ship/record-line/express path
+     an allocator; adjust/transfer lock advisory-then-parcels, so
+     parcels-then-advisory is an ABBA deadlock. Order paths: Ordr row lock →
+     advisory lock → parcel scan (reverse() was the precedent).
   2. Lifecycle transitions re-assert their precondition under the Ordr row
      lock INSIDE the tx (`lockAndRequireStatus`) — lifecycle is non-monotonic
      (reverse: CMP→RLS; revisions: RLS↔EDT).
@@ -132,27 +137,59 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. **Native InvMovement emission** (OPEN_QUESTIONS 2026-07-08): ERP1's
-   inventory writers don't emit movement rows, so the §18 movement/at-date
-   viewers stop gaining data at cutover. Retrofit a movement-recorder at the
-   depleter/acquirer seam (native ids ≥ 1e9) — its own increment, touches
-   locked concurrency paths. **§19 handheld is CLOSED-by-evidence**
-   (2026-07-08: all 49 'Handheld Functions' programs have zero Log uses in
-   15 years; no Palm client ever logged in — ASSUMPTIONS §19).
-4. Background chip pending: enforce secured-item PERFORM grant on
+1. **Verify CI green for the movement-emission commit** (§19 close 5b06d95
+   confirmed green; fix first if red). **Native InvMovement emission is
+   DONE** (2026-07-09, ASSUMPTIONS §20): every inventory writer emits legs
+   in-tx; §19 handheld CLOSED-by-evidence (ASSUMPTIONS §19).
+2. **Sweep FEATURE_PARITY for remaining ⬜ rows** and close them (build or
+   ⏸️-with-evidence): quotes/POS + 3rd-party shipping on the Shipping row,
+   reserve/unreserve + shipping assemblies, §10 "Inventory supply & demand"
+   sub-row check, and any other non-✅/non-⏸️ cells — the finish line is
+   every row ✅ or ⏸️.
+3. Background chip pending: enforce secured-item PERFORM grant on
    order.complete + release.disposition (+ order.revise now).
-5. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
+4. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
    YYMMDD### collisions; N-sequence invoice numbers can collide during
    parallel running (reserve an E-prefix or cut invoicing over in one go);
    Ordr.ReserveAmount on SH orders (45 rows) — surface on documents?;
    items.create uses plain autoincrement, not the native-id range (new,
    2026-07-05).
-6. Before cutover: one real install pass on the actual Proxmox VM; a live
+5. Before cutover: one real install pass on the actual Proxmox VM; a live
    `POST /import/sync` against the real legacy DB (seam-fake tested only —
    NOTE: the first sync after upgrading now also pulls the full 609K+972K
-   InvMovement family if the full import predates the mirror); disable the
-   PlanTrace import spec (the native plan takes over — setting
+   InvMovement family if the full import predates the mirror); a FULL
+   re-import (or re-run) after the numeric(19,4) migration restores the 4dp
+   leg values the old money column cent-rounded (ASSUMPTIONS §20.12);
+   disable the PlanTrace import spec (the native plan takes over — setting
    `planning.source` already flips on first recalc).
+
+## State of the world (as of 2026-07-09, native movement emission)
+
+- **Native InvMovement emission ✅** (ASSUMPTIONS §20): every ERP1 inventory
+  writer posts InvMovement/InvMovementDtl legs IN THE SAME TX via
+  `MovementRecorderService` (apps/api/src/inventory/movement-recorder.service.ts)
+  — the §18 movement/at-date/shipment-detail/order-cost viewers keep gaining
+  data after cutover. On-hand truth only (one non-B leg per Inventory qty
+  change; no WIP B-legs; shortfall-only consumes emit nothing);
+  per-parcel-draw grain (depleters return `takes`); header contexts stay in
+  the legacy whitelist; reversals keep forward contexts under the reversing
+  change set and NEGATE THE STORED forward legs (never re-derive from
+  current cost); per-EVENT native MF/MFP change sets date the at-date axis;
+  shipLots mints a native SH change set = PACKING SLIP (returned as
+  `packingSlipId`) and apportions US legs per (parcel draw × line);
+  lot-enable rebases the ledger (negates the per-owner at-date sums, posts
+  opening MK legs) and the accounting adjustments export now books that
+  rebase from the legs (audit-less native COUNT css). Leg Owner is
+  data-driven (modal legacy leg owner → modal Ordr owner → min Entity).
+  **NEW HARD RULE 1c**: alloc lock BEFORE parcel FOR UPDATE scans —
+  consume/ship/record-line/express now allocate. `InvMovementDtl.Value`
+  migrated money→numeric(19,4) (Postgres money cent-rounds; 43% of legacy
+  legs are sub-cent — full re-import restores them). §19 handheld CLOSED
+  (zero use in 15 years, four evidence lines). Review round: 6 lenses →
+  8/8 findings dual-confirmed, all fixed (ASSUMPTIONS §20.13) — majors: the
+  GL-invisible lot-enable rebase; undocumented zero-precedent context
+  mappings.
+- Suites: 113 unit + 391 integration green.
 
 ## State of the world (as of 2026-07-08, §18 viewer library)
 

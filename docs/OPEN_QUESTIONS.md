@@ -74,15 +74,12 @@ is enabled but has never run to an outcome. No ERP1 action needed (the §13
 IIF/CSV export replaces this), but before cutover confirm the plant disables
 these SQL Agent-driven jobs so nothing keeps touching the QuickBooks file.
 
-## Native inventory-movement emission (noted 2026-07-08)
+## Native inventory-movement emission — RESOLVED 2026-07-08
 
-The §18 Inventory Movement / Inventory At Date / Complete MF Orders cost
-viewers read the InvMovement/InvMovementDtl MIRROR. During parallel running
-the sync's append-only top-up keeps them current, but ERP1's own inventory
-writers (receiving, misc receipts, batch consume/complete, shipLots,
-adjustments, reweigh) do NOT emit InvMovement rows — after cutover the
-movement viewer stops gaining rows and at-date drifts from native activity.
-Decide before cutover: retrofit a movement-recorder helper into the native
-writers (native ids ≥ 1e9; the depleter/acquirer seam is the natural choke
-point) or derive movement events from audit/genealogy at read time. Sizeable,
-touches locked concurrency paths — its own increment.
+Retrofitted the movement-recorder at the writer seam (ASSUMPTIONS §20):
+every native inventory writer emits InvMovement/InvMovementDtl legs in-tx
+(native ids ≥ 1e9), so the §18 viewers keep gaining data after cutover.
+Residual note: at-date for items whose stock PREDATES both the movement
+mirror and ERP1 (no legacy legs, parcels only) reflects native deltas only —
+those items converge at lot-tracking enablement (the ledger rebase) or as
+stock turns over.

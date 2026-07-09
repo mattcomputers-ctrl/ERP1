@@ -4,6 +4,7 @@ import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { maxRawLotNumber } from '../common/lot-numbers';
+import { MovementRecorderService, type MovementEvent } from '../inventory/movement-recorder.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { EnableLotTrackingDto } from './dto/enable-lot-tracking.dto';
 
@@ -12,6 +13,7 @@ export class LotTrackingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly movements: MovementRecorderService,
   ) {}
 
   /** Items with their lot-tracking status (for the enabling screen). */
@@ -151,7 +153,7 @@ export class LotTrackingService {
       // Raw-material lot sequence (from 100), shared with purchase receiving.
       let lotSeq = await maxRawLotNumber(tx);
 
-      const created: { lot: string; vendorLot: string | null; qty: number; unitCost: number | null; locationId: number; raw: boolean }[] = [];
+      const created: { lot: string; vendorLot: string | null; qty: number; unitCost: number | null; locationId: number; raw: boolean; sublotId: number }[] = [];
       for (const g of dto.groups) {
         for (const e of g.entries) {
           const raw = !!e.vendorLot?.trim();
@@ -197,11 +199,57 @@ export class LotTrackingService {
           await tx.inventory.create({
             data: { id: (invId += 1), itemId, sublotId, locationId: g.locationId, qty: e.qty, status: null },
           });
-          created.push({ lot: lotNumber, vendorLot: e.vendorLot?.trim() ?? null, qty: e.qty, unitCost, locationId: g.locationId, raw });
+          created.push({ lot: lotNumber, vendorLot: e.vendorLot?.trim() ?? null, qty: e.qty, unitCost, locationId: g.locationId, raw, sublotId });
         }
       }
 
       await tx.item.update({ where: { id: itemId }, data: { lotTracked: true } });
+
+      // Movement ledger: the wipe + opening stock as one COUNT event set. The
+      // item's movement-implied balance (Σ non-B legs per owner — the exact
+      // at-date formula) is NEGATED first: without it, at-date would keep the
+      // legacy balance under the new opening legs and double-count. Negating
+      // the LEG sums (not the wiped parcels) is deliberate — at-date is defined
+      // by the ledger, so this zeroes it exactly even where the legacy parcels
+      // and legs disagree. Then one MK leg per opening entry.
+      const csId =
+        ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ??
+          NATIVE_ID_BASE) + 1;
+      await tx.changeSet.create({ data: { id: csId, context: 'COUNT', changeDate: at } });
+      const events: MovementEvent[] = [];
+      const balances = await tx.$queryRaw<{ owner: number; qty: number | null; value: number | null }[]>`
+        SELECT imd."Owner" AS owner,
+               SUM(COALESCE(imd."Qty", 0))::float8 AS qty,
+               SUM(imd."Value"::numeric)::float8 AS value
+        FROM "InvMovementDtl" imd
+        JOIN "InvMovement" im ON im."InvMovement" = imd."InvMovement"
+        WHERE im."Item" = ${itemId}
+          AND imd."Context" IN ('MK', 'MKCA', 'US', 'USCA', 'ADJ', 'SCRAP')
+        GROUP BY imd."Owner"`;
+      for (const b of balances) {
+        const qty = b.qty ?? 0; // full float precision — the negation must cancel the sum exactly
+        const value = b.value != null ? this.movements.money4(b.value) : null;
+        if (Math.abs(qty) < 1e-9 && (value == null || value === 0)) continue;
+        events.push({
+          context: 'COUNT', changeSetId: csId, itemId,
+          legs: [
+            Math.abs(qty) >= 1e-9
+              ? { context: 'US', ownerId: b.owner, qty: -qty, value: value != null ? -value : null }
+              : { context: 'USCA', ownerId: b.owner, qty: null, value: value != null ? -value : null },
+          ],
+        });
+      }
+      const owner = await this.movements.defaultOwnerId(tx);
+      for (const c of created) {
+        events.push({
+          context: 'COUNT', changeSetId: csId, itemId, sublotId: c.sublotId,
+          legs: [{
+            context: 'MK', ownerId: owner, locationId: c.locationId,
+            qty: c.qty, value: c.unitCost != null ? this.movements.money4(c.qty * c.unitCost) : null,
+          }],
+        });
+      }
+      await this.movements.record(tx, events);
 
       await this.audit.record(
         {

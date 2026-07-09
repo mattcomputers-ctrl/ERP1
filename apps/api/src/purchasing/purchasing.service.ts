@@ -7,6 +7,7 @@ import type { Actor } from '../auth/current-user.decorator';
 import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { maxRawLotNumber } from '../common/lot-numbers';
+import { MovementRecorderService } from '../inventory/movement-recorder.service';
 import { ValuationService } from '../inventory/valuation.service';
 import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -68,6 +69,7 @@ export class PurchasingService {
     private readonly audit: AuditService,
     private readonly party: PartyService,
     private readonly valuation: ValuationService,
+    private readonly movements: MovementRecorderService,
     private readonly priceVersions: PriceVersionService,
     private readonly approvalPolicy: ApprovalPolicyService,
     private readonly approvalRequests: ApprovalRequestService,
@@ -950,6 +952,7 @@ export class PurchasingService {
 
       const created: { lot: string; manufacturerLot: string | null; ordDetailId: number; qty: number; changeSetId: number }[] = [];
       const incByLine = new Map<number, number>();
+      const legOwner = po.ownerId ?? (await this.movements.defaultOwnerId(tx));
       for (const dl of dto.lines) {
         const line = lineById.get(dl.ordDetailId)!;
         for (const lot of dl.lots) {
@@ -957,6 +960,7 @@ export class PurchasingService {
           const newSubId = (subId += 1);
           const newCsId = (csId += 1);
           const mfrLot = lot.manufacturerLot?.trim() || null;
+          const unitCost = unitCostOf(dl.ordDetailId, line.price);
           // The lot of record: tagged with the supplier + manufacturer lot for
           // recall (null when the receiving.manfLotRequired policy is off and
           // none was given — such lots are recall-findable by supplier only).
@@ -969,7 +973,7 @@ export class PurchasingService {
               supLot: mfrLot,
               manfLot: mfrLot,
               receivedDate: at,
-              unitCost: unitCostOf(dl.ordDetailId, line.price),
+              unitCost,
             },
           });
           await tx.sublot.create({
@@ -977,8 +981,9 @@ export class PurchasingService {
           });
           // Mint on-hand for the received quantity (the engine no-ops if the
           // install has no location to put it in).
+          let mintedId: number | null = null;
           if (line.itemId != null) {
-            await this.valuation.mintInventory(tx, {
+            mintedId = await this.valuation.mintInventory(tx, {
               itemId: line.itemId,
               sublotId: newSubId,
               locationId: receivingLocationId,
@@ -1007,6 +1012,18 @@ export class PurchasingService {
               numberOfContainers: lot.numberOfContainers ?? 1,
             },
           });
+          // Movement ledger: the legacy PO receipt shape (one MK leg, value =
+          // qty × unit cost). Emitted only when on-hand actually minted — the
+          // ledger records on-hand truth (ASSUMPTIONS §20).
+          if (mintedId != null) {
+            await this.movements.record(tx, [{
+              context: 'PO', changeSetId: newCsId, itemId: line.itemId, sublotId: newSubId,
+              legs: [{
+                context: 'MK', ownerId: legOwner, locationId: receivingLocationId, ordDetailId: dl.ordDetailId,
+                qty: lot.qty, value: unitCost != null ? this.movements.money4(lot.qty * Number(unitCost)) : null,
+              }],
+            }]);
+          }
           incByLine.set(dl.ordDetailId, (incByLine.get(dl.ordDetailId) ?? 0) + lot.qty);
           created.push({ lot: lotNumber, manufacturerLot: mfrLot, ordDetailId: dl.ordDetailId, qty: lot.qty, changeSetId: newCsId });
         }

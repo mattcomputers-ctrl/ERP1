@@ -6,6 +6,7 @@ import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { maxRawLotNumber } from '../common/lot-numbers';
 import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { MovementRecorderService } from './movement-recorder.service';
 import { ValuationService } from './valuation.service';
 import type { CreateMiscReceiptDto } from './dto/misc-receipt.dto';
 
@@ -28,6 +29,7 @@ export class MiscReceiptService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly valuation: ValuationService,
+    private readonly movements: MovementRecorderService,
     private readonly notifications: NotificationEngineService,
   ) {}
 
@@ -71,11 +73,21 @@ export class MiscReceiptService {
           },
         });
         await tx.sublot.create({ data: { id: newSubId, lot: lotNumber, sublotCode: lotNumber, context: 'LOT' } });
-        await this.valuation.mintInventory(tx, { itemId: l.itemId, sublotId: newSubId, locationId: receivingLocationId, qty: l.qty });
+        const mintedId = await this.valuation.mintInventory(tx, { itemId: l.itemId, sublotId: newSubId, locationId: receivingLocationId, qty: l.qty });
 
         await tx.changeSet.create({
           data: { id: newCsId, context: MISC_CONTEXT, ordrId: null, changeDate: at },
         });
+        // Movement ledger: legacy MISC shape (one MK leg). On-hand truth only.
+        if (mintedId != null) {
+          await this.movements.record(tx, [{
+            context: 'MISC', changeSetId: newCsId, itemId: l.itemId, sublotId: newSubId,
+            legs: [{
+              context: 'MK', ownerId: await this.movements.defaultOwnerId(tx), locationId: receivingLocationId,
+              qty: l.qty, value: l.unitCost != null ? this.movements.money4(l.qty * l.unitCost) : null,
+            }],
+          }]);
+        }
         await tx.changeSetReceipt.create({
           data: {
             changeSetId: newCsId,

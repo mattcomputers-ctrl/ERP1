@@ -811,7 +811,11 @@ model InvMovementDtl {
   locationId    Int?     @map("Location")
   ordDetailId   Int?     @map("OrdDetail")
   qty           Float?   @map("Qty")
-  value         Decimal? @map("Value") @db.Money
+  // numeric(19,4), NOT money: legacy MSSQL money keeps 4 fractional digits
+  // (43% of this install's legs carry sub-cent precision) but Postgres money
+  // keeps only 2 — a money column silently cent-rounds both the mirror and
+  // native emission (2026-07-09 review). 4dp numeric preserves the source.
+  value         Decimal? @map("Value") @db.Decimal(19, 4)
 
   @@index([invMovementId])
   @@index([ordDetailId])

@@ -1152,3 +1152,142 @@ loads in any mobile browser and the inventory adjust/move/receipt APIs +
 no barcode screens. If barcode-first operation is ever wanted, it is a NEW
 feature over the existing APIs (camera/wedge scanning into the existing
 lot/location lookups), not legacy parity.
+
+## Native InvMovement emission (§20, 2026-07-08)
+
+Every ERP1 inventory writer now posts `InvMovement`/`InvMovementDtl` rows in
+the SAME transaction (native ids ≥ 1e9, `MovementRecorderService`), so the
+§18 movement / at-date / shipment-detail / order-cost viewers keep gaining
+data after cutover. Design decisions (from the live legacy census — see the
+per-context emission contract in the discovery record):
+
+1. **On-hand truth only.** ERP1 emits exactly one non-B leg per Inventory
+   quantity change (qty = the signed delta; value = qty × unit cost, money
+   4dp, NULL when no cost is known). B-suffixed WIP legs are NEVER emitted:
+   ERP1 has no vessel/WIP inventory model, and the validated at-date formula
+   sums only non-B legs — so at-date over native legs equals the Inventory
+   trajectory by construction. A shortfall-only consume (nothing physically
+   drawn) emits nothing.
+2. **Per-parcel-draw grain.** The depleters return parcel-level takes
+   (parcel, sublot, item, location, qty); each draw becomes one header + one
+   US leg with its true location. Multiple headers per business event is
+   legacy-normal (changesets hold 2–12+ movements).
+3. **Header contexts stay inside the legacy vocabulary** (PO, MISC, COUNT,
+   TRNSFR, SH, CMNGL, PCKAGE) because the movement viewer's type filter is a
+   whitelist. Mapping: PO/MISC receipts → 1 MK leg on the receipt's own
+   change set; adjust → COUNT US delta leg; transfer → TRNSFR US+MK
+   value-less pair (deliberate deviation: legacy TRNSFR = consignment
+   transfer-in; ERP1 repurposes the code for its location move, shaped like
+   legacy PICK so at-date is untouched); consume (all 5 execution paths) →
+   CMNGL US legs; completion → PCKAGE MK leg per produced lot at the FINAL
+   rolled-up cost (no purchase-price fallback — an unrolled completion leaves
+   value NULL, legacy's own pattern); shipment → SH US legs, one per
+   (parcel draw × order line), apportioned in entry order so every leg
+   carries its sales line (shipment-detail INNER-joins OrdDetail); a FREE
+   lot entry (no line) keeps a NULL line — visible in the movement viewer
+   and at-date but absent from shipment-detail.
+   **Two more deliberate deviations with ZERO legacy precedent** (2026-07-09
+   review, verified against the census): (a) legacy MF change sets hold ONLY
+   CMNGL + CA movements — a bulk MFBA completion never minted on-hand (bulk
+   lived in WIP; its cost posted as NULL-Item CA/MKBCA legs), and PCKAGE MK
+   legs exist exclusively under MFP/RVSMFP change sets. ERP1 mints bulk
+   on-hand at MFBA completion, so it posts PCKAGE MK under an MF change set
+   — a combination legacy never wrote. Consequence: post-cutover at-date
+   gains a category legacy never showed (bulk/intermediate stock on hand),
+   and the 'Packaging' movement filter includes bulk completions. This
+   follows from ERP1's no-WIP inventory model, not from the census.
+   (b) Legacy MFP change sets hold ONLY PCKAGE movements (packout
+   consumption = PCKAGE US legs); ERP1 emits CMNGL headers under MFP for
+   MFPP consumption, so packout picks appear under 'Commingle' rather than
+   'Packaging' — one consumption shape for every execution path was chosen
+   over per-order-kind context switching.
+4. **Reversals keep the FORWARD movement context under the reversing change
+   set** (legacy idiom: PCKAGE movements under RVSMFP change sets; the
+   reversal codes these paths would otherwise mint — RVSPO/RVSMISC/RVSMFP —
+   are not movement-viewer filter options. RVSSH *is* a real legacy header
+   context and IS in the whitelist: a future native shipment-reversal should
+   use a visible RVSSH header, not a forward SH one). Receipt reversal →
+   negative MK under RVSPO/RVSMISC; order reversal → negative PCKAGE MK +
+   positive CMNGL US restores (the legacy RVSSH positive-US idiom), all
+   under the RVSMFP change set, which stays effective-dated to the
+   completion (at-date nets to zero from the completion date on — the
+   legacy convention). **Reversal leg VALUES negate the net of the STORED
+   forward legs per lot** (2026-07-09 review) — never re-derived from
+   current cost data, which can move between posting and reversal (a
+   post-completion consume re-rolls Lot.unitCost; purchase prices drift):
+   netting the stored legs returns the order's ledger value contribution to
+   exactly zero every reverse/re-execute cycle. Skipped restores stay
+   un-negated (their stock stayed consumed). Quantities stay physically
+   asserted (parcel/edge sums).
+5. **Execution change sets are per-EVENT, not per-order**: each consume call
+   / completion creates its own native 'MF' (MFBA) / 'MFP' (MFPP) change set
+   dated at the event. Legacy's one-MF-cs-per-order reflects its
+   single-session desktop execution; ERP1 records lines over days, and the
+   change-set date is the at-date axis. The complete-mf-orders cost lateral
+   sums MK-family legs across ALL of an order's change sets, so cost math is
+   unaffected (verified in tests: complete → 96.00 exact; reverse → nets 0).
+6. **Native shipments now create an SH ChangeSet** (ordrId, changeDate =
+   shippedAt, the customer PoNumber) — its PK is the packing-slip number, so
+   native shipments appear in Packing Slips (id ≥ 1e9) with no Waybill/Trans
+   (both LEFT-joined). `shipLots` returns it as `packingSlipId`.
+7. **Leg Owner** (NOT NULL) resolves data-driven per install, memoized:
+   modal Owner over InvMovementDtl (the company entity — 4 here, >99% of
+   972K legs) → modal Ordr.Owner → lowest Entity id → 0 (sentinel, only on
+   an entity-less DB). PO receipts prefer po.ownerId.
+8. **Lot-tracking enablement rebases the ledger**: one native COUNT change
+   set posts (a) per-owner US legs negating the item's movement-implied
+   balance (Σ non-B legs — the at-date formula, NOT the wiped parcels, so
+   at-date zeroes exactly even where legacy parcels and legs disagree), then
+   (b) one MK leg per opening entry. Enable after a fresh sync during
+   parallel running — post-sync legacy movements for the item are drift
+   (same caveat as the parcel wipe itself). **The accounting adjustments
+   export books this rebase from the movement legs themselves** (2026-07-09
+   review): the enable change set carries no parcel-qty audit rows, so the
+   reader's audit-trail path never sees it — native COUNT change sets with
+   no audit coverage are now booked as the net leg value per item (Asset ↔
+   COUNT account), with warnings for value-less legs, instead of silently
+   vanishing from the GL.
+9. **Lock order (new hard rule)**: consume/ship/record-line/express paths now
+   take NATIVE_ID_ALLOC_LOCK (they allocate movement ids) — BEFORE their
+   parcel `FOR UPDATE` scans. Adjust/transfer already lock
+   advisory-then-parcels, so parcels-then-advisory would be an ABBA deadlock;
+   reverse() set the precedent (row lock → advisory → parcel scan).
+10. **Never rely on autoincrement for the movement family**: the import's
+    `resetSequence` pushes sequences to table MAX including native rows.
+    All ids are explicit MAX+1 under the alloc lock. InvMovementDtl.id is
+    int4 — 1e9 base leaves ~1.1B native headroom (legacy peak 1.07M).
+11. Dropped mirror columns (Log/Step/QtyEntered/InventoryCost/...) stay
+    dropped — no viewer reads them; ERP1's provenance is the audit trail.
+    Header Sublot is set wherever the moved sublot is unambiguous (legacy
+    left it NULL outside SAMPLE/PCKAGE-bulk — a deliberate enrichment the
+    movement viewer displays as lot/manufacturer).
+12. **InvMovementDtl.Value is numeric(19,4), NOT Postgres money** (2026-07-09
+    review): legacy MSSQL money keeps 4 fractional digits — 43% of this
+    install's 972K legs carry non-zero sub-cent precision — while Postgres
+    money keeps 2, silently cent-rounding every write. The column was
+    migrated to numeric(19,4); viewer SQL already casts `::numeric`.
+    NOTE: legs mirrored BEFORE this migration were stored cent-rounded — a
+    FULL import (or re-import) after upgrading restores their 4dp values;
+    the append-only sync only tops up new ids.
+13. **Review round (2026-07-09, 6 lenses → dedup → 2 adversarial verifiers
+    each, both-must-confirm): 8 of 8 findings confirmed, all fixed.** The
+    majors: (a) lot-enable's ledger rebase was invisible to the accounting
+    adjustments export (its COUNT change set has no parcel-qty audit rows,
+    so the audit-trail reader skipped it without even a warning — the GL
+    silently diverged); audit-less native COUNT change sets are now booked
+    from their own movement legs (§20.8). (b) §20.3's census claims hid two
+    zero-precedent context mappings (PCKAGE-MK-under-MF for MFBA
+    completions; CMNGL-under-MFP) — now recorded as deliberate deviations.
+    Also fixed: FIFO draws of the order's own produced lot were depleted but
+    filtered out of emission (post-completion rework consume made at-date
+    over-report forever); reversal legs were re-valued from CURRENT cost
+    data instead of negating the stored forward legs (a post-completion
+    consume re-rolls unitCost → reversal didn't net to zero; now nets
+    exactly, §20.4); a lot shipped against two lines in one call collapsed
+    to a NULL-OrdDetail leg and vanished from the plant's most-used viewer
+    (legs now apportioned per line in entry order); InvMovementDtl.Value was
+    Postgres `money` (2dp) so every leg — native AND mirrored (43% of legacy
+    legs carry sub-cent precision) — was silently cent-rounded (§20.12,
+    migrated to numeric(19,4)); the overbroad "no RVS codes in the
+    whitelist" rationale (RVSSH is one); and the stale FEATURE_PARITY
+    "capture-only" shipping row.

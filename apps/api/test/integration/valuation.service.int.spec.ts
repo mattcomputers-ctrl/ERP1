@@ -99,7 +99,7 @@ describe('depleteSpecific (specific identification)', () => {
     const v = valuationService(prisma);
 
     const res = await inTx((tx) => v.depleteSpecific(tx, 'L1', 12));
-    expect(res).toEqual({ depleted: 12, shortfall: 0 });
+    expect(res).toMatchObject({ depleted: 12, shortfall: 0 });
     expect((await prisma.inventory.findUnique({ where: { id: p1 } }))!.qty).toBe(0); // first parcel emptied
     expect((await prisma.inventory.findUnique({ where: { id: p2 } }))!.qty).toBe(3); // remainder from second
   });
@@ -111,7 +111,7 @@ describe('depleteSpecific (specific identification)', () => {
     const v = valuationService(prisma);
 
     const res = await inTx((tx) => v.depleteSpecific(tx, 'L1', 5));
-    expect(res).toEqual({ depleted: 3, shortfall: 2 });
+    expect(res).toMatchObject({ depleted: 3, shortfall: 2 });
     expect(await onHandForLot(prisma, 'L1')).toBe(0);
   });
 
@@ -132,7 +132,7 @@ describe('depleteSpecific (specific identification)', () => {
   it('returns the full want as shortfall when the lot has no on-hand', async () => {
     const v = valuationService(prisma);
     const res = await inTx((tx) => v.depleteSpecific(tx, 'GHOST', 4));
-    expect(res).toEqual({ depleted: 0, shortfall: 4 });
+    expect(res).toMatchObject({ depleted: 0, shortfall: 4, takes: [] });
   });
 
   it('depletes a lot fanned out across MULTIPLE sublots, oldest Inventory id first', async () => {
@@ -145,7 +145,7 @@ describe('depleteSpecific (specific identification)', () => {
     const v = valuationService(prisma);
 
     const res = await inTx((tx) => v.depleteSpecific(tx, 'L1', 6));
-    expect(res).toEqual({ depleted: 6, shortfall: 0 });
+    expect(res).toMatchObject({ depleted: 6, shortfall: 0 });
     expect((await prisma.inventory.findUnique({ where: { id: p1 } }))!.qty).toBe(0); // first sublot's parcel emptied
     expect((await prisma.inventory.findUnique({ where: { id: p2 } }))!.qty).toBe(2); // remainder from the second sublot
     expect(await onHandForLot(prisma, 'L1')).toBe(2); // summed across both sublots

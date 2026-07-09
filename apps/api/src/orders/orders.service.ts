@@ -9,7 +9,8 @@ import type { Actor } from '../auth/current-user.decorator';
 import { PermissionService } from '../auth/permission.service';
 import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
-import { ValuationService } from '../inventory/valuation.service';
+import { MovementRecorderService, type MovementEvent } from '../inventory/movement-recorder.service';
+import { ValuationService, type ParcelTake } from '../inventory/valuation.service';
 import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartyService } from '../sales/party.service';
@@ -122,6 +123,7 @@ export class OrdersService {
     private readonly permissions: PermissionService,
     private readonly esign: ESignatureService,
     private readonly valuation: ValuationService,
+    private readonly movements: MovementRecorderService,
     private readonly approvalPolicy: ApprovalPolicyService,
     private readonly approvalRequests: ApprovalRequestService,
     private readonly notifications: NotificationEngineService,
@@ -1555,6 +1557,35 @@ export class OrdersService {
         }
       }
 
+      // Movement ledger: the production receipt — one PCKAGE MK leg per minted
+      // lot (the legacy FG-receipt shape's on-hand half), valued at the FINAL
+      // rolled-up unit cost, on a fresh MF/MFP change set dated at completion.
+      // The order's MK-family leg values are what the complete-mf-orders cost
+      // lateral sums (validated against the encrypted GetQtyMade).
+      const emitted = minted.filter((m) => m.mintedId != null);
+      if (emitted.length) {
+        // The produced lot's own rolled-up cost ONLY — no purchase-price
+        // fallback here (that would fabricate an FG cost where none was
+        // rolled; legacy leaves such MK legs for a later MKCA true-up).
+        const lotRows = await tx.lot.findMany({
+          where: { lot: { in: emitted.map((m) => m.lot) } },
+          select: { lot: true, unitCost: true },
+        });
+        const costByLot = new Map(lotRows.map((l) => [l.lot, l.unitCost != null ? Number(l.unitCost) : null]));
+        const owner = await this.movements.defaultOwnerId(tx);
+        const prodCsId = await this.movements.createOrderChangeSet(tx, { id, context: order.context }, at);
+        await this.movements.record(tx, emitted.map((m) => {
+          const uc = costByLot.get(m.lot) ?? null;
+          return {
+            context: 'PCKAGE' as const, changeSetId: prodCsId, itemId: m.itemId, sublotId: m.sublotId,
+            legs: [{
+              context: 'MK' as const, ownerId: owner, locationId: m.locationId, ordDetailId: m.ordDetailId,
+              qty: m.qty, value: uc != null ? this.movements.money4(m.qty * uc) : null,
+            }],
+          };
+        }));
+      }
+
       const changes = [
         { tableName: 'Ordr', recordId: String(id), fieldName: 'Status', oldValue: order.status, newValue: 'CMP' },
         { tableName: 'Ordr', recordId: String(id), fieldName: 'DateCompleted', oldValue: null, newValue: at.toISOString() },
@@ -1624,7 +1655,7 @@ export class OrdersService {
     tx: Prisma.TransactionClient,
     order: { id: number; context: string | null; actualBatchSize: number | null },
     effectiveBatchSize: number | null,
-  ): Promise<{ lot: string; qty: number }[]> {
+  ): Promise<{ lot: string; qty: number; itemId: number; sublotId: number; locationId: number | null; ordDetailId: number; mintedId: number | null }[]> {
     if (order.context !== 'MFBA' && order.context !== 'MFPP') return [];
     const pkLines = await tx.ordDetail.findMany({
       where: { ordrId: order.id, context: 'PK' },
@@ -1634,7 +1665,7 @@ export class OrdersService {
 
     const prodLocationId = await this.valuation.resolveLocationId(tx, PRODUCTION_LOCATION_SETTING);
     let subId = (await tx.sublot.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE;
-    const minted: { lot: string; qty: number }[] = [];
+    const minted: { lot: string; qty: number; itemId: number; sublotId: number; locationId: number | null; ordDetailId: number; mintedId: number | null }[] = [];
     for (const pk of pkLines) {
       if (pk.itemId == null) continue;
       const lotRow = await tx.lot.findFirst({ where: { ordDetailId: pk.id }, select: { lot: true } });
@@ -1652,8 +1683,8 @@ export class OrdersService {
         sublotId = subId += 1;
         await tx.sublot.create({ data: { id: sublotId, lot: lotRow.lot, sublotCode: lotRow.lot, context: 'LOT' } });
       }
-      await this.valuation.mintInventory(tx, { itemId: pk.itemId, sublotId, locationId: prodLocationId, qty: producedQty });
-      minted.push({ lot: lotRow.lot, qty: producedQty });
+      const mintedId = await this.valuation.mintInventory(tx, { itemId: pk.itemId, sublotId, locationId: prodLocationId, qty: producedQty });
+      minted.push({ lot: lotRow.lot, qty: producedQty, itemId: pk.itemId, sublotId, locationId: prodLocationId, ordDetailId: pk.id, mintedId });
     }
     return minted;
   }
@@ -1817,17 +1848,20 @@ export class OrdersService {
           subsByLot.set(s.lot, [...(subsByLot.get(s.lot) ?? []), s.id]);
         }
       }
-      const parcelsByLot = new Map<string, { id: number; qty: number | null }[]>();
+      const parcelsByLot = new Map<string, { id: number; sublotId: number; itemId: number | null; locationId: number | null; qty: number | null }[]>();
       if (lotBySub.size) {
-        const lockedParcels = await tx.$queryRaw<{ id: number; sublotId: number; qty: number | null }[]>`
-          SELECT "Inventory" AS id, "Sublot" AS "sublotId", "Qty" AS qty FROM "Inventory"
+        const lockedParcels = await tx.$queryRaw<{ id: number; sublotId: number; itemId: number | null; locationId: number | null; qty: number | null }[]>`
+          SELECT "Inventory" AS id, "Sublot" AS "sublotId", "Item" AS "itemId", "Location" AS "locationId", "Qty" AS qty FROM "Inventory"
           WHERE "Sublot" = ANY(${[...lotBySub.keys()]})
           ORDER BY "Inventory" ASC
           FOR UPDATE`;
         for (const p of lockedParcels) {
           const lot = lotBySub.get(p.sublotId);
           if (lot == null) continue;
-          parcelsByLot.set(lot, [...(parcelsByLot.get(lot) ?? []), { id: p.id, qty: p.qty }]);
+          parcelsByLot.set(lot, [
+            ...(parcelsByLot.get(lot) ?? []),
+            { id: p.id, sublotId: p.sublotId, itemId: p.itemId, locationId: p.locationId, qty: p.qty },
+          ]);
         }
       }
 
@@ -1835,7 +1869,7 @@ export class OrdersService {
       // exactly the one parcel completion minted, still holding the full
       // produced quantity — or no parcel at all (completion had no location to
       // mint into, or no sublot was ever created).
-      const removedOnHand: { lot: string; qty: number; parcelId: number }[] = [];
+      const removedOnHand: { lot: string; qty: number; parcelId: number; sublotId: number; itemId: number | null; locationId: number | null }[] = [];
       const qtyReqdByPk = new Map(pkLines.map((l) => [l.id, l.qtyReqd ?? 0]));
       for (const pl of producedLots) {
         const expected =
@@ -1853,7 +1887,10 @@ export class OrdersService {
               `(on hand ${totalOnHand}, produced ${expected}).`,
           );
         }
-        removedOnHand.push({ lot: pl.lot, qty: parcels[0].qty ?? 0, parcelId: parcels[0].id });
+        removedOnHand.push({
+          lot: pl.lot, qty: parcels[0].qty ?? 0, parcelId: parcels[0].id,
+          sublotId: parcels[0].sublotId, itemId: parcels[0].itemId, locationId: parcels[0].locationId,
+        });
       }
 
       // --- un-mint the produced on-hand (identity Lot/Sublot rows are kept,
@@ -1873,7 +1910,7 @@ export class OrdersService {
       // reports only stock that actually moved — a lot that could not be
       // restored (no Lot/item to mint against, or a location-less install) is
       // reported as skipped, not silently claimed.
-      const restored: { lot: string; qty: number }[] = [];
+      const restored: { lot: string; qty: number; itemId: number | null; sublotId: number; locationId: number | null }[] = [];
       const skippedRestores: { lot: string; qty: number }[] = [];
       for (const lotCode of restoreLots) {
         const qty = restoreByLot.get(lotCode) ?? 0;
@@ -1881,11 +1918,13 @@ export class OrdersService {
         const parcels = parcelsByLot.get(lotCode) ?? [];
         if (parcels.length) {
           await tx.inventory.update({ where: { id: parcels[0].id }, data: { qty: (parcels[0].qty ?? 0) + qty } });
-          restored.push({ lot: lotCode, qty });
+          restored.push({ lot: lotCode, qty, itemId: parcels[0].itemId, sublotId: parcels[0].sublotId, locationId: parcels[0].locationId });
           continue;
         }
         const lotRow = await tx.lot.findUnique({ where: { lot: lotCode }, select: { itemId: true } });
         let mintedInventoryId: number | null = null;
+        let mintSublotId: number | null = null;
+        let mintLocationId: number | null = null;
         if (lotRow?.itemId != null) {
           let sublotId = subsByLot.get(lotCode)?.[0];
           if (sublotId == null) {
@@ -1895,9 +1934,12 @@ export class OrdersService {
           }
           const locationId = await this.valuation.resolveLocationId(tx, RECEIVING_LOCATION_SETTING);
           mintedInventoryId = await this.valuation.mintInventory(tx, { itemId: lotRow.itemId, sublotId, locationId, qty });
+          mintSublotId = sublotId;
+          mintLocationId = locationId;
         }
-        if (mintedInventoryId != null) restored.push({ lot: lotCode, qty });
-        else skippedRestores.push({ lot: lotCode, qty });
+        if (mintedInventoryId != null && mintSublotId != null) {
+          restored.push({ lot: lotCode, qty, itemId: lotRow?.itemId ?? null, sublotId: mintSublotId, locationId: mintLocationId });
+        } else skippedRestores.push({ lot: lotCode, qty });
       }
 
       // The consumption record is unwound with the stock: recall must not trace
@@ -1937,6 +1979,56 @@ export class OrdersService {
       await tx.changeSet.create({
         data: { id: csId, context: REVERSE_ORDER_CONTEXT, changeDate: cur!.dateCompleted ?? at, ordrId: id },
       });
+
+      // Movement ledger: the negation legs, all under the RVSMFP change set
+      // (effective-dated to the completion, so at-date nets to zero from the
+      // completion date on — the legacy reversal convention). Forward contexts
+      // are kept (legacy idiom: PCKAGE movements under RVSMFP change sets).
+      // Values NEGATE THE STORED forward legs — the net per lot over this
+      // order's change sets — never a re-derivation from current cost data,
+      // which can have moved since posting (a post-completion consume re-rolls
+      // Lot.unitCost; purchase prices drift): netting the stored legs returns
+      // the order's ledger value contribution to exactly zero, every cycle.
+      // Restores that were SKIPPED stay un-negated (their stock stayed
+      // consumed). Quantities stay physically asserted (parcel/edge sums).
+      const storedNets = await tx.$queryRaw<{ lot: string | null; ctx: string; value: number | null; valued: number }[]>`
+        SELECT sl."Lot" AS lot, imd."Context" AS ctx,
+               SUM(imd."Value"::numeric)::float8 AS value,
+               SUM(CASE WHEN imd."Value" IS NULL THEN 0 ELSE 1 END)::int AS valued
+        FROM "InvMovementDtl" imd
+        JOIN "InvMovement" im ON im."InvMovement" = imd."InvMovement"
+        JOIN "ChangeSet" cs ON cs."ChangeSet" = im."ChangeSet"
+        LEFT JOIN "Sublot" sl ON sl."Sublot" = im."Sublot"
+        WHERE cs."Ordr" = ${id}
+        GROUP BY sl."Lot", imd."Context"`;
+      const storedNet = (lot: string, ctx: 'MK' | 'US'): number | null => {
+        const row = storedNets.find((r) => r.lot === lot && r.ctx === ctx);
+        return row && row.valued > 0 ? row.value ?? 0 : null;
+      };
+      const negationEvents: MovementEvent[] = [];
+      const owner = await this.movements.defaultOwnerId(tx);
+      for (const r of removedOnHand) {
+        const net = storedNet(r.lot, 'MK');
+        negationEvents.push({
+          context: 'PCKAGE', changeSetId: csId, itemId: r.itemId, sublotId: r.sublotId,
+          legs: [{
+            context: 'MK', ownerId: owner, locationId: r.locationId,
+            ordDetailId: producedLots.find((pl) => pl.lot === r.lot)?.ordDetailId ?? null,
+            qty: -r.qty, value: net != null ? this.movements.money4(-net) : null,
+          }],
+        });
+      }
+      for (const r of restored) {
+        const net = storedNet(r.lot, 'US');
+        negationEvents.push({
+          context: 'CMNGL', changeSetId: csId, itemId: r.itemId, sublotId: r.sublotId,
+          legs: [{
+            context: 'US', ownerId: owner, locationId: r.locationId,
+            qty: r.qty, value: net != null ? this.movements.money4(-net) : null,
+          }],
+        });
+      }
+      await this.movements.record(tx, negationEvents);
 
       const reason = dto.reason?.trim();
       const auditLog = await this.audit.record(
@@ -2002,7 +2094,7 @@ export class OrdersService {
         status: 'RLS',
         reversedBy: csId,
         removedOnHand: removedOnHand.map((r) => ({ lot: r.lot, qty: r.qty })),
-        restored,
+        restored: restored.map((r) => ({ lot: r.lot, qty: r.qty })),
         skippedRestores,
         linesReset,
         signed: req.requireSignature,
@@ -2043,11 +2135,15 @@ export class OrdersService {
     // the product (PK) line's quantity.
     const producedQty = order.actualBatchSize ?? pkLines[0]?.qtyReqd ?? 0;
 
+    const at = new Date();
     return this.prisma.$transaction(async (tx) => {
       // Serialize with the per-line execution writers (and other consumes) on
       // this order — without it, two concurrent cost roll-ups read partial edge
       // sets and the last commit wins with a wrong produced-lot unitCost.
       await this.lockOrdr(tx, id);
+      // Native-id lock BEFORE the depleter's parcel scan (movement emission
+      // allocates; the adjust/transfer lock order — see consumeLineTx).
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       const shortfalls: { lot: string; shortfall: number }[] = [];
       const ordered = [...dto.lots].sort((a, b) => a.lot.trim().localeCompare(b.lot.trim()));
       // Deplete all consumed lots in ONE locked acquisition BEFORE recording
@@ -2074,6 +2170,7 @@ export class OrdersService {
           shortfalls.push({ lot: lotCode, shortfall: d.shortfall });
         }
       }
+      await this.emitConsumption(tx, { id, context: order.context }, [...depletions.values()].flatMap((d) => d.takes), at);
 
       // Roll the consumed inputs' real cost into the produced batch lot's unitCost.
       const unitCost = await this.valuation.rollUpProducedCost(tx, childLot, producedQty);
@@ -2139,9 +2236,12 @@ export class OrdersService {
     }
     const producedQty = order.actualBatchSize ?? pkLines[0]?.qtyReqd ?? 0;
 
+    const at = new Date();
     return this.prisma.$transaction(async (tx) => {
       // Serialize with the per-line execution writers on this order (see consumeLots).
       await this.lockOrdr(tx, id);
+      // Native-id lock BEFORE the parcel scan (movement emission allocates).
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       // Deplete every item in ONE locked acquisition (single ascending scan —
       // the system-wide lock order; see depleteSpecificMany), then record the
       // drawn-from lots as lineage. Requests for the same item aggregate.
@@ -2161,6 +2261,10 @@ export class OrdersService {
         }
         results.push({ itemId, picks: d.picks, shortfall: d.shortfall });
       }
+      // ALL takes emitted (incl. a FIFO draw of the produced lot itself —
+      // physically depleted, so the ledger records it; only the genealogy
+      // self-edge is skipped above).
+      await this.emitConsumption(tx, { id, context: order.context }, [...depletions.values()].flatMap((d) => d.takes), at);
 
       const unitCost = await this.valuation.rollUpProducedCost(tx, childLot, producedQty);
       // Surface FIFO shortfalls in the same shape consume-lots uses (labelled by
@@ -2295,8 +2399,9 @@ export class OrdersService {
    * pick list (the legacy CMS never recorded shipment lots — see
    * genealogy-data-reality — so it's captured going forward). Only lots of
    * lot-traced items are accepted (a not-yet-traced item has no lot identity).
-   * Capture only: this does NOT deplete the lot's on-hand (the inventory
-   * valuation/consumption engine does that). One transaction, atomic audit.
+   * Depletes the shipped on-hand (one locked scan), stamps OrdDetail.QtyUsed
+   * (billing reads it), emits SH movement legs, and mints the native SH
+   * ChangeSet — the packing slip. One transaction, atomic audit.
    */
   async shipLots(id: number, dto: ShipLotsDto, actor: Actor) {
     const order = await this.prisma.ordr.findUnique({
@@ -2375,6 +2480,9 @@ export class OrdersService {
         }
       }
 
+      // Native-id lock BEFORE the parcel scan (the SH change set + movement
+      // legs below allocate; the adjust/transfer lock order).
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       // Deplete the shipped lots' on-hand next, in ONE locked acquisition
       // (see consumeLineTx — the single-scan lock order plus depletion-first
       // ordering serialize this shipment against a concurrent reversal of a
@@ -2387,6 +2495,55 @@ export class OrdersService {
       const shortfalls = [...depletions.entries()]
         .filter(([, d]) => d.shortfall > 0)
         .map(([lot, d]) => ({ lot, shortfall: d.shortfall }));
+
+      // The shipment's change set — the legacy SH envelope (its PK IS the
+      // packing-slip number, so native shipments get packing slips too) and
+      // the movement legs' date/order linkage. One per ship event.
+      const shipCsId =
+        ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ??
+          NATIVE_ID_BASE) + 1;
+      await tx.changeSet.create({
+        data: { id: shipCsId, context: 'SH', ordrId: id, changeDate: shippedAt, poNumber: order.poNumber ?? null },
+      });
+
+      // Movement ledger: legacy SH shape — one US leg per (parcel draw ×
+      // order line), apportioned in entry order so EVERY leg carries its
+      // sales line (the shipment-detail viewer INNER-joins OrdDetail — a lot
+      // shipped against two lines gets split legs, never a NULL line). Free
+      // entries (no ordDetailId) keep a NULL line: visible in the movement
+      // viewer and at-date, absent from shipment-detail (ASSUMPTIONS §20).
+      // Shortfalls fall on the LAST entries (front-fill), matching the draw.
+      const entriesByLot = new Map<string, { remaining: number; lineId: number | null }[]>();
+      for (const l of dto.lots) {
+        const code = l.lot.trim();
+        entriesByLot.set(code, [...(entriesByLot.get(code) ?? []), { remaining: l.qty, lineId: l.ordDetailId ?? null }]);
+      }
+      const shipTakes = [...depletions.values()].flatMap((d) => d.takes);
+      if (shipTakes.length) {
+        const costByLot = await this.movements.unitCostByLot(tx, shipTakes.map((t) => t.lot));
+        const owner = await this.movements.defaultOwnerId(tx);
+        const shipEvents: MovementEvent[] = [];
+        for (const t of shipTakes) {
+          const uc = costByLot.get(t.lot) ?? null;
+          const entries = entriesByLot.get(t.lot) ?? [];
+          let left = t.take;
+          while (left > 1e-9) {
+            const entry = entries.find((e) => e.remaining > 1e-9);
+            const slice = entry ? Math.min(left, entry.remaining) : left;
+            if (entry) entry.remaining -= slice;
+            shipEvents.push({
+              context: 'SH', changeSetId: shipCsId, itemId: t.itemId, sublotId: t.sublotId,
+              legs: [{
+                context: 'US', ownerId: owner, locationId: t.locationId,
+                ordDetailId: entry?.lineId ?? null,
+                qty: -slice, value: uc != null ? this.movements.money4(-slice * uc) : null,
+              }],
+            });
+            left -= slice;
+          }
+        }
+        await this.movements.record(tx, shipEvents);
+      }
 
       await tx.shipmentLot.createMany({
         data: dto.lots.map((l) => {
@@ -2438,7 +2595,7 @@ export class OrdersService {
         },
         tx,
       );
-      return { id, shipped: dto.lots.length, shippedAt: shippedAt.toISOString(), shortfalls };
+      return { id, shipped: dto.lots.length, shippedAt: shippedAt.toISOString(), shortfalls, packingSlipId: shipCsId };
     });
   }
 
@@ -2516,23 +2673,62 @@ export class OrdersService {
   }
 
   /**
+   * Movement-ledger legs for a consumption event: one CMNGL header + US leg
+   * per parcel draw (its true location), valued like the cost roll-up (lot
+   * unitCost, item purchase-price fallback), all on ONE fresh MF/MFP change
+   * set dated at the event. Emits nothing for an empty draw (a shortfall-only
+   * consume moved no stock — the ledger records on-hand truth). Caller must
+   * hold the native-id lock (taken BEFORE the depleter's parcel scan — the
+   * adjust/transfer lock order, see ASSUMPTIONS §20).
+   */
+  private async emitConsumption(
+    tx: Prisma.TransactionClient,
+    order: { id: number; context: string | null },
+    takes: (ParcelTake & { lineId?: number | null })[],
+    at: Date,
+    defaultLineId: number | null = null,
+  ) {
+    if (!takes.length) return;
+    const costByLot = await this.movements.unitCostByLot(tx, takes.map((t) => t.lot));
+    const owner = await this.movements.defaultOwnerId(tx);
+    const csId = await this.movements.createOrderChangeSet(tx, order, at);
+    const events: MovementEvent[] = takes.map((t) => {
+      const uc = costByLot.get(t.lot) ?? null;
+      return {
+        context: 'CMNGL', changeSetId: csId, itemId: t.itemId, sublotId: t.sublotId,
+        legs: [{
+          context: 'US', ownerId: owner, locationId: t.locationId,
+          ordDetailId: t.lineId !== undefined ? t.lineId : defaultLineId,
+          qty: -t.take, value: uc != null ? this.movements.money4(-t.take * uc) : null,
+        }],
+      };
+    });
+    await this.movements.record(tx, events);
+  }
+
+  /**
    * Consume the material for one executed line, inside the caller's transaction:
    * records consumed-lot -> produced-lot genealogy edges, depletes on-hand
-   * (specific lots for a traced item, FIFO oldest-first otherwise), and re-rolls
-   * the produced lot's unit cost from the full edge set. Shortfalls are
-   * recorded, not blocked — the plant records what it actually consumed.
+   * (specific lots for a traced item, FIFO oldest-first otherwise), emits the
+   * movement-ledger legs, and re-rolls the produced lot's unit cost from the
+   * full edge set. Shortfalls are recorded, not blocked — the plant records
+   * what it actually consumed. Caller must hold the native-id lock.
    */
   private async consumeLineTx(
     tx: Prisma.TransactionClient,
-    orderId: number,
+    order: { id: number; context: string | null },
+    lineId: number | null,
+    at: Date,
     childLot: string,
     producedQty: number,
     item: { id: number; itemCode: string | null; lotTracked: boolean | null },
     qty: number,
     lots: { lot: string; qty: number }[] | undefined,
   ) {
+    const orderId = order.id;
     const consumed: { lot: string; qty: number }[] = [];
     const shortfalls: { lot: string; shortfall: number }[] = [];
+    const allTakes: ParcelTake[] = [];
     if (item.lotTracked) {
       // Deterministic lot order: concurrent dispensers that list the same lots
       // in different orders would otherwise acquire the parcel row locks in
@@ -2557,10 +2753,11 @@ export class OrdersService {
           DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
         const d = depletions.get(lotCode);
         if (d && d.shortfall > 0) shortfalls.push({ lot: lotCode, shortfall: d.shortfall });
+        if (d) allTakes.push(...d.takes);
         consumed.push({ lot: lotCode, qty: l.qty });
       }
     } else {
-      const { picks, shortfall } = await this.valuation.depleteFifo(tx, item.id, qty);
+      const { picks, shortfall, takes } = await this.valuation.depleteFifo(tx, item.id, qty);
       for (const p of picks) {
         if (p.lot === childLot) continue; // never self-edge the produced lot
         await tx.$executeRaw`
@@ -2570,8 +2767,13 @@ export class OrdersService {
           DO UPDATE SET qty = COALESCE(lot_genealogy.qty, 0) + EXCLUDED.qty`;
         consumed.push(p);
       }
+      // ALL takes are emitted — even a draw from the order's own produced lot
+      // is a physical Inventory change the ledger must record (only the
+      // genealogy self-edge above is skipped, matching the cost roll-up).
+      allTakes.push(...takes);
       if (shortfall > 0) shortfalls.push({ lot: item.itemCode ?? `item ${item.id}`, shortfall });
     }
+    await this.emitConsumption(tx, order, allTakes, at, lineId);
     const unitCost = await this.valuation.rollUpProducedCost(tx, childLot, producedQty);
     return { consumed, shortfalls, unitCost };
   }
@@ -2828,9 +3030,13 @@ export class OrdersService {
       const cur = await tx.ordDetail.findUnique({ where: { id: lineId }, select: { execStatus: true } });
       if (cur?.execStatus === 'CMP') throw new BadRequestException('This line is already recorded.');
 
+      // Movement emission allocates native ids, so the advisory lock is taken
+      // BEFORE the depleter's parcel scan (the adjust/transfer lock order —
+      // parcels-then-allocator would ABBA against them; reverse() precedent).
+      if (actualQty > 0) await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       const { consumed, shortfalls, unitCost } =
         actualQty > 0
-          ? await this.consumeLineTx(tx, orderId, childLot, producedQty, item, actualQty, dto.lots)
+          ? await this.consumeLineTx(tx, { id: orderId, context: order.context }, lineId, at, childLot, producedQty, item, actualQty, dto.lots)
           : { consumed: [] as { lot: string; qty: number }[], shortfalls: [] as { lot: string; shortfall: number }[], unitCost: null };
 
       await tx.ordDetail.update({
@@ -2915,7 +3121,7 @@ export class OrdersService {
         },
       });
       const { consumed, shortfalls, unitCost } = await this.consumeLineTx(
-        tx, orderId, childLot, producedQty, item, dto.qty, dto.lots,
+        tx, { id: orderId, context: order.context }, odId, at, childLot, producedQty, item, dto.qty, dto.lots,
       );
 
       await this.audit.record(
@@ -2996,6 +3202,8 @@ export class OrdersService {
         ).map((i) => [i.id, i]),
       );
 
+      // Native-id lock BEFORE the parcel scan (movement emission allocates).
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       // ONE locked FIFO acquisition across every consumed item (traced and
       // not) — per-item totals, since genealogy edges are lot-level, not
       // line-level.
@@ -3031,6 +3239,22 @@ export class OrdersService {
         }
         if (res.shortfall > 0) shortfalls.push({ item: item?.itemCode ?? `item ${itemId}`, shortfall: res.shortfall });
       }
+
+      // Movement legs, attributed to the consuming line when the item maps to
+      // exactly one expressed line (per-item FIFO totals can't split a draw
+      // across same-item lines).
+      const lineByItem = new Map<number, number | null>();
+      for (const l of materials) {
+        if (l.itemId == null) continue;
+        lineByItem.set(l.itemId, lineByItem.has(l.itemId) ? null : l.id);
+      }
+      await this.emitConsumption(
+        tx, { id: orderId, context: order.context },
+        [...depletions.values()]
+          .flatMap((d: { takes: ParcelTake[] }) => d.takes)
+          .map((t) => ({ ...t, lineId: t.itemId != null ? lineByItem.get(t.itemId) ?? null : null })),
+        at,
+      );
 
       for (const l of materials) {
         await tx.ordDetail.update({

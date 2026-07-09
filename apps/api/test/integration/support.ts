@@ -14,6 +14,7 @@ import { ItemTestsService } from '../../src/qa/item-tests.service';
 import { InventoryService } from '../../src/inventory/inventory.service';
 import { LotTrackingService } from '../../src/lot-tracking/lot-tracking.service';
 import { MiscReceiptService } from '../../src/inventory/misc-receipt.service';
+import { MovementRecorderService } from '../../src/inventory/movement-recorder.service';
 import { ValuationService } from '../../src/inventory/valuation.service';
 import { RecipeEditorService } from '../../src/manufacturing/recipe-editor.service';
 import { RecipeReplacementService } from '../../src/manufacturing/recipe-replacement.service';
@@ -115,28 +116,30 @@ export function services(prisma: PrismaClient) {
   const permissions = new PermissionService(p);
   const esign = new ESignatureService(p);
   const valuation = new ValuationService(p, settings);
+  const movements = new MovementRecorderService();
   const priceVersions = new PriceVersionService(p);
   const salesPricing = new SalesPricingService(p, audit, party);
   const approvalPolicy = new ApprovalPolicyService(p, audit);
   const approvalRequests = new ApprovalRequestService(p);
   const recipeEditor = new RecipeEditorService(p, audit, esign, auth, permissions);
   const notifications = new NotificationEngineService(p);
-  const purchasing = new PurchasingService(p, settings, audit, party, valuation, priceVersions, approvalPolicy, approvalRequests, notifications);
+  const purchasing = new PurchasingService(p, settings, audit, party, valuation, movements, priceVersions, approvalPolicy, approvalRequests, notifications);
   return {
     settings,
     audit,
     party,
     valuation,
+    movements,
     priceVersions,
     salesPricing,
-    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation, approvalPolicy, approvalRequests, notifications),
+    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation, movements, approvalPolicy, approvalRequests, notifications),
     approvalRequests,
     purchasing,
     shipping: new ShippingService(p, audit, party, salesPricing, approvalPolicy, approvalRequests),
     genealogy: new GenealogyService(p, party),
-    inventory: new InventoryService(p, audit, notifications),
-    lotTracking: new LotTrackingService(p, audit),
-    miscReceipt: new MiscReceiptService(p, audit, valuation, notifications),
+    inventory: new InventoryService(p, audit, movements, notifications),
+    lotTracking: new LotTrackingService(p, audit, movements),
+    miscReceipt: new MiscReceiptService(p, audit, valuation, movements, notifications),
     approvalPolicy,
     notifications,
     notificationRules: new NotificationsService(p, audit),

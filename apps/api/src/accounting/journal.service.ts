@@ -425,6 +425,73 @@ export class AccountingJournalService {
         ],
       });
     }
+
+    // Native COUNT change sets with NO audit coverage: lot-tracking enablement
+    // posts its ledger rebase (per-owner negation + opening stock) as movement
+    // legs on a COUNT change set, with no parcel-qty audit rows. The legs ARE
+    // the value record — book their net per item so the rebase's write-off /
+    // revaluation reaches the GL instead of silently vanishing (the export
+    // must never silently drop value).
+    const covered = new Set(csChanges.map((c) => c.recordId));
+    const uncovered = changeSets.filter((c) => !covered.has(String(c.id)));
+    if (uncovered.length) {
+      const headers = await this.prisma.invMovement.findMany({
+        where: { changeSetId: { in: uncovered.map((c) => c.id) } },
+        select: { id: true, changeSetId: true, itemId: true },
+      });
+      const legs = headers.length
+        ? await this.prisma.invMovementDtl.findMany({
+            where: { invMovementId: { in: headers.map((h) => h.id) } },
+            select: { invMovementId: true, value: true },
+          })
+        : [];
+      const headerById = new Map(headers.map((h) => [String(h.id), h]));
+      const byCsItem = new Map<string, { csId: number; itemId: number | null; value: number; nullLegs: number }>();
+      for (const l of legs) {
+        const h = headerById.get(String(l.invMovementId));
+        if (!h) continue;
+        const key = `${h.changeSetId}|${h.itemId ?? 'null'}`;
+        const cur = byCsItem.get(key) ?? { csId: h.changeSetId, itemId: h.itemId, value: 0, nullLegs: 0 };
+        if (l.value != null) cur.value += Number(l.value);
+        else cur.nullLegs += 1;
+        byCsItem.set(key, cur);
+      }
+      const legCs = new Set([...byCsItem.values()].map((v) => v.csId));
+      for (const c of uncovered) {
+        if (!legCs.has(c.id)) {
+          warnings.push(`Adjustment CS ${c.id}: no quantity change found in the audit trail — skipped.`);
+        }
+      }
+      const legItemIds = [...new Set([...byCsItem.values()].map((v) => v.itemId).filter((v): v is number => v != null))]
+        .filter((id) => !itemById.has(id));
+      if (legItemIds.length) {
+        const more = await this.prisma.item.findMany({
+          where: { id: { in: legItemIds } },
+          select: { id: true, itemCode: true, glGroup: true, purchasePrice: true },
+        });
+        for (const i of more) itemById.set(i.id, i);
+      }
+      for (const g of byCsItem.values()) {
+        const what = `Adjustment CS ${g.csId}`;
+        if (g.nullLegs > 0) {
+          warnings.push(`${what}: ${g.nullLegs} movement leg(s) carry no value — booked from the valued legs only.`);
+        }
+        if (g.value === 0) continue;
+        const item = g.itemId != null ? itemById.get(g.itemId) : undefined;
+        out.push({
+          type: 'GENERAL JOURNAL',
+          source: 'adjustment',
+          date: csDateById.get(String(g.csId)) ?? from,
+          refNumber: `CS${g.csId}`,
+          name: null,
+          memo: `Inventory rebase ${item?.itemCode ?? ''} (lot-tracking enablement)`.trim(),
+          lines: [
+            { account: account(item?.glGroup, 'Asset', what), amount: g.value, memo: null },
+            { account: account(item?.glGroup, 'COUNT', what), amount: -g.value, memo: null },
+          ],
+        });
+      }
+    }
     return out;
   }
 

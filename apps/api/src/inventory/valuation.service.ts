@@ -112,11 +112,11 @@ export class ValuationService {
   async depleteSpecificMany(
     tx: Prisma.TransactionClient,
     requests: { lot: string; qty: number }[],
-  ): Promise<Map<string, { depleted: number; shortfall: number }>> {
+  ): Promise<Map<string, { depleted: number; shortfall: number; takes: ParcelTake[] }>> {
     const wantByLot = new Map<string, number>();
     for (const r of requests) wantByLot.set(r.lot, (wantByLot.get(r.lot) ?? 0) + r.qty);
-    const result = new Map<string, { depleted: number; shortfall: number }>();
-    for (const [lot, want] of wantByLot) result.set(lot, { depleted: 0, shortfall: want });
+    const result = new Map<string, { depleted: number; shortfall: number; takes: ParcelTake[] }>();
+    for (const [lot, want] of wantByLot) result.set(lot, { depleted: 0, shortfall: want, takes: [] });
     const codes = [...wantByLot.keys()];
     if (!codes.length) return result;
 
@@ -126,33 +126,47 @@ export class ValuationService {
 
     // The single locked scan (see the lock-order invariant above). Ascending-id
     // order doubles as the oldest-first draw order within each lot.
-    const rows = await tx.$queryRaw<{ id: number; sublotId: number; qty: number | null }[]>`
-      SELECT "Inventory" AS id, "Sublot" AS "sublotId", "Qty" AS qty FROM "Inventory"
+    const rows = await tx.$queryRaw<{ id: number; itemId: number | null; sublotId: number; locationId: number | null; qty: number | null }[]>`
+      SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Location" AS "locationId", "Qty" AS qty FROM "Inventory"
       WHERE "Sublot" = ANY(${subs.map((s) => s.id)}) AND "Qty" > 0
       ORDER BY "Inventory" ASC
       FOR UPDATE`;
-    const parcelsByLot = new Map<string, { id: number; qty: number }[]>();
+    const parcelsByLot = new Map<string, { id: number; itemId: number | null; sublotId: number; locationId: number | null; qty: number }[]>();
     for (const r of rows) {
       const lot = lotBySub.get(r.sublotId);
       if (lot == null) continue;
-      parcelsByLot.set(lot, [...(parcelsByLot.get(lot) ?? []), { id: r.id, qty: r.qty ?? 0 }]);
+      parcelsByLot.set(lot, [
+        ...(parcelsByLot.get(lot) ?? []),
+        { id: r.id, itemId: r.itemId, sublotId: r.sublotId, locationId: r.locationId, qty: r.qty ?? 0 },
+      ]);
     }
     for (const [lot, want] of wantByLot) {
       const parcels = parcelsByLot.get(lot) ?? [];
       if (!parcels.length) continue; // stays all-shortfall
       const { takes, depleted, shortfall } = greedyDeplete(parcels, want);
+      const parcelTakes: ParcelTake[] = [];
       for (let i = 0; i < parcels.length; i++) {
-        if (takes[i] > 0) await tx.inventory.update({ where: { id: parcels[i].id }, data: { qty: parcels[i].qty - takes[i] } });
+        if (takes[i] > 0) {
+          await tx.inventory.update({ where: { id: parcels[i].id }, data: { qty: parcels[i].qty - takes[i] } });
+          parcelTakes.push({
+            parcelId: parcels[i].id, itemId: parcels[i].itemId, sublotId: parcels[i].sublotId,
+            locationId: parcels[i].locationId, lot, take: takes[i],
+          });
+        }
       }
-      result.set(lot, { depleted, shortfall });
+      result.set(lot, { depleted, shortfall, takes: parcelTakes });
     }
     return result;
   }
 
   /** Single-lot form of depleteSpecificMany (same one-scan acquisition). */
-  async depleteSpecific(tx: Prisma.TransactionClient, lot: string, qty: number): Promise<{ depleted: number; shortfall: number }> {
+  async depleteSpecific(
+    tx: Prisma.TransactionClient,
+    lot: string,
+    qty: number,
+  ): Promise<{ depleted: number; shortfall: number; takes: ParcelTake[] }> {
     const res = await this.depleteSpecificMany(tx, [{ lot, qty }]);
-    return res.get(lot) ?? { depleted: 0, shortfall: qty };
+    return res.get(lot) ?? { depleted: 0, shortfall: qty, takes: [] };
   }
 
   /**
@@ -206,18 +220,18 @@ export class ValuationService {
   async depleteFifoMany(
     tx: Prisma.TransactionClient,
     requests: { itemId: number; qty: number }[],
-  ): Promise<Map<number, { picks: { lot: string; qty: number }[]; depleted: number; shortfall: number }>> {
+  ): Promise<Map<number, { picks: { lot: string; qty: number }[]; depleted: number; shortfall: number; takes: ParcelTake[] }>> {
     const wantByItem = new Map<number, number>();
     for (const r of requests) wantByItem.set(r.itemId, (wantByItem.get(r.itemId) ?? 0) + r.qty);
-    const result = new Map<number, { picks: { lot: string; qty: number }[]; depleted: number; shortfall: number }>();
-    for (const [itemId, want] of wantByItem) result.set(itemId, { picks: [], depleted: 0, shortfall: want });
+    const result = new Map<number, { picks: { lot: string; qty: number }[]; depleted: number; shortfall: number; takes: ParcelTake[] }>();
+    for (const [itemId, want] of wantByItem) result.set(itemId, { picks: [], depleted: 0, shortfall: want, takes: [] });
     const itemIds = [...wantByItem.keys()];
     if (!itemIds.length) return result;
 
     // The single locked scan (lock-order invariant — one statement, global
     // ascending id, across ALL requested items).
-    const rows = await tx.$queryRaw<{ id: number; itemId: number; sublotId: number | null; qty: number | null }[]>`
-      SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Qty" AS qty FROM "Inventory"
+    const rows = await tx.$queryRaw<{ id: number; itemId: number; sublotId: number | null; locationId: number | null; qty: number | null }[]>`
+      SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Location" AS "locationId", "Qty" AS qty FROM "Inventory"
       WHERE "Item" = ANY(${itemIds}) AND "Qty" > 0 AND "Sublot" IS NOT NULL
       ORDER BY "Inventory" ASC
       FOR UPDATE`;
@@ -240,22 +254,31 @@ export class ValuationService {
       // The item's parcels with a resolvable lot, ordered FIFO, then drawn down.
       const parcels = rows
         .filter((r) => r.itemId === itemId)
-        .map((r) => ({ id: r.id, qty: r.qty ?? 0, lot: r.sublotId != null ? lotBySub.get(r.sublotId) ?? null : null }))
-        .filter((p): p is { id: number; qty: number; lot: string } => p.lot != null)
+        .map((r) => ({
+          id: r.id, qty: r.qty ?? 0, sublotId: r.sublotId, locationId: r.locationId,
+          lot: r.sublotId != null ? lotBySub.get(r.sublotId) ?? null : null,
+        }))
+        .filter((p): p is { id: number; qty: number; sublotId: number; locationId: number | null; lot: string } => p.lot != null)
         .sort((a, b) => fifoCompare({ time: timeForLot(a.lot), seq: a.id }, { time: timeForLot(b.lot), seq: b.id }));
       if (!parcels.length) continue; // stays all-shortfall
       const { takes, depleted, shortfall } = greedyDeplete(parcels, want);
 
       const pickByLot = new Map<string, number>();
+      const parcelTakes: ParcelTake[] = [];
       for (let i = 0; i < parcels.length; i++) {
         if (takes[i] <= 0) continue;
         await tx.inventory.update({ where: { id: parcels[i].id }, data: { qty: parcels[i].qty - takes[i] } });
         pickByLot.set(parcels[i].lot, (pickByLot.get(parcels[i].lot) ?? 0) + takes[i]);
+        parcelTakes.push({
+          parcelId: parcels[i].id, itemId, sublotId: parcels[i].sublotId,
+          locationId: parcels[i].locationId, lot: parcels[i].lot, take: takes[i],
+        });
       }
       result.set(itemId, {
         picks: [...pickByLot.entries()].map(([lot, q]) => ({ lot, qty: q })),
         depleted,
         shortfall,
+        takes: parcelTakes,
       });
     }
     return result;
@@ -266,8 +289,21 @@ export class ValuationService {
     tx: Prisma.TransactionClient,
     itemId: number,
     qty: number,
-  ): Promise<{ picks: { lot: string; qty: number }[]; depleted: number; shortfall: number }> {
+  ): Promise<{ picks: { lot: string; qty: number }[]; depleted: number; shortfall: number; takes: ParcelTake[] }> {
     const res = await this.depleteFifoMany(tx, [{ itemId, qty }]);
-    return res.get(itemId) ?? { picks: [], depleted: 0, shortfall: qty };
+    return res.get(itemId) ?? { picks: [], depleted: 0, shortfall: qty, takes: [] };
   }
+}
+
+/**
+ * One parcel-level draw from a locked depletion scan — the grain the movement
+ * ledger records (one US leg per parcel draw, with its true location).
+ */
+export interface ParcelTake {
+  parcelId: number;
+  itemId: number | null;
+  sublotId: number;
+  locationId: number | null;
+  lot: string;
+  take: number;
 }

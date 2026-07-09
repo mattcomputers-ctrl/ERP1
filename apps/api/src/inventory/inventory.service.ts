@@ -5,6 +5,7 @@ import { buildList, type ListQuery } from '../common/list';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
 import { NotificationEngineService } from '../notifications/notification-engine.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { MovementRecorderService } from './movement-recorder.service';
 import type { AdjustInventoryDto } from './dto/adjust-inventory.dto';
 import type { ReverseReceiptDto } from './dto/reverse-receipt.dto';
 import type { TransferInventoryDto } from './dto/transfer-inventory.dto';
@@ -34,8 +35,18 @@ export class InventoryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly movements: MovementRecorderService,
     private readonly notifications: NotificationEngineService,
   ) {}
+
+  /** The parcel's lot unit cost (for movement leg values); null when unknown. */
+  private async lotUnitCost(tx: Parameters<MovementRecorderService['record']>[0], sublotId: number | null): Promise<number | null> {
+    if (sublotId == null) return null;
+    const sub = await tx.sublot.findUnique({ where: { id: sublotId }, select: { lot: true } });
+    if (!sub?.lot) return null;
+    const lot = await tx.lot.findUnique({ where: { lot: sub.lot }, select: { unitCost: true } });
+    return lot?.unitCost != null ? Number(lot.unitCost) : null;
+  }
 
   /**
    * Adjust an on-hand inventory parcel to a new absolute quantity (a count /
@@ -84,6 +95,16 @@ export class InventoryService {
       const csId = ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
       await tx.changeSet.create({ data: { id: csId, context: ADJUST_CONTEXT, changeDate: at } });
       await tx.inventory.update({ where: { id: parcel.id }, data: { qty: dto.newQty } });
+      // Movement ledger: legacy COUNT shape — one US leg whose Qty is the
+      // signed DELTA (counted − book), valued at the lot's unit cost.
+      const unitCost = await this.lotUnitCost(tx, parcel.sublotId);
+      await this.movements.record(tx, [{
+        context: ADJUST_CONTEXT, changeSetId: csId, itemId: parcel.itemId, sublotId: parcel.sublotId,
+        legs: [{
+          context: 'US', ownerId: await this.movements.defaultOwnerId(tx), locationId: parcel.locationId,
+          qty: delta, value: unitCost != null ? this.movements.money4(delta * unitCost) : null,
+        }],
+      }]);
       await this.audit.record(
         {
           action: 'inventory.adjust',
@@ -216,6 +237,21 @@ export class InventoryService {
       const csId = ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
       await tx.changeSet.create({ data: { id: csId, context: TRANSFER_CONTEXT, changeDate: at } });
 
+      // Movement ledger: a pure location move — US out of the source, MK into
+      // the destination, NO value fields (the legacy PICK no-value rule, so
+      // at-date qty/value are untouched by moves). Header context TRNSFR
+      // matches the change set (legacy TRNSFR movements are consignment
+      // transfers; ERP1 repurposes the code for its location transfer —
+      // deliberate deviation, ASSUMPTIONS §20).
+      const owner = await this.movements.defaultOwnerId(tx);
+      await this.movements.record(tx, [{
+        context: TRANSFER_CONTEXT, changeSetId: csId, itemId: src.itemId, sublotId: src.sublotId,
+        legs: [
+          { context: 'US', ownerId: owner, locationId: src.locationId, qty: -dto.qty },
+          { context: 'MK', ownerId: owner, locationId: dto.toLocationId, qty: dto.qty },
+        ],
+      }]);
+
       await this.audit.record(
         {
           action: 'inventory.transfer',
@@ -281,7 +317,7 @@ export class InventoryService {
       // received quantity. Zero parcels = the receipt minted no on-hand (e.g. a
       // location-less install) — allowed, with nothing to delete. Anything else
       // (consumed / moved / split / adjusted) is refused.
-      const parcels = await tx.inventory.findMany({ where: { sublotId }, select: { id: true, qty: true } });
+      const parcels = await tx.inventory.findMany({ where: { sublotId }, select: { id: true, qty: true, locationId: true } });
       const totalOnHand = parcels.reduce((s, p) => s + (p.qty ?? 0), 0);
       if (parcels.length > 1 || (parcels.length === 1 && (parcels[0].qty ?? 0) !== received)) {
         throw new BadRequestException(
@@ -294,7 +330,22 @@ export class InventoryService {
       await tx.changeSet.create({ data: { id: csId, context: reverseContext, changeDate: at, reverseChangeSetId: changeSetId, ordrId: cs.ordrId } });
 
       // Remove the minted on-hand (the receipt never happened).
-      if (parcel) await tx.inventory.delete({ where: { id: parcel.id } });
+      if (parcel) {
+        await tx.inventory.delete({ where: { id: parcel.id } });
+        // Movement ledger: a negative MK leg under the reversing change set,
+        // keeping the FORWARD movement context (legacy idiom — corrections are
+        // negative receipt legs; RVSPO/RVSMISC are not viewer filter options.
+        // RVSSH is — but that's the shipment-reversal context, not ours).
+        const unitCost = await this.lotUnitCost(tx, sublotId);
+        await this.movements.record(tx, [{
+          context: cs.context as 'PO' | 'MISC', changeSetId: csId, itemId: receipt.itemId, sublotId,
+          legs: [{
+            context: 'MK', ownerId: await this.movements.defaultOwnerId(tx), locationId: parcel.locationId,
+            ordDetailId: receipt.ordDetailId, qty: -received,
+            value: unitCost != null ? this.movements.money4(-received * unitCost) : null,
+          }],
+        }]);
+      }
 
       // PO: unwind the receipt's QtyUsed bump on the ordered line (floored at 0).
       // The read-modify-write is safe under the advisory lock, which a concurrent

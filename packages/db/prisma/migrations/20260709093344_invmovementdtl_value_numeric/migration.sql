@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "InvMovementDtl" ALTER COLUMN "Value" SET DATA TYPE DECIMAL(19,4);
+
