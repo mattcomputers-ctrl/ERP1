@@ -38,6 +38,7 @@ import { InvoicesService } from '../../src/sales/invoices.service';
 import { PartyService } from '../../src/sales/party.service';
 import { SalesPricingService } from '../../src/sales/sales-pricing.service';
 import { ShippingService } from '../../src/sales/shipping.service';
+import { StagingService } from '../../src/sales/staging.service';
 import { SettingsService } from '../../src/settings/settings.service';
 
 // Integration-test support: a real Prisma client against a DISPOSABLE Postgres
@@ -139,6 +140,7 @@ export function services(prisma: PrismaClient) {
     approvalRequests,
     purchasing,
     shipping: new ShippingService(p, audit, party, salesPricing, approvalPolicy, approvalRequests),
+    staging: new StagingService(p, audit, movements, valuation, party),
     genealogy: new GenealogyService(p, party),
     inventory: new InventoryService(p, audit, movements, notifications),
     lotTracking: new LotTrackingService(p, audit, movements, sampling),
@@ -252,10 +254,18 @@ export async function addSublot(prisma: PrismaClient, data: { id: number; lot: s
 
 export async function addInventory(
   prisma: PrismaClient,
-  data: { id?: number; itemId: number; sublotId: number; locationId: number; qty: number },
+  data: { id?: number; itemId: number; sublotId: number; locationId: number; qty: number; ordDetailId?: number | null; status?: string | null },
 ): Promise<number> {
   const row = await prisma.inventory.create({
-    data: { id: data.id, itemId: data.itemId, sublotId: data.sublotId, locationId: data.locationId, qty: data.qty },
+    data: {
+      id: data.id,
+      itemId: data.itemId,
+      sublotId: data.sublotId,
+      locationId: data.locationId,
+      qty: data.qty,
+      ordDetailId: data.ordDetailId ?? null,
+      status: data.status ?? null,
+    },
     select: { id: true },
   });
   return row.id;

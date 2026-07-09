@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { type ReactNode, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { DataGrid, type GridColumn } from '../components/DataGrid';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
 import { useMe } from '../lib/auth';
 import { ExecutionPanel, VariancePanel } from './OrderExecution';
+import { StagingPanel } from './StagingPanel';
 
 const lifeState = (status: string | null) => (status && status.trim() ? status : 'NST');
 const STATUS_LABEL: Record<string, string> = {
@@ -322,7 +323,13 @@ export function Orders() {
           {detail.data.context === 'SH' && lifeState(detail.data.status) === 'NST' && (
             <EditShLines order={detail.data} onDone={refresh} />
           )}
-          {detail.data.context === 'SH' && <ShipLots orderId={detail.data.id} onDone={refresh} />}
+          {/* All SH states: the panel self-gates (stageable=false hides staging
+              controls) and unstage must stay reachable on completed orders —
+              freeing leftover staged stock is never blocked. */}
+          {detail.data.context === 'SH' && (
+            <StagingPanel key={`stg-${detail.data.id}`} orderId={detail.data.id} onDone={refresh} />
+          )}
+          {detail.data.context === 'SH' && <ShipLots key={`shl-${detail.data.id}`} orderId={detail.data.id} onDone={refresh} />}
           {detail.data.context === 'SH' && lifeState(detail.data.status) !== 'NST' && (
             <GenerateInvoice orderId={detail.data.id} onDone={refresh} />
           )}
@@ -1311,17 +1318,34 @@ interface ShipLotOption {
   qtyUsed: number | null;
   unit: string | null;
   lots: { lot: string; onHand: number; locationCode: string | null }[];
+  // Parcels staged/reserved to this line (shipping assemblies) — pre-filled
+  // as entry rows; the ship path draws them first.
+  reserved: { lot: string; qty: number; inventoryId: number; locationCode: string | null }[];
 }
 function ShipLots({ orderId, onDone }: { orderId: number; onDone: () => void }) {
   const [open, setOpen] = useState(false);
   const [rows, setRows] = useState<{ lot: string; qty: string; ordDetailId?: number }[]>([]);
   const [shippedAt, setShippedAt] = useState('');
+  const prefilled = useRef(false);
 
   const opts = useQuery({
     queryKey: ['ship-lot-options', orderId],
     queryFn: () => api.get<{ shippable: boolean; lines: ShipLotOption[] }>(`/orders/${orderId}/ship-lot-options`),
     enabled: open,
   });
+
+  // Reserved-first pre-fill: staged assembly stock becomes the initial entry
+  // rows (once per panel open; the operator can adjust or remove). Only from
+  // FRESH data — a staging change invalidates the cached options, and firing
+  // on the stale cache would latch the old reservation set (review round).
+  useEffect(() => {
+    if (!open || prefilled.current || opts.isFetching || opts.isStale || !opts.data?.shippable) return;
+    const pre = opts.data.lines.flatMap((ln) =>
+      (ln.reserved ?? []).map((r) => ({ lot: r.lot, qty: String(r.qty), ordDetailId: ln.ordDetailId })),
+    );
+    if (pre.length) setRows((cur) => (cur.length ? cur : pre));
+    prefilled.current = true;
+  }, [open, opts.data, opts.isFetching, opts.isStale]);
 
   const m = useMutation({
     mutationFn: () =>
@@ -1331,7 +1355,7 @@ function ShipLots({ orderId, onDone }: { orderId: number; onDone: () => void }) 
           .map((r) => ({ lot: r.lot.trim(), qty: Number(r.qty), ordDetailId: r.ordDetailId })),
         shippedAt: shippedAt || undefined,
       }),
-    onSuccess: () => { setOpen(false); setRows([]); setShippedAt(''); onDone(); },
+    onSuccess: () => { setOpen(false); setRows([]); setShippedAt(''); prefilled.current = false; onDone(); },
   });
 
   const addRow = (lot: string, ordDetailId?: number) => setRows((p) => [...p, { lot, qty: '', ordDetailId }]);
@@ -1370,7 +1394,18 @@ function ShipLots({ orderId, onDone }: { orderId: number; onDone: () => void }) 
                   <span className="ml-2 text-xs text-slate-400">ordered {ln.qtyReqd ?? '—'} {ln.unit}</span>
                 </div>
                 <div className="mt-1 flex flex-wrap gap-1.5">
-                  {ln.lots.length === 0 ? (
+                  {(ln.reserved ?? []).map((r) => (
+                    <button
+                      key={`res-${r.inventoryId}`}
+                      type="button"
+                      onClick={() => addRow(r.lot, ln.ordDetailId)}
+                      className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs text-emerald-700 hover:bg-emerald-100"
+                      title="Staged in a shipping assembly — ships first"
+                    >
+                      staged · {r.lot} · {r.qty}{r.locationCode ? ` @ ${r.locationCode}` : ''}
+                    </button>
+                  ))}
+                  {ln.lots.length === 0 && (ln.reserved ?? []).length === 0 ? (
                     <span className="text-xs text-slate-400">No on-hand lots — type a lot below.</span>
                   ) : (
                     ln.lots.map((lt) => (
@@ -1405,7 +1440,7 @@ function ShipLots({ orderId, onDone }: { orderId: number; onDone: () => void }) 
               <input type="date" value={shippedAt} onChange={(e) => setShippedAt(e.target.value)} className="rounded border border-slate-300 px-2 py-1 text-sm" />
             </label>
             <Button onClick={() => m.mutate()} disabled={!valid || m.isPending}>{m.isPending ? 'Recording…' : 'Record shipped lots'}</Button>
-            <button type="button" onClick={() => { setOpen(false); setRows([]); }} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+            <button type="button" onClick={() => { setOpen(false); setRows([]); prefilled.current = false; }} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
             {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
           </div>
         </>

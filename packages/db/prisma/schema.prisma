@@ -762,6 +762,9 @@ model Inventory {
   id          Int     @id @default(autoincrement()) @map("Inventory")
   sublotId    Int?    @map("Sublot")
   locationId  Int     @map("Location")
+  // SH staging reservation: the shipping-order line this parcel is staged to
+  // (verified legacy semantics; ERP1 sets/clears it via the shipping-assembly
+  // staging flow). Indexed for the per-order reservation reads.
   ordDetailId Int?    @map("OrdDetail")
   itemId      Int     @map("Item")
   status      String? @map("Status") @db.VarChar(6)
@@ -770,6 +773,7 @@ model Inventory {
   @@index([sublotId])
   @@index([locationId])
   @@index([itemId])
+  @@index([ordDetailId])
   @@map("Inventory")
 }
 

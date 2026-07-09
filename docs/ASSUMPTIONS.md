@@ -1430,3 +1430,117 @@ LogResult change feed (76,396 rows).
    system reason inside the reversal tx;
    (h) the live 'New Sample set' template's 16 extra tokens rendered raw →
    all supplied (nulls render blank) + @Table = the set's test/spec list.
+
+## SH staging — shipping assemblies + parcel reservations (§22 / L113, built 2026-07-09)
+
+Live discovery first. The legacy "Shipping Assembly" program (15,855 uses,
+1,916 in 2026 YTD, last used TODAY at 14:22) has ONE Log action
+(`AssembleDataSet.SaveChanges`); its whole mechanism was reconstructed from
+data:
+
+1. **An assembly is a single-use `Location` Context='ASM'** — 17,675 ever,
+   LocationCode 'A'+6 digits (live sequence at A017731), Owner=4,
+   parent = the BRECEIVE LCN rack (id 2, same parent the sample locations
+   use), PkgType=1, Status NULL while live → **'DEL' once shipped/emptied**
+   (17,627 DEL; 48 stale never-DEL'd empties). **Exactly ONE order per
+   assembly** on all 17,675 (verified via the PICK legs' OrdDetail → Ordr);
+   an order may have several assemblies. `Location.OrdDetail` is never used
+   for ASM (0 rows) — the order linkage lives on the parcels.
+2. **Staging = a PICK movement + `Inventory.OrdDetail`.** PICK header (41,299
+   movements), two VALUELESS legs — US(−qty) at the source WHS location, then
+   MK(+qty) at the ASM location **carrying the reserved SH line in
+   `InvMovementDtl.OrdDetail`** (all 41,109 inbound MK legs are line-bound).
+   The staged parcel row keeps the reservation in `Inventory.OrdDetail`
+   (12 live reservations at sweep time; 0 after that order shipped today —
+   reservations die by depletion, not by an explicit clear). Unpick mirrors
+   it: US(+qty) at the WHS side, MK(−qty) at the ASM side (178 ever).
+   Legacy shares ONE PICK ChangeSet per day (Ordr NULL, dated at first pick).
+3. **Shipment draws straight from the assembly**: SH change sets post US legs
+   AT the ASM location (41,753) + USCA cost legs (28,070, the standard-cost
+   artifact ERP1 doesn't emit — §20); RVSSH restores INTO the assembly (831).
+   CNT "containers" do not exist in this install (Location Context='CNT' = 0
+   rows) — reservation is parcel-level, no container model needed.
+
+**ERP1-native design (deviations recorded):**
+
+1. **Native assembly namespace 'EA'+5 digits** (EA00001…, regex-max under the
+   alloc lock), NOT legacy's live 'A' sequence — same parallel-running
+   collision logic as the sample 'E' namespace (§21). Parent = imported
+   BRECEIVE rack; Owner = the movement default owner; **the owning order is
+   stamped in `Location.Reference`** (ERP1 extension on native rows; legacy
+   leaves Reference NULL — needed to list an order's assemblies before
+   anything is staged). Description carries the order number for humans.
+2. **Per-event native PICK ChangeSets** (ordrId stamped, dated at the event) —
+   not legacy's shared daily changeset; ERP1's per-event convention (§20).
+   Leg shape is legacy-exact: valueless, US-first, MK carries the line. The
+   movement viewer's type whitelist already listed PICK.
+3. **Eligibility rule (both depleters)**: a parcel is consumable iff
+   `OrdDetail IS NULL AND location ∉ (SMP, ASM)` — reserved/staged stock joins
+   retained samples as on-hand-but-untouchable. THE ONE CARVE-OUT: the
+   shipment path passes its order's line ids (`allowReservedToLineIds`) and
+   parcels reserved to those lines become eligible AND are drawn FIRST
+   (reserved-first, then ascending id — DRAW order only; the locked scan stays
+   one global ascending-id statement). Other orders' reservations are
+   untouchable even by shipment.
+4. **shipLots closes emptied assemblies** (Status='DEL' when an ASM location
+   it drew from has nothing left) — the legacy single-use lifecycle. Partial
+   shipments leave the remainder reserved and the assembly open. Unstaging
+   never DELs (matches the 48 stale legacy empties). There is no un-DEL;
+   create a new assembly.
+5. **Staging is restricted to lot-traced items** (like ship-lot capture).
+   This also makes reservations IMPORT-SAFE with zero import changes: the
+   Inventory sync wholesale re-copies `OrdDetail` from legacy but SKIPS rows
+   of lot-tracked items (ERP1 owns their on-hand) and never touches
+   native-range rows. A reservation on a non-lot-tracked item's legacy parcel
+   would be clobbered by the next sync — refusing it up front is the fix.
+6. **Guards on neighboring flows**: plain inventory transfer refuses reserved
+   sources ("unstage instead"), refuses SMP/ASM destinations, and its merge
+   matcher requires `ordDetailId IS NULL` (free stock must never coalesce
+   into a reservation — and staging's own merges key on the line, so two
+   lines' reservations never coalesce either); the NST SH line editor refuses
+   removing a line with staged stock; lot-enable refuses while the item has
+   reserved parcels (the wipe would destroy an imported staged assembly's
+   contents). Unstage is allowed in ANY order state (freeing stock is never
+   blocked); staging requires an open order (not CMP/CLS/EDT — imported open
+   statuses like RTS pass).
+7. **ship-lot-options offers only free stock now** (reserved/ASM/SMP parcels
+   excluded from the per-line lots list — they were phantom availability the
+   depleter would refuse) and returns each line's `reserved` parcels
+   separately; the web ship panel pre-fills its entry rows from them
+   (reserved-first capture, operator-adjustable).
+8. Order status semantics: staging gates on the ERP1 lifecycle (CMP/CLS/EDT
+   refused), NOT on a legacy RTS gate — the plant's open SH orders carry
+   RTS/etc. from import and remain stageable. Reservations on a completed
+   order are freed via unstage; leftovers are visible in the staging panel
+   until then (legacy left 48 such stale assemblies).
+9. `Inventory.ordDetailId` gained an index (migration
+   `inventory_orddetail_index`) for the per-order reservation reads.
+10. **Review round (§22.10)**: 6 find lenses → 22 raw → 16 unique findings →
+   dual adversarial verification (the first round's minor-finding verifiers
+   died on session usage limits; re-verified with opus per the standing
+   fallback). 10 confirmed (5 major / 5 minor), all fixed; 6 refuted with
+   traced reasoning. The majors: (a) unstage lacked stage()'s import-safety
+   restriction — unstaging an imported (legacy-range / untracked-item)
+   reservation would be resurrected by the next Inventory sync re-copy,
+   double-counting stock → unstage now refuses non-native/untracked parcels
+   ("release it in the legacy Shipping Assembly program"), the panel shows
+   'staged in legacy' instead of a button; (b) adjust() could inflate/drain a
+   reservation (or an SMP sample / ASM assembly) with COUNT semantics →
+   transfer()'s fence mirrored (pre-tx + re-assert under the alloc lock);
+   (c) the staging panel was hidden on CMP/CLS orders, trapping leftover
+   reservations → rendered for all SH orders (it self-gates staging);
+   (d) unstage's audit rows claimed an OrdDetail→null transition that never
+   happens on a partial unstage → rows now record the actual qty movements;
+   (e) the web ShipLots panel wasn't keyed per order — pre-fill state leaked
+   across order switches. Minors fixed: the batch dispense picker now offers
+   only free stock (same phantom-availability gap shipLotOptions had);
+   shipLots' assembly close writes a structured Location/Status FieldChange;
+   the EA (and sampling E) code allocators use a width-agnostic numeric max
+   (the fixed-width lexical MAX would mint duplicates forever past 99999);
+   ship pre-fill only fires on fresh (non-stale, non-fetching) options data;
+   stage-candidate chips invalidate on every staging change. Notable refuted:
+   reversal-restore crediting a reserved parcel (restore targets the lot's
+   lowest-id parcel; reserved parcels are always native = highest ids), and
+   merge-candidate TOCTOU vs the import mirror (the sync can never write
+   OrdDetail on rows the staging flows produce — lot-tracked items are
+   sync-skipped).

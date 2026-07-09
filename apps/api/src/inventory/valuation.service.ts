@@ -112,6 +112,17 @@ export class ValuationService {
   async depleteSpecificMany(
     tx: Prisma.TransactionClient,
     requests: { lot: string; qty: number }[],
+    opts?: {
+      /**
+       * SH staging carve-out: parcels RESERVED to these order lines
+       * (Inventory.OrdDetail) are eligible AND drawn first — the shipment path
+       * passes its order's line ids so staged assembly stock ships before free
+       * warehouse stock. Without it (every other caller), reserved parcels and
+       * anything sitting at an ASM staging location are excluded exactly like
+       * SMP retained samples: staged stock belongs to a shipping order.
+       */
+      allowReservedToLineIds?: number[];
+    },
   ): Promise<Map<string, { depleted: number; shortfall: number; takes: ParcelTake[] }>> {
     const wantByLot = new Map<string, number>();
     for (const r of requests) wantByLot.set(r.lot, (wantByLot.get(r.lot) ?? 0) + r.qty);
@@ -125,26 +136,47 @@ export class ValuationService {
     const lotBySub = new Map(subs.map((s) => [s.id, s.lot]));
 
     // The single locked scan (see the lock-order invariant above). Ascending-id
-    // order doubles as the oldest-first draw order within each lot. SMP-context
+    // order doubles as the oldest-first draw order within each lot (staging
+    // reorders the DRAW below — never the lock). Eligibility: SMP-context
     // parcels (retained QC samples — legacy convention AND the native sampling
-    // seam's splits) are on-hand but never consumable stock: without the
+    // seam's splits) are on-hand but never consumable stock — without the
     // exclusion, exhausting a produced lot's main parcel silently ate the
-    // retained sample (2026-07-09 review).
-    const rows = await tx.$queryRaw<{ id: number; itemId: number | null; sublotId: number; locationId: number | null; qty: number | null }[]>`
-      SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Location" AS "locationId", "Qty" AS qty FROM "Inventory"
+    // retained sample (2026-07-09 review). Likewise parcels reserved to a
+    // shipping order line (Inventory.OrdDetail) or staged at an ASM assembly
+    // location are only consumable by THAT order's shipment (the
+    // allowReservedToLineIds carve-out) — never by batch consumption or another
+    // order's shipment.
+    const allowedLines = opts?.allowReservedToLineIds ?? [];
+    const rows = await tx.$queryRaw<{ id: number; itemId: number | null; sublotId: number; locationId: number | null; qty: number | null; ordDetailId: number | null }[]>`
+      SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Location" AS "locationId", "Qty" AS qty, "OrdDetail" AS "ordDetailId" FROM "Inventory"
       WHERE "Sublot" = ANY(${subs.map((s) => s.id)}) AND "Qty" > 0
-        AND ("Location" IS NULL OR "Location" NOT IN (SELECT "Location" FROM "Location" WHERE "Context" = 'SMP'))
+        AND (
+          ("OrdDetail" IS NOT NULL AND "OrdDetail" = ANY(${allowedLines}))
+          OR (
+            "OrdDetail" IS NULL
+            AND ("Location" IS NULL OR "Location" NOT IN (SELECT "Location" FROM "Location" WHERE "Context" IN ('SMP', 'ASM')))
+          )
+        )
       ORDER BY "Inventory" ASC
       FOR UPDATE`;
-    const parcelsByLot = new Map<string, { id: number; itemId: number | null; sublotId: number; locationId: number | null; qty: number }[]>();
+    const reservedFirst = (a: { id: number; ordDetailId: number | null }, b: { id: number; ordDetailId: number | null }) => {
+      const ra = a.ordDetailId != null ? 0 : 1;
+      const rb = b.ordDetailId != null ? 0 : 1;
+      return ra - rb || a.id - b.id;
+    };
+    const parcelsByLot = new Map<string, { id: number; itemId: number | null; sublotId: number; locationId: number | null; qty: number; ordDetailId: number | null }[]>();
     for (const r of rows) {
       const lot = lotBySub.get(r.sublotId);
       if (lot == null) continue;
       parcelsByLot.set(lot, [
         ...(parcelsByLot.get(lot) ?? []),
-        { id: r.id, itemId: r.itemId, sublotId: r.sublotId, locationId: r.locationId, qty: r.qty ?? 0 },
+        { id: r.id, itemId: r.itemId, sublotId: r.sublotId, locationId: r.locationId, qty: r.qty ?? 0, ordDetailId: r.ordDetailId },
       ]);
     }
+    // Reserved-first DRAW order (staged stock ships before free stock); the
+    // reserved rows only pass the WHERE when the carve-out allows them, so
+    // this is a no-op for non-shipment callers. Lock order is untouched.
+    if (allowedLines.length) for (const arr of parcelsByLot.values()) arr.sort(reservedFirst);
     for (const [lot, want] of wantByLot) {
       const parcels = parcelsByLot.get(lot) ?? [];
       if (!parcels.length) continue; // stays all-shortfall
@@ -235,11 +267,13 @@ export class ValuationService {
 
     // The single locked scan (lock-order invariant — one statement, global
     // ascending id, across ALL requested items). SMP retained-sample parcels
-    // excluded — never consumable stock (see depleteSpecificMany).
+    // excluded — never consumable stock; SH-reserved parcels (OrdDetail set)
+    // and ASM staging locations likewise — staged stock belongs to a shipping
+    // order and only ITS shipment may draw it (see depleteSpecificMany).
     const rows = await tx.$queryRaw<{ id: number; itemId: number; sublotId: number | null; locationId: number | null; qty: number | null }[]>`
       SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Location" AS "locationId", "Qty" AS qty FROM "Inventory"
-      WHERE "Item" = ANY(${itemIds}) AND "Qty" > 0 AND "Sublot" IS NOT NULL
-        AND ("Location" IS NULL OR "Location" NOT IN (SELECT "Location" FROM "Location" WHERE "Context" = 'SMP'))
+      WHERE "Item" = ANY(${itemIds}) AND "Qty" > 0 AND "Sublot" IS NOT NULL AND "OrdDetail" IS NULL
+        AND ("Location" IS NULL OR "Location" NOT IN (SELECT "Location" FROM "Location" WHERE "Context" IN ('SMP', 'ASM')))
       ORDER BY "Inventory" ASC
       FOR UPDATE`;
     if (!rows.length) return result;

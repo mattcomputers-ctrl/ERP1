@@ -61,9 +61,16 @@ export class InventoryService {
 
     const parcel = await this.prisma.inventory.findUnique({
       where: { id: dto.inventoryId },
-      select: { id: true, itemId: true, sublotId: true, locationId: true },
+      select: { id: true, itemId: true, sublotId: true, locationId: true, ordDetailId: true },
     });
     if (!parcel) throw new NotFoundException('Inventory parcel not found');
+    // Reserved / special-namespace parcels are owned by their flows: a plain
+    // count on a staged parcel would silently inflate or drain a shipping
+    // reservation with COUNT (not PICK) semantics, and SMP retained samples
+    // are the QA flow's. Same fence as transfer() (2026-07-09 review).
+    if (parcel.ordDetailId != null) {
+      throw new BadRequestException('This parcel is reserved to a shipping order — unstage it from the order’s staging panel instead.');
+    }
 
     // Decoration for a readable audit summary (item / lot / location) — reference
     // data, resolved outside the transaction.
@@ -75,8 +82,15 @@ export class InventoryService {
           })
         : Promise.resolve(null),
       parcel.sublotId != null ? this.prisma.sublot.findUnique({ where: { id: parcel.sublotId }, select: { lot: true } }) : Promise.resolve(null),
-      parcel.locationId != null ? this.prisma.location.findUnique({ where: { id: parcel.locationId }, select: { locationCode: true } }) : Promise.resolve(null),
+      parcel.locationId != null ? this.prisma.location.findUnique({ where: { id: parcel.locationId }, select: { locationCode: true, context: true } }) : Promise.resolve(null),
     ]);
+    if (location?.context === 'SMP' || location?.context === 'ASM') {
+      throw new BadRequestException(
+        location.context === 'ASM'
+          ? 'Assembly parcels are managed from the shipping order’s staging panel — not by plain adjustment.'
+          : 'Sample parcels are managed by the QA sampling flow — not by plain adjustment.',
+      );
+    }
     const reason = dto.reason.trim();
     const at = new Date();
 
@@ -85,9 +99,14 @@ export class InventoryService {
       // Read the current qty under the serialization lock so the recorded delta /
       // before-value and the no-op check reflect any concurrent adjust that just
       // committed (the lock makes adjusts mutually exclusive). The parcel can't be
-      // deleted in this app, but guard defensively.
-      const cur = await tx.inventory.findUnique({ where: { id: parcel.id }, select: { qty: true } });
+      // deleted in this app, but guard defensively. Re-assert the unreserved
+      // precondition under the lock too (stage() mints reserved parcels only
+      // at ASM locations, but the fence is cheap and closes the race).
+      const cur = await tx.inventory.findUnique({ where: { id: parcel.id }, select: { qty: true, ordDetailId: true } });
       if (!cur) throw new NotFoundException('Inventory parcel not found');
+      if (cur.ordDetailId != null) {
+        throw new BadRequestException('This parcel is reserved to a shipping order — unstage it from the order’s staging panel instead.');
+      }
       const oldQty = cur.qty ?? 0;
       const delta = dto.newQty - oldQty;
       if (delta === 0) return { inventoryId: parcel.id, oldQty, newQty: dto.newQty, delta: 0, unchanged: true };
@@ -169,13 +188,30 @@ export class InventoryService {
 
     const src = await this.prisma.inventory.findUnique({
       where: { id: dto.inventoryId },
-      select: { id: true, itemId: true, sublotId: true, locationId: true, status: true },
+      select: { id: true, itemId: true, sublotId: true, locationId: true, status: true, ordDetailId: true },
     });
     if (!src) throw new NotFoundException('Inventory parcel not found');
     if (src.locationId === dto.toLocationId) throw new BadRequestException('The destination must be a different location.');
+    // A reserved parcel (staged to a shipping-order line) is not free stock —
+    // a plain move would silently strip or strand its reservation. The staging
+    // flow (unstage) is the only door out.
+    if (src.ordDetailId != null) {
+      throw new BadRequestException('This parcel is reserved to a shipping order — unstage it from the order’s staging panel instead.');
+    }
 
-    const toLocation = await this.prisma.location.findUnique({ where: { id: dto.toLocationId }, select: { id: true, locationCode: true } });
+    const toLocation = await this.prisma.location.findUnique({ where: { id: dto.toLocationId }, select: { id: true, locationCode: true, context: true } });
     if (!toLocation) throw new NotFoundException('Destination location not found');
+    // Special-purpose namespaces move through their own flows only: SMP =
+    // retained samples (sampling seam), ASM = shipping assemblies (staging).
+    // Stock parked there by a plain transfer would vanish from every
+    // consumable/nettable view.
+    if (toLocation.context === 'SMP' || toLocation.context === 'ASM') {
+      throw new BadRequestException(
+        toLocation.context === 'ASM'
+          ? 'Assemblies are filled from the shipping order’s staging panel — not by plain transfer.'
+          : 'Sample locations are managed by the QA sampling flow — not by plain transfer.',
+      );
+    }
 
     // Decoration for the audit summary (item / lot / from-location).
     const [item, sublot, fromLocation] = await Promise.all([
@@ -200,7 +236,10 @@ export class InventoryService {
       // below degrades that race to minting a separate parcel, exactly the
       // pre-alignment behavior.)
       const existing = await tx.inventory.findFirst({
-        where: { itemId: src.itemId, sublotId: src.sublotId, locationId: dto.toLocationId, status: src.status },
+        // ordDetailId: null — free stock must never coalesce into a parcel
+        // reserved to a shipping order (that would silently inflate the
+        // reservation with unstaged quantity).
+        where: { itemId: src.itemId, sublotId: src.sublotId, locationId: dto.toLocationId, status: src.status, ordDetailId: null },
         select: { id: true },
       });
 
@@ -211,13 +250,18 @@ export class InventoryService {
       // scans AND makes the quantity reads race-free (the previous unlocked
       // read-modify-write could overwrite a concurrent depletion).
       const ids = existing ? [src.id, existing.id] : [src.id];
-      const locked = await tx.$queryRaw<{ id: number; qty: number | null }[]>`
-        SELECT "Inventory" AS id, "Qty" AS qty FROM "Inventory"
+      const locked = await tx.$queryRaw<{ id: number; qty: number | null; ordDetailId: number | null }[]>`
+        SELECT "Inventory" AS id, "Qty" AS qty, "OrdDetail" AS "ordDetailId" FROM "Inventory"
         WHERE "Inventory" = ANY(${ids})
         ORDER BY "Inventory" ASC
         FOR UPDATE`;
       const qtyById = new Map(locked.map((r) => [r.id, r.qty ?? 0]));
       if (!qtyById.has(src.id)) throw new NotFoundException('Inventory parcel not found');
+      // Re-assert the unreserved precondition under the lock (pre-tx check
+      // above gives the friendly error; this one closes the race).
+      if (locked.find((r) => r.id === src.id)?.ordDetailId != null) {
+        throw new BadRequestException('This parcel is reserved to a shipping order — unstage it from the order’s staging panel instead.');
+      }
       const sourceQty = qtyById.get(src.id)!;
       if (dto.qty > sourceQty) throw new BadRequestException(`Cannot transfer ${dto.qty} — only ${sourceQty} on hand.`);
 

@@ -39,6 +39,7 @@ const BASELINE_PROGRAMS = [
   { key: 'sales.invoices', name: 'Invoices', folder: 'Transactions/Sales' },
   { key: 'sales.shipments', name: 'Packing Slips', folder: 'Transactions/Sales' },
   { key: 'shipping.create', name: 'Create Shipping Order', folder: 'Transactions/Sales' },
+  { key: 'shipping.stage', name: 'Shipping Assembly (Stage/Reserve)', folder: 'Transactions/Sales' },
   { key: 'sales.priceLists', name: 'Sales Price Lists', folder: 'Master Tables/Pricing' },
   { key: 'sales.priceListEditor', name: 'Edit Sales Price Lists', folder: 'Master Tables/Pricing' },
   { key: 'sales.bills', name: 'Supplier Bills', folder: 'Transactions/Purchasing' },

@@ -145,6 +145,20 @@ export class LotTrackingService {
         );
       }
 
+      // Staged shipping reservations pin the item the same way: the wipe would
+      // destroy parcels reserved to an open SH order line (imported legacy
+      // staging included — Inventory.OrdDetail mirrors it), silently emptying
+      // a physically-staged assembly. Ship or unstage first.
+      const reservedParcel = await tx.$queryRaw<{ id: number }[]>`
+        SELECT "Inventory" AS id FROM "Inventory"
+        WHERE "Item" = ${itemId} AND "OrdDetail" IS NOT NULL AND "Qty" > 0
+        LIMIT 1`;
+      if (reservedParcel.length) {
+        throw new BadRequestException(
+          'This item has stock staged to a shipping order — ship or unstage the reserved parcels before enabling lot tracking.',
+        );
+      }
+
       // Wipe the item's prior (legacy / non-lot) on-hand; the entered lots become
       // the on-hand of record. The parcels are locked FIRST in one ascending-id
       // scan — the system-wide parcel lock order (see ValuationService.

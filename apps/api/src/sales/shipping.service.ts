@@ -301,6 +301,14 @@ export class ShippingService {
     if (payload.op === 'remove') {
       const lineCount = await db.ordDetail.count({ where: { ordrId: id, context: SH_CONTEXT } });
       if (lineCount <= 1) throw new BadRequestException('A shipping order must have at least one line.');
+      // A line with staged stock reserved to it can't just vanish — the
+      // reservation would orphan (parcels pointing at a deleted line).
+      const reserved = await db.inventory.count({ where: { ordDetailId: payload.lineId, qty: { gt: 0 } } });
+      if (reserved > 0) {
+        throw new BadRequestException(
+          `Line ${payload.lineId} has staged stock reserved to it — unstage it from the staging panel before removing the line.`,
+        );
+      }
     }
     return { line };
   }

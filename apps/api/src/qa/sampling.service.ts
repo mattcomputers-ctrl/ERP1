@@ -149,10 +149,14 @@ export class SamplingService {
     // Parented at the imported BRECEIVE rack when present (legacy convention),
     // else wherever the stock was minted.
     const sampleLocationId = await this.nextId(tx, 'location');
-    const [seq] = await tx.$queryRaw<{ code: string | null }[]>`
-      SELECT MAX("LocationCode") AS code FROM "Location"
-      WHERE "Context" = 'SMP' AND "LocationCode" ~ '^E[0-9]{5}$'`;
-    const sampleCode = 'E' + String(Number((seq?.code ?? 'E00000').slice(1)) + 1).padStart(5, '0');
+    // Width-agnostic numeric max: after E99999 the sequence grows to E100000
+    // and keeps counting — a fixed-width lexical MAX would stop seeing the
+    // true max and mint duplicates forever (2026-07-09 staging review, same
+    // pattern as the EA assembly allocator). padStart is a minimum width.
+    const [seq] = await tx.$queryRaw<{ n: bigint | number | null }[]>`
+      SELECT MAX(CAST(SUBSTRING("LocationCode" FROM 2) AS BIGINT)) AS n FROM "Location"
+      WHERE "Context" = 'SMP' AND "LocationCode" ~ '^E[0-9]+$'`;
+    const sampleCode = 'E' + String(Number(seq?.n ?? 0) + 1).padStart(5, '0');
     const rack = await tx.location.findFirst({
       where: { locationCode: 'BRECEIVE', context: 'LCN' },
       select: { id: true },

@@ -173,8 +173,12 @@ export interface MovementLeg {
 export interface MovementEvent {
   /** Header context — legacy vocabulary only (the viewer filter whitelist).
    * SAMPLE = the QC retained-sample draw (legacy: 25,416 movements, one per
-   * sample set; ERP1 emits it at the completion sampling seam). */
-  context: 'PO' | 'MISC' | 'COUNT' | 'TRNSFR' | 'SH' | 'CMNGL' | 'PCKAGE' | 'SAMPLE';
+   * sample set; ERP1 emits it at the completion sampling seam).
+   * PICK = shipping-assembly staging (legacy: 41,299 movements, valueless
+   * US-at-source / MK-at-ASM pairs, the MK leg carrying the reserved SH
+   * line; unpick mirrors it with the signs flipped — ERP1 emits it at the
+   * stage/unstage seams). */
+  context: 'PO' | 'MISC' | 'COUNT' | 'TRNSFR' | 'SH' | 'CMNGL' | 'PCKAGE' | 'SAMPLE' | 'PICK';
   changeSetId: number;
   itemId?: number | null;
   sublotId?: number | null;

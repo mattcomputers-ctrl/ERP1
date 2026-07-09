@@ -2485,11 +2485,23 @@ export class OrdersService {
 
     // On-hand finished-good lots for the traced items, grouped by lot (a lot may
     // sit in several locations). Sublot -> lot, Inventory(qty>0) -> Location code.
+    // FREE stock only: parcels reserved to a sales line (Inventory.OrdDetail)
+    // and anything at an SMP retained-sample or ASM staging location are not
+    // offerable — the depleter refuses them, so listing them would promise
+    // stock the shipment can't draw (phantom shortfalls). This order's own
+    // reservations surface separately below, as the pre-fill.
     const lotsByItem = new Map<number, { lot: string; onHand: number; locationId: number | null; locationCode: string | null }[]>();
+    const reservedByLine = new Map<number, { lot: string; qty: number; inventoryId: number; locationId: number | null; locationCode: string | null }[]>();
     if (tracedItemIds.length) {
+      const lineIds = lines.map((l) => l.id);
       const inv = await this.prisma.inventory.findMany({
-        where: { itemId: { in: tracedItemIds }, qty: { gt: 0 }, sublotId: { not: null } },
-        select: { itemId: true, sublotId: true, locationId: true, qty: true },
+        where: {
+          itemId: { in: tracedItemIds },
+          qty: { gt: 0 },
+          sublotId: { not: null },
+          OR: [{ ordDetailId: null }, { ordDetailId: { in: lineIds } }],
+        },
+        select: { id: true, itemId: true, sublotId: true, locationId: true, qty: true, ordDetailId: true },
       });
       const subIds = [...new Set(inv.map((r) => r.sublotId).filter((v): v is number => v != null))];
       const locIds = [...new Set(inv.map((r) => r.locationId).filter((v): v is number => v != null))];
@@ -2498,23 +2510,32 @@ export class OrdersService {
           ? this.prisma.sublot.findMany({ where: { id: { in: subIds } }, select: { id: true, lot: true } })
           : Promise.resolve([]),
         locIds.length
-          ? this.prisma.location.findMany({ where: { id: { in: locIds } }, select: { id: true, locationCode: true } })
+          ? this.prisma.location.findMany({ where: { id: { in: locIds } }, select: { id: true, locationCode: true, context: true } })
           : Promise.resolve([]),
       ]);
       const lotBySub = new Map(subs.map((s) => [s.id, s.lot]));
-      const locById = new Map(locs.map((l) => [l.id, l.locationCode]));
+      const locById = new Map(locs.map((l) => [l.id, l]));
       // Sum qty per (item, lot, location) so the picker lists each parcel once.
       const agg = new Map<string, { itemId: number; lot: string; onHand: number; locationId: number | null; locationCode: string | null }>();
       for (const r of inv) {
         const lot = r.sublotId != null ? lotBySub.get(r.sublotId) ?? null : null;
         if (!lot || r.itemId == null) continue;
+        const loc = r.locationId != null ? locById.get(r.locationId) ?? null : null;
+        if (r.ordDetailId != null) {
+          // This order's staged reservation — the reserved-first pre-fill.
+          const arr = reservedByLine.get(r.ordDetailId) ?? [];
+          arr.push({ lot, qty: Number(r.qty) || 0, inventoryId: r.id, locationId: r.locationId ?? null, locationCode: loc?.locationCode ?? null });
+          reservedByLine.set(r.ordDetailId, arr);
+          continue;
+        }
+        if (loc && (loc.context === 'SMP' || loc.context === 'ASM')) continue; // not free stock
         const key = `${r.itemId}|${lot}|${r.locationId ?? ''}`;
         const cur = agg.get(key) ?? {
           itemId: r.itemId,
           lot,
           onHand: 0,
           locationId: r.locationId ?? null,
-          locationCode: r.locationId != null ? locById.get(r.locationId) ?? null : null,
+          locationCode: loc?.locationCode ?? null,
         };
         cur.onHand += Number(r.qty) || 0;
         agg.set(key, cur);
@@ -2525,6 +2546,7 @@ export class OrdersService {
         lotsByItem.set(v.itemId, arr);
       }
       for (const arr of lotsByItem.values()) arr.sort((a, b) => a.lot.localeCompare(b.lot));
+      for (const arr of reservedByLine.values()) arr.sort((a, b) => a.lot.localeCompare(b.lot) || a.inventoryId - b.inventoryId);
     }
 
     const out = lines
@@ -2540,6 +2562,10 @@ export class OrdersService {
           qtyUsed: l.qtyUsed,
           unit: l.entityUnit ?? item?.unit ?? null,
           lots: lotsByItem.get(l.itemId!) ?? [],
+          // Parcels staged/reserved to THIS line (assembly stock) — the client
+          // pre-fills the shipment entries from these; the ship path draws
+          // them first.
+          reserved: reservedByLine.get(l.id) ?? [],
         };
       });
 
@@ -2641,10 +2667,17 @@ export class OrdersService {
       // (see consumeLineTx — the single-scan lock order plus depletion-first
       // ordering serialize this shipment against a concurrent reversal of a
       // lot's producing batch). A shortfall is recorded, not blocked — the
-      // goods left the building regardless.
+      // goods left the building regardless. THIS order's staged reservations
+      // (assembly parcels carrying its line ids) are eligible and drawn
+      // FIRST — the legacy flow ships straight out of the ASM assembly;
+      // other orders' reservations stay untouchable.
+      const orderLineIds = (
+        await tx.ordDetail.findMany({ where: { ordrId: id, context: 'SH' }, select: { id: true } })
+      ).map((l) => l.id);
       const depletions = await this.valuation.depleteSpecificMany(
         tx,
         dto.lots.map((l) => ({ lot: l.lot.trim(), qty: l.qty })),
+        { allowReservedToLineIds: orderLineIds },
       );
       const shortfalls = [...depletions.entries()]
         .filter(([, d]) => d.shortfall > 0)
@@ -2728,6 +2761,25 @@ export class OrdersService {
         await tx.$executeRaw`UPDATE "OrdDetail" SET "QtyUsed" = COALESCE("QtyUsed", 0) + ${inc} WHERE "OrdDetail" = ${lineId}`;
       }
 
+      // Close out emptied shipping assemblies (the legacy lifecycle: every
+      // assembly shipped today is already Status='DEL'). An ASM location this
+      // shipment drew from with nothing left on it is done — single-use.
+      const asmDrawnIds = [...new Set(shipTakes.map((t) => t.locationId).filter((v): v is number => v != null))];
+      const closedAssemblies: { id: number; code: string; prevStatus: string | null }[] = [];
+      if (asmDrawnIds.length) {
+        const asmLocs = await tx.location.findMany({
+          where: { id: { in: asmDrawnIds }, context: 'ASM', OR: [{ status: null }, { status: { not: 'DEL' } }] },
+          select: { id: true, locationCode: true, status: true },
+        });
+        for (const loc of asmLocs) {
+          const remaining = await tx.inventory.count({ where: { locationId: loc.id, qty: { gt: 0 } } });
+          if (remaining === 0) {
+            await tx.location.update({ where: { id: loc.id }, data: { status: 'DEL' } });
+            closedAssemblies.push({ id: loc.id, code: loc.locationCode ?? String(loc.id), prevStatus: loc.status });
+          }
+        }
+      }
+
       await this.audit.record(
         {
           action: 'order.shiplots',
@@ -2738,14 +2790,27 @@ export class OrdersService {
             `Shipping order #${id} recorded ${dto.lots.length} shipped lot${dto.lots.length === 1 ? '' : 's'}` +
             (order.poNumber ? ` (PO ${order.poNumber})` : '') +
             (shortfalls.length ? `; ${shortfalls.length} lot(s) short on-hand` : '') +
+            (closedAssemblies.length ? `; assembly ${closedAssemblies.map((a) => a.code).join(', ')} emptied and closed` : '') +
             (dto.reason ? ` — ${dto.reason}` : ''),
-          changes: dto.lots.map((l) => ({
-            tableName: 'shipment_lot',
-            recordId: String(id),
-            fieldName: 'shipped',
-            oldValue: null,
-            newValue: `${l.lot.trim()} (qty ${l.qty})`,
-          })),
+          changes: [
+            ...dto.lots.map((l) => ({
+              tableName: 'shipment_lot',
+              recordId: String(id),
+              fieldName: 'shipped',
+              oldValue: null,
+              newValue: `${l.lot.trim()} (qty ${l.qty})`,
+            })),
+            // The assembly close is a Location status transition — record it
+            // structurally so the audit trail is filterable by the Location
+            // record, matching the assembly-create rows.
+            ...closedAssemblies.map((a) => ({
+              tableName: 'Location',
+              recordId: String(a.id),
+              fieldName: 'Status',
+              oldValue: a.prevStatus,
+              newValue: 'DEL',
+            })),
+          ],
         },
         tx,
       );
@@ -3033,15 +3098,24 @@ export class OrdersService {
         select: { id: true, lot: true },
       });
       const lotBySub = new Map(subs.map((s) => [s.id, s.lot]));
-      const inv = await this.prisma.inventory.groupBy({
-        by: ['sublotId'],
-        where: { sublotId: { in: subs.map((s) => s.id) }, qty: { gt: 0 } },
-        _sum: { qty: true },
+      // FREE stock only — mirror the depleter eligibility (no reserved
+      // parcels, nothing at SMP retained-sample / ASM staging locations), so
+      // the dispense picker never promises on-hand the consumption engine
+      // will refuse (2026-07-09 staging review; same rule as shipLotOptions).
+      const inv = await this.prisma.inventory.findMany({
+        where: { sublotId: { in: subs.map((s) => s.id) }, qty: { gt: 0 }, ordDetailId: null },
+        select: { sublotId: true, locationId: true, qty: true },
       });
+      const invLocIds = [...new Set(inv.map((r) => r.locationId).filter((v): v is number => v != null))];
+      const invLocs = invLocIds.length
+        ? await this.prisma.location.findMany({ where: { id: { in: invLocIds } }, select: { id: true, context: true } })
+        : [];
+      const specialLocIds = new Set(invLocs.filter((l) => l.context === 'SMP' || l.context === 'ASM').map((l) => l.id));
       const onHandByLot = new Map<string, number>();
       for (const g of inv) {
+        if (g.locationId != null && specialLocIds.has(g.locationId)) continue;
         const lot = g.sublotId != null ? lotBySub.get(g.sublotId) : undefined;
-        if (lot) onHandByLot.set(lot, (onHandByLot.get(lot) ?? 0) + (g._sum.qty ?? 0));
+        if (lot) onHandByLot.set(lot, (onHandByLot.get(lot) ?? 0) + (g.qty ?? 0));
       }
       for (const l of lotRows) {
         const onHand = onHandByLot.get(l.lot) ?? 0;
