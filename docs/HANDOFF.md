@@ -137,15 +137,26 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. **Verify CI green for the movement-emission commit** (§19 close 5b06d95
-   confirmed green; fix first if red). **Native InvMovement emission is
-   DONE** (2026-07-09, ASSUMPTIONS §20): every inventory writer emits legs
-   in-tx; §19 handheld CLOSED-by-evidence (ASSUMPTIONS §19).
-2. **Sweep FEATURE_PARITY for remaining ⬜ rows** and close them (build or
-   ⏸️-with-evidence): quotes/POS + 3rd-party shipping on the Shipping row,
-   reserve/unreserve + shipping assemblies, §10 "Inventory supply & demand"
-   sub-row check, and any other non-✅/non-⏸️ cells — the finish line is
-   every row ✅ or ⏸️.
+1. **APPLY THE PARITY SWEEP** (docs/PARITY_SWEEP_2026-07-09.md — a 7-agent
+   evidence sweep dispositioned ALL 66 open FEATURE_PARITY rows: 31
+   FLIP_DONE + 17 DEFER are pure note edits with verified evidence text
+   ready to paste; do these first, they close 48 rows in one docs commit).
+   Movement emission (0111be1) is CI-GREEN (run #115).
+2. **Build the genuine gaps the sweep confirmed** (details + sizes in the
+   sweep doc), grouped by module: (a) QA sampling — native sample-set/
+   Release creation at the receipt/completion seams + Test-catalog admin
+   (L129/L130/L132/L133 — the plant's daily QC loop; ERP1 can't create
+   Release rows today); (b) SH staging — reserve/unreserve parcels +
+   shipping assemblies (L113, 15,855 uses, active daily; Inventory.OrdDetail
+   + ASM locations already mirrored); (c) warehouse transfers (TI invoices,
+   182 rows, active) + returns/credits (negative SH lines + native invoice
+   reversal — 2,343 reversal pairs, growing) (L115); (d) MFA/TOTP + OIDC
+   SSO (L19 — committed greenfield security requirement, not legacy
+   parity); (e) smaller: supervisor in-place elevation (L22), item/entity
+   edit-form gaps (L31/L33/L34), price-list editor wiring (L37/L48),
+   disposal reversal (L60), count sheets/verify-location (L62), label
+   printing (L64), recipe expected-cost view (L75), doc logo/branding
+   (L153).
 3. Background chip pending: enforce secured-item PERFORM grant on
    order.complete + release.disposition (+ order.revise now).
 4. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
