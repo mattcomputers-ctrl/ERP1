@@ -211,7 +211,8 @@ schedule **Sync changes** during parallel running).
   IsWarehouse join) + all three pickers; tax round2 is half-away-from-zero
   (credits negate sales exactly). Planning still nets consigned WHS stock
   (validated-exact engine — change only with fresh evidence).
-- Suites: 114 unit + 442 integration green (expected — verify the final run).
+- Suites: 114 unit + 442 integration green; CI runs #121 (4723eed, SH
+  staging) and #122 (2b76092, L115) both green.
 
 ## State of the world (as of 2026-07-09 later, QA module group)
 
