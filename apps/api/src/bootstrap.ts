@@ -34,6 +34,9 @@ export function configureApp(app: NestExpressApplication, opts: ConfigureAppOpti
   // Behind the Caddy reverse proxy in production; harmless under supertest.
   app.set('trust proxy', 1);
   app.setGlobalPrefix('api');
+  // Body-parser default is 100 KB — too small for the company-logo data URL
+  // (settings PUT, capped at 400 KB by its own validation). 1 MB headroom.
+  app.useBodyParser('json', { limit: '1mb' });
   app.use(helmet());
   app.use(cookieParser());
 

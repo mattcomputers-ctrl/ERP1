@@ -23,6 +23,7 @@ import { Items } from './pages/Items';
 import { ItemTests } from './pages/ItemTests';
 import { LineEditApprovals } from './pages/LineEditApprovals';
 import { AssemblyLabelDoc } from './pages/AssemblyLabelDoc';
+import { ContainerLabelDoc } from './pages/ContainerLabelDoc';
 import { Login } from './pages/Login';
 import { LotTracking } from './pages/LotTracking';
 import { MiscReceipts } from './pages/MiscReceipts';
@@ -86,6 +87,7 @@ export function App() {
         <Route path="/packing-slips" element={<PackingSlips />} />
         <Route path="/packing-slips/:id/print" element={<PackingSlipDoc />} />
         <Route path="/assemblies/:id/label" element={<AssemblyLabelDoc />} />
+        <Route path="/labels/container/:id" element={<ContainerLabelDoc />} />
         <Route path="/certificates" element={<Certificates />} />
         <Route path="/item-tests" element={<ItemTests />} />
         <Route path="/cofa/:id/print" element={<CofADoc />} />

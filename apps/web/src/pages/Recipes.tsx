@@ -92,7 +92,8 @@ interface PricingResp {
   weightUnit: string;
   rows: {
     itemId: number; itemCode: string | null; description: string | null; needed: number;
-    source: 'supplier' | 'standard' | null; supplierCode: string | null;
+    source: 'supplier' | 'subRecipe' | 'standard' | 'replacement' | null;
+    costingRecipeNumber: string | null; supplierCode: string | null;
     unitPrice: number | null; orderQty: number | null; totalCost: number | null;
     excessQty: number; excessCost: number;
   }[];
@@ -1128,13 +1129,29 @@ function PricingPanel({ id }: { id: number }) {
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">{qty3(row.needed)}</td>
                     <td className="px-3 py-2">
-                      {row.source === 'supplier' ? row.supplierCode : row.source === 'standard' ? <span className="text-slate-500">std cost</span> : <span className="text-amber-600">unpriced</span>}
+                      {row.source === 'supplier' ? (
+                        row.supplierCode
+                      ) : row.source === 'subRecipe' ? (
+                        <span className="rounded bg-sky-50 px-1.5 py-0.5 text-xs text-sky-700" title="Rolled up from the item's active costing recipe">
+                          {row.costingRecipeNumber ?? 'sub-recipe'}
+                        </span>
+                      ) : row.source === 'standard' ? (
+                        <span className="text-slate-500">std cost</span>
+                      ) : row.source === 'replacement' ? (
+                        <span className="text-slate-500" title="Item replacement cost">repl. cost</span>
+                      ) : (
+                        <span className="text-amber-600">unpriced</span>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">{row.unitPrice != null ? money(row.unitPrice) : '—'}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{row.orderQty != null ? qty3(row.orderQty) : '—'}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{money(row.totalCost)}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-500">
-                      {row.excessQty > 0 ? `${qty3(row.excessQty)} (${money(row.excessCost)})` : ''}
+                      {row.excessQty > 0
+                        ? `${qty3(row.excessQty)} (${money(row.excessCost)})`
+                        : row.excessCost > 0
+                          ? money(row.excessCost) // sub-recipe rows: child excess $ (qty units differ)
+                          : ''}
                     </td>
                   </tr>
                 ))}
@@ -1159,7 +1176,8 @@ function PricingPanel({ id }: { id: number }) {
           </div>
           <p className="mt-1 text-xs text-slate-400">
             Cheapest supplier across quantity breaks from each supplier's effective price version (excess = tier minimum
-            beyond the need); falls back to the item's standard cost. Sub-recipe costing not yet included.
+            beyond the need). Made ingredients without a supplier price roll up from their active costing recipe
+            (all-or-nothing per sub-recipe); the terminal fallbacks are the item's standard, then replacement, cost.
           </p>
         </>
       )}

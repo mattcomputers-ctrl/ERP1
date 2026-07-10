@@ -8,7 +8,7 @@ interface SettingRow {
   group: string;
   label: string;
   description: string;
-  type: 'text' | 'number' | 'boolean' | 'select' | 'password';
+  type: 'text' | 'number' | 'boolean' | 'select' | 'password' | 'image';
   options?: string[];
   readonly?: boolean;
   defaultValue: string;
@@ -53,6 +53,9 @@ export function Configuration() {
     onSuccess: (failures) => {
       qc.invalidateQueries({ queryKey: ['settings-registry'] });
       qc.invalidateQueries({ queryKey: ['settings'] });
+      // Document headers cache branding for 5 min — a saved logo/name change
+      // must show up on the next document open, not after the TTL.
+      qc.invalidateQueries({ queryKey: ['branding'] });
       if (failures.length) {
         setError(`Not saved — ${failures.join(' · ')}`);
       } else {
@@ -118,6 +121,12 @@ export function Configuration() {
                     />
                     Enabled
                   </label>
+                ) : s.type === 'image' ? (
+                  <ImageSetting
+                    value={val(s)}
+                    onChange={(v) => setEdits((p) => ({ ...p, [s.key]: v }))}
+                    onError={setError}
+                  />
                 ) : s.type === 'select' ? (
                   <select
                     className="w-full rounded-md border border-slate-300 bg-white px-2 py-2 text-sm"
@@ -153,6 +162,52 @@ export function Configuration() {
           {saved && <span className="text-sm text-emerald-600">Saved.</span>}
         </div>
       </Card>
+    </div>
+  );
+}
+
+// Image setting (company logo): pick a file → stored as a base64 data URL,
+// with a preview and a clear action. The server re-validates MIME + size.
+const MAX_IMAGE_DATA_URL = 400_000; // ~300 KB of image, matching the API cap
+
+function ImageSetting({ value, onChange, onError }: {
+  value: string;
+  onChange: (v: string) => void;
+  onError: (msg: string | null) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      {value ? (
+        <div className="flex items-start gap-3">
+          <img src={value} alt="Configured logo" className="max-h-16 rounded border border-slate-200 bg-white p-1" />
+          <button type="button" onClick={() => onChange('')} className="text-sm text-red-600 hover:underline">
+            Remove
+          </button>
+        </div>
+      ) : (
+        <div className="rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-400">No logo — text-only header</div>
+      )}
+      <input
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        className="block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-50 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-indigo-700 hover:file:bg-indigo-100"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = () => {
+            const dataUrl = String(reader.result ?? '');
+            if (dataUrl.length > MAX_IMAGE_DATA_URL) {
+              onError('Logo too large — keep the image under ~300 KB.');
+              return;
+            }
+            onError(null);
+            onChange(dataUrl);
+          };
+          reader.readAsDataURL(file);
+          e.target.value = ''; // allow re-picking the same file
+        }}
+      />
     </div>
   );
 }

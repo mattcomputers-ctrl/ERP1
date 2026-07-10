@@ -151,17 +151,18 @@ schedule **Sync changes** during parallel running).
    ~~Warehouse transfers/returns (L115)~~ ✅ · ~~MFA/TOTP + OIDC SSO
    (L19)~~ **DONE 2026-07-10** (f6ffdfc, ASSUMPTIONS §24) · ~~Supervisor
    in-place elevation + perform-grant enforcement (L22, closed the grant
-   chip too)~~ **DONE 2026-07-10** (ASSUMPTIONS §25). **10 rows open, all
-   queued builds.**
+   chip too)~~ **DONE 2026-07-10** (ASSUMPTIONS §25) · ~~Costing &
+   documents bundle: recipe cost rollup (L75) + container labels (L64) +
+   doc logo (L153)~~ **DONE 2026-07-10** (ASSUMPTIONS §26). **7 rows open,
+   all queued builds.**
 2. **Build the remaining gaps** (details + sizes in the sweep doc) — NEXT
-   UP, smallest-first is fine: item/entity edit-form gaps (L31/L33/L34),
-   supplier price-version editor (L37/L48), shipment reversal (L60 — RVSSH
-   restores INTO the ASM assembly per §22 discovery; the reversal must also
-   unwind QtyUsed/shipment_lot and respect reversal-pair invoice math),
-   count sheets (L62), label printing incl. sample labels (L64 — the
-   assembly label doc is the print template precedent), recipe
-   expected-cost sub-recipe rollup (L75 — CostingRecipe already imported,
-   pure rollup extension), doc logo upload (L153).
+   UP: count sheets (L62 — mirror + import InventoryCount/-Detail, native
+   count workflow posting per-parcel adjustments under ONE COUNT ChangeSet
+   through the existing adjust engine); item/entity edit-form gaps
+   (L31/L33/L34); supplier price-version editor (L37/L48); shipment
+   reversal (L60 — RVSSH restores INTO the ASM assembly per §22 discovery;
+   the reversal must also unwind QtyUsed/shipment_lot and respect
+   reversal-pair invoice math).
 3. OPEN_QUESTIONS: Entra tenant details for SSO (issuer/clientId/secret +
    sub-vs-oid provisioning — new 2026-07-10); native-Lot marker column if
    parallel running shows YYMMDD### collisions; N-sequence invoice numbers
@@ -181,6 +182,21 @@ schedule **Sync changes** during parallel running).
    release.disposition) are seed-granted to ADMIN; grant them to the
    operator groups on the Secured Items page before parallel running, or
    operators will need supervisor elevation for every completion.
+
+## State of the world (as of 2026-07-10 later, costing & documents bundle)
+
+- **Costing & documents ✅** (ASSUMPTIONS §26): (L75) pricing rollup now
+  recurses unpriced MADE ingredients through their ACTIVE costing recipe
+  (planning's version-family resolve; parent-scaled needs; all-or-nothing;
+  cycle-guarded, depth 5) with **ReplacementCost as the terminal fallback**
+  — the sweep's "CostingRecipe missing from import" claim was stale (§10
+  already mirrored it). (L153) `company.logoDataUrl` image setting (file
+  picker on Configuration, ≤~300 KB) → session-only `GET /settings/branding`
+  → `DocLogo` in invoice/packing-slip/PO/CofA headers; **configureApp now
+  sets a 1 MB json body limit** (default 100 KB 413'd the upload). (L64)
+  container/lot label `GET /inventory/:id/label` + `/labels/container/:id`
+  page + Label action on Inventory rows; the legacy shipping label IS the
+  shipped ASM assembly label (1:1 evidence).
 
 ## State of the world (as of 2026-07-10, L19 MFA/SSO + L22 elevation)
 

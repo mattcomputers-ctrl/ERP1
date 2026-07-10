@@ -19,6 +19,14 @@ export class InventoryController {
     return this.inventory.list(query);
   }
 
+  // Container/lot label data for a parcel (legacy PrintContainerLabel —
+  // 25,434 uses; reprint = reopening the page).
+  @Get('inventory/:id/label')
+  @RequireProgram('inventory.browser')
+  containerLabel(@Param('id', ParseIntPipe) id: number) {
+    return this.inventory.containerLabel(id);
+  }
+
   // Adjust an on-hand parcel to a counted quantity (write-on / write-off).
   @Post('inventory/adjust')
   @RequireProgram('inventory.adjust')

@@ -16,7 +16,7 @@
 // `defaultValue` mirrors seed.ts (seed wins for fresh installs; the registry
 // default is the fallback shown when a key was never seeded/saved).
 
-export type SettingType = 'text' | 'number' | 'boolean' | 'select' | 'password';
+export type SettingType = 'text' | 'number' | 'boolean' | 'select' | 'password' | 'image';
 
 export interface SettingDef {
   key: string;
@@ -56,6 +56,10 @@ export const SETTINGS_REGISTRY: SettingDef[] = [
   {
     key: 'company.email', group: 'Company', label: 'Purchasing e-mail', type: 'text', defaultValue: 'PURCHASING@PRECISIONINKCORP.COM',
     description: 'Shown in the purchase-order footer.',
+  },
+  {
+    key: 'company.logoDataUrl', group: 'Company', label: 'Company logo', type: 'image', defaultValue: '',
+    description: 'Logo printed in the header of customer-facing documents (invoice, packing slip, purchase order, CofA) — every legacy invoice carried one. PNG/JPEG/GIF/WebP up to ~300 KB; empty = text-only header.',
   },
 
   // --- Batch Execution (legacy Batch Execution tab) --------------------------

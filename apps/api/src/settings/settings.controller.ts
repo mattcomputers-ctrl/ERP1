@@ -59,6 +59,23 @@ export class SettingsController {
       if (def.type === 'select' && def.options && !def.options.includes(v)) {
         throw new BadRequestException(`'${key}' must be one of: ${def.options.join(', ')}.`);
       }
+      // Images are stored as data URLs (rendered straight into <img src> on
+      // printed documents): only raster image MIME types, size-capped so a
+      // multi-megabyte upload can't bloat every document fetch. Empty clears.
+      if (def.type === 'image' && v !== '') {
+        if (!/^data:image\/(png|jpe?g|gif|webp);base64,[A-Za-z0-9+/]+=*$/.test(v)) {
+          throw new BadRequestException(`'${key}' must be a base64 data URL of a PNG/JPEG/GIF/WebP image.`);
+        }
+        if (v.length > 400_000) {
+          throw new BadRequestException(`'${key}' is too large — keep the image under ~300 KB.`);
+        }
+      }
+    }
+    // The json body limit was raised to 1 MB for the logo data URL — that must
+    // not silently let every OTHER setting (typed text or unregistered) grow
+    // to ~1 MB; nothing but the image type has any business being this long.
+    if (def?.type !== 'image' && v.length > 10_000) {
+      throw new BadRequestException(`'${key}' is too long (max 10,000 characters).`);
     }
     return this.settings.set(key, v, actor.label ?? actor.id);
   }

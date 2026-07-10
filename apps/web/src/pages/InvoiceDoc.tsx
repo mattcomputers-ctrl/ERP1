@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../lib/api';
+import { DocLogo } from '../lib/branding';
 
 interface Party { entityCode: string | null; name: string | null; line1: string | null; line2: string | null; cityStateZip: string | null }
 interface Line {
@@ -67,7 +68,7 @@ export function InvoiceDoc() {
         </div>
       )}
       <div className="flex items-start justify-between">
-        <h2 className="text-2xl font-bold tracking-wide">Invoice</h2>
+        <div><DocLogo /><h2 className="text-2xl font-bold tracking-wide">Invoice</h2></div>
         <table className="text-sm">
           <tbody>
             <tr><td className="pr-3 font-semibold text-slate-500">Invoice Number:</td><td>{h.invoiceNumber}</td></tr>

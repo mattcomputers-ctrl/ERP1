@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { DataGrid, type GridColumn } from '../components/DataGrid';
 import { Button, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
@@ -51,6 +52,7 @@ export function Inventory() {
       header: '',
       render: (r) => (
         <div className="flex justify-end gap-3">
+          <Link to={`/labels/container/${r.id}`} className="font-medium text-indigo-600 hover:underline">Label</Link>
           <button onClick={() => setAdjusting(r)} className="font-medium text-indigo-600 hover:underline">Adjust</button>
           <button onClick={() => setMoving(r)} className="font-medium text-indigo-600 hover:underline" disabled={(r.qty ?? 0) <= 0}>Move</button>
         </div>

@@ -47,6 +47,9 @@ const SESSION_ONLY_ROUTES = new Set([
   'POST /auth/mfa/enroll',
   'POST /auth/mfa/confirm',
   'POST /auth/mfa/disable',
+  // Document-header branding (name + logo) — readable by anyone who can open
+  // a printed document; writing stays behind admin.config.
+  'GET /settings/branding',
 ]);
 
 // Routes whose program key is DYNAMIC (one route serves many viewers, each with

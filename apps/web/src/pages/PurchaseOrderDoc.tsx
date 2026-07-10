@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../lib/api';
+import { DocLogo } from '../lib/branding';
 import { PO_TERMS_AND_CONDITIONS, PO_TERMS_TITLE } from './poTerms';
 
 interface Party { entityCode: string | null; name: string | null; line1: string | null; line2: string | null; cityStateZip: string | null }
@@ -76,7 +77,7 @@ export function PurchaseOrderDoc({ pickup = false }: { pickup?: boolean }) {
       </div>
 
       <div className="flex items-start justify-between">
-        <div className="text-2xl font-bold tracking-wide">Purchase Order{pickup && <span className="ml-2 align-middle text-base font-semibold text-slate-500">— Pickup Copy</span>}</div>
+        <div><DocLogo /><div className="text-2xl font-bold tracking-wide">Purchase Order{pickup && <span className="ml-2 align-middle text-base font-semibold text-slate-500">— Pickup Copy</span>}</div></div>
         <table className="text-sm">
           <tbody>
             <tr><td className="pr-3 font-semibold text-slate-500">Purchase Order Number:</td><td className="text-right">{h.poNumber}</td></tr>

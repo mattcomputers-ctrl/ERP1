@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../lib/api';
+import { DocLogo } from '../lib/branding';
 
 interface CofATest {
   test: string;
@@ -79,7 +80,7 @@ export function CofADoc() {
       </div>
 
       <div className="text-center">
-        <div className="text-xl font-bold">{h.companyName}</div>
+        <div><DocLogo className="mx-auto mb-1 max-h-14" /><div className="text-xl font-bold">{h.companyName}</div></div>
         <div className="mt-1 text-lg font-semibold tracking-wide">CERTIFICATE OF ANALYSIS</div>
       </div>
 

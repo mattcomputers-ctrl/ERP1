@@ -253,9 +253,15 @@ export class RecipesService {
    * supplier purchase satisfying the batch's requirement — evaluating every
    * quantity-break tier of every supplier's EFFECTIVE price version (latest
    * EffectiveDate ≤ now, the same rule purchasing sources PO lines by) — with
-   * the surplus reported when a tier minimum exceeds the need. Ingredients no
-   * supplier prices fall back to the item's standard cost. Purchased
-   * ingredients only (sub-recipe recursion deferred — docs/ASSUMPTIONS.md).
+   * the surplus reported when a tier minimum exceeds the need.
+   *
+   * Unpriced MADE ingredients recurse (L75): the item's CostingRecipe pointer
+   * resolves to the ACTIVE member of its version family at read time (same
+   * convention as planning's explosion — the legacy pointer can lag a
+   * revision behind a native publish) and the sub-recipe's per-1-lb formula
+   * is rolled up for the parent-scaled need, cycle-guarded and depth-capped.
+   * Terminal fallbacks: the (install-wide empty) standard cost, then the
+   * populated ReplacementCost.
    */
   async pricing(id: number, batchSize: number) {
     const recipe = await this.prisma.recipe.findUnique({
@@ -265,27 +271,66 @@ export class RecipesService {
     if (!recipe) throw new NotFoundException('Recipe not found');
     const size = Number.isFinite(batchSize) && batchSize > 0 ? batchSize : 100;
 
-    const uiLines = await this.prisma.recipeDetail.findMany({
-      where: { recipeId: id, context: 'UI', NOT: { inactive: true } },
-      orderBy: [{ execOrder: 'asc' }, { line: 'asc' }, { id: 'asc' }],
-      select: { itemId: true, qtyReqd: true, entityUnit: true },
-    });
+    const needByItem = await this.recipeNeeds(id, size);
+    if (!needByItem.size) {
+      return { recipeNumber: recipe.recipeNumber, batchSize: size, weightUnit: recipe.weightUnit ?? 'lb', rows: [], totals: { expected: null, excess: 0, unpriced: 0 } };
+    }
 
-    // Aggregate the need per distinct item (an item may appear on several lines).
+    const rows = await this.priceNeeds(needByItem, new Set([id]), 0);
+
+    const priced = rows.filter((r) => r.totalCost != null);
+    return {
+      recipeNumber: recipe.recipeNumber,
+      batchSize: size,
+      weightUnit: recipe.weightUnit ?? 'lb',
+      rows,
+      totals: {
+        expected: priced.length ? priced.reduce((s, r) => s + (r.totalCost ?? 0), 0) : null,
+        excess: rows.reduce((s, r) => s + r.excessCost, 0),
+        unpriced: rows.length - priced.length,
+      },
+    };
+  }
+
+  /** The per-item quantity a recipe needs for `size` units (per-1-lb formula ×
+   * size, summed across an item's active UI lines). */
+  private async recipeNeeds(recipeId: number, size: number): Promise<Map<number, number>> {
+    const uiLines = await this.prisma.recipeDetail.findMany({
+      where: { recipeId, context: 'UI', NOT: { inactive: true } },
+      orderBy: [{ execOrder: 'asc' }, { line: 'asc' }, { id: 'asc' }],
+      select: { itemId: true, qtyReqd: true },
+    });
     const needByItem = new Map<number, number>();
     for (const l of uiLines) {
       if (l.itemId == null || l.qtyReqd == null) continue;
       needByItem.set(l.itemId, (needByItem.get(l.itemId) ?? 0) + l.qtyReqd * size);
     }
+    return needByItem;
+  }
+
+  // Sub-recipe recursion bound: the live explosion never exceeds a handful of
+  // levels (packouts→bulk→intermediates); 5 keeps a pathological chain cheap.
+  private static readonly MAX_ROLLUP_DEPTH = 5;
+
+  /**
+   * Price a set of item needs: cheapest supplier tier purchase, else the
+   * item's ACTIVE costing recipe rolled up recursively (all-or-nothing: a
+   * sub-recipe with any unpriced ingredient does not price the parent line),
+   * else standard cost, else replacement cost. `visited` carries the recipe
+   * ids on the current path (cycle guard).
+   */
+  private async priceNeeds(
+    needByItem: Map<number, number>,
+    visited: Set<number>,
+    depth: number,
+  ): Promise<PricingRow[]> {
     const ids = [...needByItem.keys()];
-    if (!ids.length) {
-      return { recipeNumber: recipe.recipeNumber, batchSize: size, weightUnit: recipe.weightUnit ?? 'lb', rows: [], totals: { expected: null, excess: 0, unpriced: 0 } };
-    }
+    if (!ids.length) return [];
 
     const [items, details] = await Promise.all([
       this.prisma.item.findMany({
         where: { id: { in: ids } },
-        select: { id: true, itemCode: true, description: true, standardCost: true },
+        select: { id: true, itemCode: true, description: true, standardCost: true, replacementCost: true, costingRecipeId: true },
       }),
       this.prisma.priceDetail.findMany({
         where: { itemId: { in: ids } },
@@ -334,9 +379,11 @@ export class RecipesService {
     for (const [sup, ver] of effectiveBySupplier) supplierByVersion.set(ver, sup);
 
     const num = (v: unknown) => (v == null ? null : Number(v));
-    const rows = ids.map((itemId) => {
+    const rows: PricingRow[] = [];
+    for (const itemId of ids) {
       const item = itemById.get(itemId);
       const needed = needByItem.get(itemId)!;
+      const base = { itemId, itemCode: item?.itemCode ?? null, description: item?.description ?? null, needed };
       let best: {
         supplierId: number; supplierCode: string | null;
         unitPrice: number; orderQty: number; totalCost: number; excessQty: number; excessCost: number;
@@ -363,38 +410,122 @@ export class RecipesService {
           };
         }
       }
-      const standardCost = num(item?.standardCost);
       if (best) {
-        return {
-          itemId, itemCode: item?.itemCode ?? null, description: item?.description ?? null,
-          needed, source: 'supplier' as const, ...best,
-        };
+        rows.push({ ...base, source: 'supplier', costingRecipeNumber: null, ...best });
+        continue;
       }
-      if (standardCost != null) {
-        return {
-          itemId, itemCode: item?.itemCode ?? null, description: item?.description ?? null,
-          needed, source: 'standard' as const, supplierId: null, supplierCode: null,
-          unitPrice: standardCost, orderQty: needed, totalCost: needed * standardCost, excessQty: 0, excessCost: 0,
-        };
-      }
-      return {
-        itemId, itemCode: item?.itemCode ?? null, description: item?.description ?? null,
-        needed, source: null, supplierId: null, supplierCode: null,
-        unitPrice: null, orderQty: null, totalCost: null, excessQty: 0, excessCost: 0,
-      };
-    });
 
-    const priced = rows.filter((r) => r.totalCost != null);
-    return {
-      recipeNumber: recipe.recipeNumber,
-      batchSize: size,
-      weightUnit: recipe.weightUnit ?? 'lb',
-      rows,
-      totals: {
-        expected: priced.length ? priced.reduce((s, r) => s + (r.totalCost ?? 0), 0) : null,
-        excess: rows.reduce((s, r) => s + r.excessCost, 0),
-        unpriced: rows.length - priced.length,
-      },
-    };
+      // Made ingredient: roll up the ACTIVE costing recipe for the needed
+      // quantity. All-or-nothing — a sub-recipe with any unpriced ingredient
+      // leaves this line unpriced (a partial figure would understate cost).
+      if (item?.costingRecipeId != null && depth < RecipesService.MAX_ROLLUP_DEPTH) {
+        const active = await this.resolveActiveCostingRecipe(item.costingRecipeId);
+        if (active && !visited.has(active.id)) {
+          const childNeeds = await this.recipeNeeds(active.id, needed);
+          if (childNeeds.size) {
+            const childRows = await this.priceNeeds(childNeeds, new Set([...visited, active.id]), depth + 1);
+            if (childRows.length && childRows.every((r) => r.totalCost != null)) {
+              const totalCost = childRows.reduce((s, r) => s + (r.totalCost ?? 0), 0);
+              const excessCost = childRows.reduce((s, r) => s + r.excessCost, 0);
+              rows.push({
+                ...base, source: 'subRecipe', costingRecipeNumber: active.recipeNumber,
+                supplierId: null, supplierCode: null,
+                unitPrice: needed > 0 ? totalCost / needed : null,
+                orderQty: needed, totalCost, excessQty: 0, excessCost,
+              });
+              continue;
+            }
+          }
+        }
+      }
+
+      // > 0 like the replacement branch: the legacy import copies
+      // StandardCost verbatim and 6,614 items carry an explicit 0 (none carry
+      // a real value) — treating 0 as a price would price lines at $0,
+      // silence the ReplacementCost fallback, AND slip a confident
+      // understated figure past the all-or-nothing sub-recipe gate.
+      const standardCost = num(item?.standardCost);
+      if (standardCost != null && standardCost > 0) {
+        rows.push({
+          ...base, source: 'standard', costingRecipeNumber: null, supplierId: null, supplierCode: null,
+          unitPrice: standardCost, orderQty: needed, totalCost: needed * standardCost, excessQty: 0, excessCost: 0,
+        });
+        continue;
+      }
+      // Terminal fallback: ReplacementCost is the ONLY populated cost column
+      // in this install (12,334 of 21,176 items; StandardCost is 0/NULL on
+      // all) — without it over half a typical rollup prices at nothing.
+      const replacementCost = num(item?.replacementCost);
+      if (replacementCost != null && replacementCost > 0) {
+        rows.push({
+          ...base, source: 'replacement', costingRecipeNumber: null, supplierId: null, supplierCode: null,
+          unitPrice: replacementCost, orderQty: needed, totalCost: needed * replacementCost, excessQty: 0, excessCost: 0,
+        });
+        continue;
+      }
+      rows.push({
+        ...base, source: null, costingRecipeNumber: null, supplierId: null, supplierCode: null,
+        unitPrice: null, orderQty: null, totalCost: null, excessQty: 0, excessCost: 0,
+      });
+    }
+    return rows;
   }
+
+  /**
+   * Resolve a CostingRecipe pointer to the ACTIVE member of its version
+   * family (BASE or BASE.NN, published, not inactive; highest id wins) — the
+   * same convention as planning's explosion: 12,809 of the 12,823 live
+   * pointers already point at the active revision; the rest lag one behind.
+   */
+  private async resolveActiveCostingRecipe(recipeId: number): Promise<{ id: number; recipeNumber: string | null } | null> {
+    const pointed = await this.prisma.recipe.findUnique({
+      where: { id: recipeId },
+      select: { id: true, recipeNumber: true, isPublished: true, inactive: true },
+    });
+    if (!pointed?.recipeNumber) return null;
+    if (pointed.isPublished && pointed.inactive !== true) {
+      return { id: pointed.id, recipeNumber: pointed.recipeNumber };
+    }
+    const basePart = pointed.recipeNumber.replace(/\.\d+$/, '');
+    const family = await this.prisma.recipe.findMany({
+      where: {
+        isPublished: true,
+        AND: [
+          { OR: [{ inactive: null }, { inactive: false }] },
+          {
+            OR: [
+              { recipeNumber: { equals: basePart, mode: 'insensitive' } },
+              { recipeNumber: { startsWith: `${basePart}.`, mode: 'insensitive' } },
+            ],
+          },
+        ],
+      },
+      select: { id: true, recipeNumber: true },
+    });
+    let bestMatch: { id: number; recipeNumber: string | null } | null = null;
+    for (const r of family) {
+      if (!r.recipeNumber) continue;
+      const suffix = r.recipeNumber.slice(basePart.length);
+      if (suffix && !/^\.\d+$/.test(suffix)) continue; // not a version sibling
+      if (!bestMatch || r.id > bestMatch.id) bestMatch = r;
+    }
+    return bestMatch;
+  }
+}
+
+interface PricingRow {
+  itemId: number;
+  itemCode: string | null;
+  description: string | null;
+  needed: number;
+  source: 'supplier' | 'subRecipe' | 'standard' | 'replacement' | null;
+  /** The ACTIVE recipe the line was costed from, when source = subRecipe. */
+  costingRecipeNumber: string | null;
+  supplierId: number | null;
+  supplierCode: string | null;
+  unitPrice: number | null;
+  orderQty: number | null;
+  totalCost: number | null;
+  excessQty: number;
+  excessCost: number;
 }

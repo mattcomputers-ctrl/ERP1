@@ -470,6 +470,63 @@ export class InventoryService {
     return { rows: await this.decorate(rows), total, page, pageSize };
   }
 
+  /**
+   * Container/lot label data for one parcel (legacy PrintContainerLabel —
+   * 25,434 uses, ~3,000/yr): item, our lot + the manufacturer/supplier lots
+   * (the recall keys), the parcel quantity, dates, and the sublot's QA
+   * disposition. Reprinting is just reopening the label page.
+   */
+  async containerLabel(id: number) {
+    const parcel = await this.prisma.inventory.findUnique({ where: { id } });
+    if (!parcel) throw new NotFoundException('Inventory parcel not found');
+
+    const [item, location, sublot] = await Promise.all([
+      this.prisma.item.findUnique({
+        where: { id: parcel.itemId },
+        select: { itemCode: true, description: true, unit: true },
+      }),
+      this.prisma.location.findUnique({ where: { id: parcel.locationId }, select: { locationCode: true } }),
+      parcel.sublotId != null
+        ? this.prisma.sublot.findUnique({ where: { id: parcel.sublotId }, select: { id: true, sublotCode: true, lot: true } })
+        : null,
+    ]);
+    const lot = sublot?.lot
+      ? await this.prisma.lot.findUnique({
+          where: { lot: sublot.lot },
+          select: { lot: true, supLot: true, manfLot: true, manfDate: true, receivedDate: true, supplierId: true, ordDetailId: true },
+        })
+      : null;
+    // The sublot's QA disposition (latest Release row — legacy Release is
+    // append-only history, highest id = current).
+    const release = sublot
+      ? await this.prisma.release.findFirst({
+          where: { sublotId: sublot.id },
+          orderBy: { id: 'desc' },
+          select: { status: true, grade: true, expiryDate: true },
+        })
+      : null;
+
+    return {
+      inventoryId: parcel.id,
+      itemCode: item?.itemCode ?? null,
+      description: item?.description ?? null,
+      qty: parcel.qty ?? null,
+      unit: item?.unit ?? null,
+      locationCode: location?.locationCode ?? null,
+      lot: lot?.lot ?? sublot?.lot ?? null,
+      sublotCode: sublot?.sublotCode ?? null,
+      supLot: lot?.supLot ?? null,
+      manfLot: lot?.manfLot ?? null,
+      manfDate: lot?.manfDate ?? null,
+      receivedDate: lot?.receivedDate ?? null,
+      // Produced lots (ordDetailId set) are made here; purchased ones received.
+      madeHere: lot?.ordDetailId != null,
+      status: release?.status ?? parcel.status ?? null,
+      grade: release?.grade ?? null,
+      expiryDate: release?.expiryDate ?? null,
+    };
+  }
+
   // Genealogy/trace/recall moved to GenealogyService (lot-level, traversing the
   // derived lot_genealogy graph — SublotParent is empty in this install).
 

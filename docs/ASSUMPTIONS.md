@@ -1793,3 +1793,59 @@ semantics are ERP1 design decisions:
    elevation (the disposition form shows elevation whenever blocked), and
    the SSO-only supervisor message (pre-existing generic-credential
    behavior, L19-documented).
+
+## Costing & documents bundle (§26 / L75 + L153 + L64, built 2026-07-10)
+
+Sweep evidence (2026-07-09) was the discovery; deltas found in-repo:
+
+1. **L75 sub-recipe rollup**: the sweep's "CostingRecipe absent from the
+   import mapping" was STALE — the §10 MRP build already mirrored
+   `Item.CostingRecipe` (schema + import + sync), so L75 is a pure pricing
+   extension. Chain per ingredient: cheapest supplier tier purchase → ACTIVE
+   costing recipe rolled up recursively → standard cost (empty install-wide,
+   kept for future data) → **ReplacementCost** (the only populated cost
+   column: 12,334/21,176 items; > 0 required) → unpriced. Resolve-to-active
+   mirrors planning's convention (version family BASE/BASE.NN, published,
+   not inactive, highest id — 12,809/12,823 live pointers already point at
+   the active revision). Recursion prices the sub-recipe's per-1-lb formula
+   for the PARENT-SCALED need (tier realism), is all-or-nothing (any
+   unpriced child leaves the parent line unpriced — a partial figure would
+   understate cost), cycle-guarded by path-visited recipe ids, depth-capped
+   at 5. Parent line: unitPrice = child total / need; child excess dollars
+   roll into excessCost (excessQty stays 0 — child units differ).
+2. **L153 logo**: stored as a data-URL `image`-type app setting
+   (`company.logoDataUrl`, PNG/JPEG/GIF/WebP, ≤400 KB string ≈ 300 KB
+   image; legacy blob was 28 KB) edited on the Configuration Company tab
+   (file picker + preview). Served with company.name by the SESSION-ONLY
+   `GET /settings/branding` (any authenticated user can open documents;
+   writes stay behind admin.config) and rendered by `DocLogo` in the
+   invoice, packing slip, PO and CofA headers (the legacy set: 17,928/17,928
+   invoices carried the blob). **Body-limit catch**: express's default
+   100 KB JSON cap 413'd the upload before validation — configureApp now
+   sets a 1 MB json limit (shared by server + test harness).
+3. **L64 labels**: the legacy PrintShippingLabel (17,666 uses) is 1:1 with
+   ASM assemblies — the SHIPPED assembly label IS the shipping label, so
+   only the container/lot label was built: `GET /inventory/:id/label`
+   (inventory.browser) keyed by PARCEL id → item/description/qty/unit,
+   our lot + supplier/manufacturer lots (recall keys), made-vs-received
+   date (ordDetailId discriminates), location, and the sublot's CURRENT QA
+   disposition (latest Release row; falls back to the parcel status).
+   Printable page at /labels/container/:id + a Label action on every
+   Inventory row (reprint = reopen; the legacy label-required flag/
+   LocationTools.ResetLabelRequired is not mirrored — ERP1 has no
+   label-required workflow). Print points at receiving/completion were
+   deliberately NOT added: the Inventory browser reaches every parcel the
+   moment it exists, and one entry point keeps the surface small.
+4. **Review round (§26.4, 2026-07-10)**: 4 lenses → 8 raw → 6 unique → 6
+   dual-confirmed, all fixed: (majors) StandardCost = 0 — which the import
+   stamps on 6,614 items, none carry a real value — passed the `!= null`
+   check, priced lines at $0, silenced the ReplacementCost fallback AND
+   slipped confident understated figures past the all-or-nothing sub-recipe
+   gate (now `> 0`, symmetric with replacement; test pinned); the container
+   label formatted dates with LOCAL getters — a viewer west of UTC printed
+   expiry a day earlier than the CofA for the same release (now UTC getters
+   per the project datetime convention). (minors) non-image settings now cap
+   at 10,000 chars (the 1 MB body limit must not silently let text settings
+   grow 10×); Configuration save invalidates the branding cache; the pricing
+   footnote no longer claims sub-recipes are excluded; sub-recipe rows show
+   their child excess dollars at row level.
