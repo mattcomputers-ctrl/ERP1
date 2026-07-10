@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service';
+import { AuthService } from '../auth/auth.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { NATIVE_ID_ALLOC_LOCK } from '../common/locks';
 import { PrismaService } from '../prisma/prisma.service';
@@ -21,6 +22,7 @@ export class RecipeReplacementService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly auth: AuthService,
     private readonly editor: RecipeEditorService,
   ) {}
 
@@ -108,6 +110,7 @@ export class RecipeReplacementService {
 
     // Publishing requires the recipe.publish gate — surface a clear error for
     // the whole job up front rather than 30 identical per-row failures.
+    let secondFactorPreVerified = false;
     if (dto.publish) {
       const req = await this.editor.publishRequirement(actor.id);
       if (!req.allowed) {
@@ -118,6 +121,21 @@ export class RecipeReplacementService {
       }
       if (req.requireSignature && !dto.password) {
         throw new BadRequestException('Your password is required to publish the new revisions.');
+      }
+      // A TOTP code is single-use: verify the signer's (and witness's) second
+      // factor ONCE for the whole job here, then each per-recipe publish
+      // re-verifies the password only (preVerified) — re-presenting the same
+      // code would fail as replay from the second recipe on. This also means
+      // a wrong password fails the job once instead of counting one failed
+      // attempt per selected recipe.
+      if (req.requireSignature && dto.password) {
+        await this.auth.verifyPasswordById(actor.id, dto.password, { totpCode: dto.totpCode });
+        if (dto.witnessEmail && dto.witnessPassword) {
+          await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false, {
+            totpCode: dto.witnessTotpCode,
+          });
+        }
+        secondFactorPreVerified = true;
       }
     }
 
@@ -171,11 +189,14 @@ export class RecipeReplacementService {
             {
               reason: dto.reason?.trim() || description,
               password: dto.password,
+              totpCode: dto.totpCode,
               witnessEmail: dto.witnessEmail,
               witnessPassword: dto.witnessPassword,
+              witnessTotpCode: dto.witnessTotpCode,
               witnessExplanation: dto.witnessExplanation,
             },
             actor,
+            { secondFactorPreVerified },
           );
           row.published = true;
         }

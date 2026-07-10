@@ -606,7 +606,15 @@ export class RecipeEditorService {
    * lock so concurrent publishes can neither double-publish nor leave two
    * active recipes.
    */
-  async publish(id: number, dto: PublishRecipeDto, actor: Actor) {
+  async publish(
+    id: number,
+    dto: PublishRecipeDto,
+    actor: Actor,
+    // INTERNAL (recipe replacement only, never from a controller): the caller
+    // verified the signer's/witness's single-use TOTP once for a multi-recipe
+    // job; passwords are still re-verified per publish.
+    opts: { secondFactorPreVerified?: boolean } = {},
+  ) {
     // Fast-fail reads (good errors before the slow Argon2 verify); all state
     // checks re-run authoritatively inside the locked transaction.
     const pre = await this.requireRecipe(id);
@@ -626,7 +634,7 @@ export class RecipeEditorService {
     if (req.requireReason && !dto.reason?.trim()) {
       throw new BadRequestException('A reason is required to publish this recipe.');
     }
-    const witness = await this.verifySignature(req, dto, actor, 'publish this recipe');
+    const witness = await this.verifySignature(req, dto, actor, 'publish this recipe', opts.secondFactorPreVerified);
     const at = new Date();
 
     return this.prisma.$transaction(async (tx) => {
@@ -912,20 +920,34 @@ export class RecipeEditorService {
    * transaction (Argon2 verify is slow). Returns the witness identity if any. */
   private async verifySignature(
     req: { requireSignature: boolean; requireWitness: boolean },
-    dto: { password?: string; witnessEmail?: string; witnessPassword?: string },
+    dto: { password?: string; totpCode?: string; witnessEmail?: string; witnessPassword?: string; witnessTotpCode?: string },
     actor: Actor,
     what: string,
+    secondFactorPreVerified = false,
   ): Promise<{ id: string; label: string } | null> {
     if (!req.requireSignature) return null;
     if (!dto.password) throw new BadRequestException(`Your password is required to ${what}.`);
-    await this.auth.verifyPasswordById(actor.id, dto.password);
+    // MFA-enrolled signers/witnesses must present their TOTP code too (the
+    // credential check throws 401 MFA_REQUIRED when it is missing). For a
+    // multi-recipe replacement job the single-use code was verified once up
+    // front (preVerified) — passwords are still re-verified per publish.
+    await this.auth.verifyPasswordById(
+      actor.id,
+      dto.password,
+      secondFactorPreVerified ? { preVerified: true } : { totpCode: dto.totpCode },
+    );
 
     if (req.requireWitness && !dto.witnessEmail) {
       throw new BadRequestException(`A witness signature is required to ${what}.`);
     }
     if (dto.witnessEmail) {
       if (!dto.witnessPassword) throw new BadRequestException('Witness password is required.');
-      const w = await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false);
+      const w = await this.auth.validateUser(
+        dto.witnessEmail,
+        dto.witnessPassword,
+        false,
+        secondFactorPreVerified ? { preVerified: true } : { totpCode: dto.witnessTotpCode },
+      );
       if (w.id === actor.id) throw new BadRequestException('The witness must be a different user.');
       if (!(await this.permissions.canWitness(w.id, PUBLISH_SECURED_ITEM))) {
         throw new ForbiddenException('That user is not permitted to witness recipe publication.');

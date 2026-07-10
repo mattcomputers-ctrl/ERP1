@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { DataGrid, type GridColumn } from '../components/DataGrid';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
+import { useMe } from '../lib/auth';
 
 // Recipe Manager (§4): browse batching/packaging recipes, author drafts,
 // publish (single-active-recipe rule), clone `.NN` revisions, activate/
@@ -777,21 +778,27 @@ function PublishDialog({ id, recipeNumber, onDone, onCancel }: {
   onDone: (message: string) => void;
   onCancel: () => void;
 }) {
+  const me = useMe();
   const requirement = useQuery({
     queryKey: ['recipe-publish-requirement', id],
     queryFn: () => api.get<PublishRequirement>(`/recipes/${id}/publish-requirement`),
   });
   const [reason, setReason] = useState('');
   const [password, setPassword] = useState('');
+  const [totp, setTotp] = useState('');
   const [witnessEmail, setWitnessEmail] = useState('');
   const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessTotp, setWitnessTotp] = useState('');
+  const mfaOn = !!me.data?.mfaEnabled;
 
   const m = useMutation({
     mutationFn: () =>
       api.post<{ deactivated: string[] }>(`/recipes/${id}/publish`, {
         ...(reason.trim() ? { reason: reason.trim() } : {}),
         ...(password ? { password } : {}),
+        ...(totp ? { totpCode: totp } : {}),
         ...(witnessEmail ? { witnessEmail, witnessPassword } : {}),
+        ...(witnessEmail && witnessTotp ? { witnessTotpCode: witnessTotp } : {}),
       }),
     onSuccess: (r) =>
       onDone(
@@ -818,11 +825,17 @@ function PublishDialog({ id, recipeNumber, onDone, onCancel }: {
             <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
           </Field>
         )}
+        {req?.requireSignature && mfaOn && (
+          <Field label="MFA code">
+            <Input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} />
+          </Field>
+        )}
         {req?.requireWitness && (
-          <Field label="Witness (email + password)">
+          <Field label="Witness (email + password + MFA if enrolled)">
             <div className="flex gap-2">
               <Input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} placeholder="witness@…" />
               <Input type="password" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} />
+              <Input autoComplete="one-time-code" value={witnessTotp} onChange={(e) => setWitnessTotp(e.target.value)} placeholder="MFA" className="w-24" />
             </div>
           </Field>
         )}
@@ -834,7 +847,8 @@ function PublishDialog({ id, recipeNumber, onDone, onCancel }: {
             m.isPending ||
             requirement.isLoading ||
             (req?.requireReason && !reason.trim()) ||
-            (req?.requireSignature && !password)
+            (req?.requireSignature && !password) ||
+            (req?.requireSignature && mfaOn && !totp)
           }
         >
           Publish
@@ -867,13 +881,16 @@ interface ReplacementResultRow {
 }
 
 function ReplacementPanel({ onChanged }: { onChanged: () => void }) {
+  const me = useMe();
   const [from, setFrom] = useState<ItemOpt | null>(null);
   const [to, setTo] = useState<ItemOpt | null>(null);
   const [checked, setChecked] = useState<Set<number>>(new Set());
   const [description, setDescription] = useState('');
   const [publish, setPublish] = useState(true);
   const [password, setPassword] = useState('');
+  const [totp, setTotp] = useState('');
   const [results, setResults] = useState<ReplacementResultRow[] | null>(null);
+  const mfaOn = !!me.data?.mfaEnabled;
 
   const preview = useQuery({
     queryKey: ['replacement-preview', from?.id],
@@ -894,6 +911,7 @@ function ReplacementPanel({ onChanged }: { onChanged: () => void }) {
         ...(description.trim() ? { description: description.trim() } : {}),
         publish,
         ...(password ? { password } : {}),
+        ...(totp ? { totpCode: totp } : {}),
       }),
     onSuccess: (r) => {
       setResults(r.results);
@@ -984,6 +1002,15 @@ function ReplacementPanel({ onChanged }: { onChanged: () => void }) {
             placeholder="Password (if e-signature required)"
             className="w-64"
             autoComplete="current-password"
+          />
+        )}
+        {publish && mfaOn && (
+          <Input
+            value={totp}
+            onChange={(e) => setTotp(e.target.value)}
+            placeholder="MFA code"
+            className="w-28"
+            autoComplete="one-time-code"
           />
         )}
         <Button

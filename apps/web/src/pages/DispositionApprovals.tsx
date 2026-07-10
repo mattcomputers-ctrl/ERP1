@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Fragment, useState } from 'react';
 import { Button, Card, Field, Input } from '../components/ui';
 import { api } from '../lib/api';
+import { useMe } from '../lib/auth';
 
 interface ApprovalRow {
   approvalId: number;
@@ -101,31 +102,39 @@ export function DispositionApprovals() {
 }
 
 function ApproveForm({ approvalId, sig, witnessRequired, onDone }: { approvalId: number; sig: boolean; witnessRequired: boolean; onDone: () => void }) {
+  const me = useMe();
   const [password, setPassword] = useState('');
+  const [totp, setTotp] = useState('');
   const [reason, setReason] = useState('');
   const [witnessEmail, setWitnessEmail] = useState('');
   const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessTotp, setWitnessTotp] = useState('');
+  const mfaOn = !!me.data?.mfaEnabled;
   const m = useMutation({
     mutationFn: () =>
       api.post(`/releases/approvals/${approvalId}/approve`, {
         reason: reason || undefined,
         password: password || undefined,
+        totpCode: sig && totp ? totp : undefined,
         witnessEmail: witnessRequired && witnessEmail ? witnessEmail : undefined,
         witnessPassword: witnessRequired && witnessPassword ? witnessPassword : undefined,
+        witnessTotpCode: witnessRequired && witnessTotp ? witnessTotp : undefined,
       }),
     onSuccess: onDone,
   });
   // Witness inputs only render when sig is true; gate canSubmit the same way so the
   // two can't drift (the backend guarantees requireWitness ⇒ requireSignature).
-  const canSubmit = (!sig || !!password) && (!sig || !witnessRequired || (!!witnessEmail && !!witnessPassword));
+  const canSubmit = (!sig || (!!password && (!mfaOn || !!totp))) && (!sig || !witnessRequired || (!!witnessEmail && !!witnessPassword));
   return (
     <div className="flex flex-wrap items-end gap-2">
       <Field label="Approval note"><Input value={reason} onChange={(e) => setReason(e.target.value)} className="w-56" /></Field>
       {sig && <Field label="Your password (sign)"><Input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} className="w-44" /></Field>}
+      {sig && mfaOn && <Field label="MFA code"><Input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} className="w-28" /></Field>}
       {sig && witnessRequired && (
         <>
           <Field label="Witness email"><Input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} className="w-52" /></Field>
           <Field label="Witness password"><Input type="password" autoComplete="off" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} className="w-44" /></Field>
+          <Field label="Witness MFA (if enrolled)"><Input autoComplete="one-time-code" value={witnessTotp} onChange={(e) => setWitnessTotp(e.target.value)} className="w-36" /></Field>
         </>
       )}
       <Button onClick={() => m.mutate()} disabled={!canSubmit || m.isPending}>{m.isPending ? 'Approving…' : 'Confirm approve'}</Button>

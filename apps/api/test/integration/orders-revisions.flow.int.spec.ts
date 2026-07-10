@@ -2,6 +2,7 @@ import type { PrismaClient } from '@erp1/db';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import { AuthService } from '../../src/auth/auth.service';
+import { AuditService } from '../../src/audit/audit.service';
 import type { PrismaService } from '../../src/prisma/prisma.service';
 import {
   addItem,
@@ -463,7 +464,7 @@ describe('order revisions: publish', () => {
   it('publish is an e-signable act when the secured item demands a signature', async () => {
     await releasedBatch();
     await prisma.securedItem.update({ where: { key: 'order.revise' }, data: { requireSignature: true } });
-    const auth = new AuthService(prisma as unknown as PrismaService);
+    const auth = new AuthService(prisma as unknown as PrismaService, new AuditService(prisma as unknown as PrismaService));
     const pwHash = await auth.hashPassword('Sup3rSecret!!');
     const u = await prisma.user.create({
       data: { email: 'signer@test.local', displayName: 'Signer', status: 'ACTIVE', passwordHash: pwHash },

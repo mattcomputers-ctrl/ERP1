@@ -1,4 +1,4 @@
-import { Test } from '@nestjs/testing';
+import { Test, type TestingModuleBuilder } from '@nestjs/testing';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import type { PrismaClient } from '@erp1/db';
 import session from 'express-session';
@@ -25,11 +25,18 @@ import { PrismaService } from '../../src/prisma/prisma.service';
  * provider is overridden with the already-connected test client so every
  * service queries the disposable database.
  */
-export async function buildHttpApp(prisma: PrismaClient): Promise<NestExpressApplication> {
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+export async function buildHttpApp(
+  prisma: PrismaClient,
+  opts: {
+    /** Extra provider overrides (e.g. faking the OIDC provider seam). */
+    override?: (builder: TestingModuleBuilder) => TestingModuleBuilder;
+  } = {},
+): Promise<NestExpressApplication> {
+  let builder = Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(PrismaService)
-    .useValue(prisma)
-    .compile();
+    .useValue(prisma);
+  if (opts.override) builder = opts.override(builder);
+  const moduleRef = await builder.compile();
 
   // Only 'error' level: surfaces genuine 500s (unhandled exceptions) while
   // staying quiet on the expected 4xx the guard/pipe tests provoke.
@@ -44,7 +51,7 @@ export async function buildHttpApp(prisma: PrismaClient): Promise<NestExpressApp
 /** A precomputed Argon2 hash is reused across seeded users — hashing is the slow
  * part, and the embedded salt makes one hash safe to share in tests. */
 export async function hashPassword(prisma: PrismaClient, plain: string): Promise<string> {
-  return new AuthService(prisma as unknown as PrismaService).hashPassword(plain);
+  return new AuthService(prisma as unknown as PrismaService, undefined as never).hashPassword(plain);
 }
 
 /**

@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@erp1/db';
+import { generate as generateTotp } from 'otplib';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import { addItem, makePrisma, resetDb, seedActor, services } from './support';
@@ -125,6 +126,48 @@ describe('recipe ingredient replacement', () => {
     // The order picker now offers only the new revisions.
     const options = await svc.orders.recipeOptions('INK');
     expect(options.rows.map((r) => r.recipeNumber).sort()).toEqual(['INKA.02', 'INKB.02']);
+  });
+
+  it('publishes N recipes with ONE single-use TOTP code (verified once up front, passwords per publish)', async () => {
+    const svc = services(prisma);
+    const ids = await seedRecipes(svc);
+    await prisma.securedItem.update({ where: { key: 'recipe.publish' }, data: { requireSignature: true } });
+
+    // MFA-enroll the actor (direct DB write; fresh secret, no consumed step).
+    const pwHash = await svc.auth.hashPassword('Sup3rSecret!!');
+    const secret = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+    await prisma.user.update({
+      where: { id: actor.id },
+      data: { passwordHash: pwHash, mfaEnabled: true, mfaSecret: secret },
+    });
+
+    // Without the code the job is refused up front (MFA_REQUIRED), before any clone.
+    await expect(
+      svc.recipeReplacement.run(
+        { fromItemId: OLD_RESIN, toItemId: NEW_RESIN, recipeIds: [ids.a, ids.b], publish: true, password: 'Sup3rSecret!!' },
+        actor,
+      ),
+    ).rejects.toMatchObject({ response: { code: 'MFA_REQUIRED' } });
+
+    // ONE code publishes BOTH recipes — the second must not fail as replay.
+    const code = await generateTotp({ secret });
+    const out = await svc.recipeReplacement.run(
+      {
+        fromItemId: OLD_RESIN,
+        toItemId: NEW_RESIN,
+        recipeIds: [ids.a, ids.b],
+        publish: true,
+        password: 'Sup3rSecret!!',
+        totpCode: code,
+      },
+      actor,
+    );
+    expect(out.results.map((r) => ({ n: r.newRecipeNumber, p: r.published, e: r.error }))).toEqual([
+      { n: 'INKA.02', p: true, e: null },
+      { n: 'INKB.02', p: true, e: null },
+    ]);
+    // Each publish still captured its own e-signature ledger row.
+    expect(await prisma.eSignature.count({ where: { securedItemKey: 'recipe.publish' } })).toBe(2);
   });
 
   it('leaves drafts (no publish) when asked, and validates inputs', async () => {

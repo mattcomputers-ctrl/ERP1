@@ -1629,3 +1629,105 @@ Live discovery (all verified same-day):
    (get() exposes isReversal); tax round2 is now half-away-from-zero so a
    credit's tax exactly negates its sale on half-cent ties; TI generation
    REFUSES a freight charge instead of silently zeroing it.
+
+## MFA (TOTP) + OIDC SSO (§24 / L19, built 2026-07-10)
+
+Greenfield security requirement (SCHEMA_REPORT: no MFA/SSO in the legacy
+model; ARCHITECTURE commits to Argon2id + TOTP MFA + OIDC SSO) — decisions
+are ERP1 design choices, not legacy discovery:
+
+1. **TOTP conventions**: RFC 6238 defaults (SHA-1/6 digits/30 s — Google &
+   Microsoft Authenticator compatible), otplib v13 functional API. Verification
+   tolerance ±30 s (one step each side). **Replay protection**: the accepted
+   time step persists on `users.mfaLastStep`; acceptance is an atomic
+   conditional update (`WHERE mfaLastStep IS NULL OR < step`), so the same
+   code can never verify twice — even concurrently.
+2. **Enforcement point is the shared credential check** (`AuthService.
+   verifyAndTrack`): once a user is enrolled, EVERY password verification —
+   login, e-sig signer re-auth (`verifyPasswordById`), and witness co-sign
+   (`validateUser`) — demands the TOTP code. No path downgrades to
+   password-only. A missing code yields 401 `{code:'MFA_REQUIRED'}` (client
+   prompts and retries — NOT a failed attempt); a WRONG code counts toward
+   the security.lockoutCount lockout exactly like a wrong password.
+3. **Enrollment**: sudo-style — start requires the password (and the CURRENT
+   code when re-enrolling, so a hijacked session cannot swap the
+   authenticator); the fresh secret is parked in the SERVER-SIDE session
+   (never persisted) until a first code proves possession; confirm writes
+   secret + `mfaEnabled` + 10 recovery codes atomically with the audit row
+   (`auth.mfa_enrolled`). QR is rendered server-side (qrcode → data URL).
+4. **Recovery codes**: 10 per enrollment, `XXXXX-XXXXX` from a 32-char
+   alphabet (~50 bits), stored as SHA-256 hex only, shown exactly once.
+   Consumption is a single atomic `array_remove` UPDATE (single-use under
+   concurrency). Login and MFA-disable accept them; **e-signatures do NOT**
+   (TOTP only — a lost authenticator means admin reset, then re-enroll).
+   No standalone regenerate endpoint: disable + re-enroll (or admin reset)
+   rotates them.
+5. **Admin escape hatch**: `POST /users/:id/mfa-reset` (program admin.users,
+   audited `user.mfa_reset`) wipes secret/step/recovery codes → the user is
+   password-only until they re-enroll. `mfaSecret` stays plaintext at rest
+   (schema comment marks encryption as a later increment; DB access already
+   implies full compromise of the mirror data).
+6. **OIDC SSO**: authorization-code + PKCE(S256) + state + nonce via
+   openid-client v6 behind an injectable seam (`OidcProviderService`) —
+   integration tests fake the seam exactly like LegacyDbService/MailTransport.
+   v6 is ESM-only; the CJS API loads it via Node ≥22.12 require(esm) (runtime
+   baseline: node:22-bookworm-slim / portable Node 22).
+7. **Strict pre-provisioned linking**: callback resolves `sub` →
+   `users.ssoSubject` (unique). NO just-in-time user creation — IdP
+   authentication proves identity, not authorization to use ERP1. DISABLED
+   users refused (same rule as password login). Admin provisions subjects on
+   the Users page (`PATCH /users/:id/sso`, audited `user.set_sso`); users may
+   be SSO-only (no password → `mustChangePassword` false; unlinking the
+   subject of a password-less user is refused to avoid stranding).
+8. **Config lives in sso.* settings** (§14 registry, Security group; seeded
+   disabled): enabled/issuer/clientId/clientSecret/buttonLabel. "Enabled"
+   only counts when issuer+clientId+secret are all set (no dead login
+   button). Redirect URI derived as `<PUBLIC_URL or request origin>/api/auth/
+   oidc/callback`; scope hardcoded `openid profile email`. The in-flight
+   handshake (state/nonce/verifier/redirectUri) is parked in the session and
+   is SINGLE-USE (deleted before the exchange; a replayed callback never
+   reaches the provider).
+9. **Session semantics shared with password login**: session id regenerated
+   across the privilege change, session row persisted, `auth.login` audit row
+   (summary marks `(MFA)`, `(MFA recovery code)`, or `SSO login`). SSO login
+   clears lockout counters and stamps lastLoginAt. MFA does not apply to SSO
+   logins (the IdP owns MFA there); SSO-only users cannot enroll TOTP (no
+   password to re-verify — profile hides the card via `hasPassword`).
+10. **Scope cuts** (deliberate): change-password stays password-only (an MFA
+    user's session + current password; MFA still gates the next login);
+    LOCKED/INVITED statuses keep validateUser's existing semantics (only
+    DISABLED is refused) for SSO parity; no per-user "require MFA" policy
+    knob (enrollment is voluntary; make it procedural if needed).
+11. **Review round (§24.11, 2026-07-10)**: 6 lenses → 12 raw → 10 unique →
+    9 dual-confirmed by 2 adversarial verifiers each, all fixed:
+    - **Guarded enrollment confirm** (major): confirm's write is now a
+      CONDITIONAL updateMany pinned to the mfaSecret observed at enroll
+      start (parked in the session next to the pending secret) — a
+      double-submitted confirm, a newer enrollment from another session, or
+      an admin mfa-reset in between now 409s instead of overwriting (which
+      could hand the user a recovery-code set that doesn't match storage,
+      or resurrect a wiped enrollment).
+    - **SSO-only e-sign dead-end** (major): `verifyPasswordById` gives an
+      actionable "SSO only — ask an administrator to set a password"
+      message (safe: caller is the authenticated account holder; the
+      anonymous login path stays generic), and the recovery path exists:
+      `PATCH /users/:id/password` (admin.users, policy-checked,
+      mustChangePassword=true, audited `user.set_password`) + a Set/Reset
+      password action on the Users page.
+    - **Replacement-tool TOTP** (major): the finder saw the dropped
+      totpCode; the real fix is deeper — a TOTP code is single-use, so a
+      multi-recipe publish job verifies the signer's (and witness's) second
+      factor ONCE up front and each per-recipe publish re-verifies the
+      password only (`SecondFactor.preVerified`, internal-only; recipe
+      replacement is the sole consumer). Side effect: a wrong password now
+      fails the job once instead of counting one failed attempt per recipe.
+    - Minors: /auth/oidc/start errors now redirect to `/?ssoError=` (it is
+      a top-level navigation, like the callback); whitespace-only
+      ssoSubject is 400 (only explicit null unlinks); the profile page
+      shows an SSO notice instead of a dead change-password form for
+      password-less accounts; the MFA card's actions are explicit buttons
+      (Enter no longer fires re-enroll and burns the typed code), reset
+      each other's stale error/success state, and recovery mode resets
+      after a disable.
+    - Refuted (split verdict): the failed-login counter's read-modify-write
+      race — pre-existing pattern, unchanged by this build.

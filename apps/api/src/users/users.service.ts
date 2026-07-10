@@ -27,6 +27,8 @@ export class UsersService {
       displayName: u.displayName,
       status: u.status,
       mfaEnabled: u.mfaEnabled,
+      ssoSubject: u.ssoSubject,
+      hasPassword: !!u.passwordHash,
       lastLoginAt: u.lastLoginAt,
       roles: u.roles.map((r) => r.role.code),
     }));
@@ -43,10 +45,19 @@ export class UsersService {
       roleId = role.id;
     }
 
+    // A user must be able to log in SOMEHOW: password, SSO subject, or both.
+    const ssoSubject = dto.ssoSubject?.trim() || null;
+    if (!dto.initialPassword && !ssoSubject) {
+      throw new BadRequestException('Provide an initial password, an SSO subject, or both.');
+    }
+
     // The configured minimum applies to admin-set initial passwords too (the
     // DTO only enforces the static floor).
-    await this.auth.assertPasswordPolicy(dto.initialPassword);
-    const passwordHash = await this.auth.hashPassword(dto.initialPassword);
+    let passwordHash: string | null = null;
+    if (dto.initialPassword) {
+      await this.auth.assertPasswordPolicy(dto.initialPassword);
+      passwordHash = await this.auth.hashPassword(dto.initialPassword);
+    }
 
     // The user mutation and its audit record commit together (or not at all).
     const user = await this.prisma.$transaction(async (tx) => {
@@ -57,7 +68,9 @@ export class UsersService {
           displayName: dto.displayName,
           status: 'ACTIVE',
           passwordHash,
-          mustChangePassword: true,
+          // SSO-only users have no password to change.
+          mustChangePassword: !!passwordHash,
+          ssoSubject,
           roles: roleId ? { create: { roleId } } : undefined,
         },
       });
@@ -67,10 +80,13 @@ export class UsersService {
           actorUserId: actor.id,
           actorLabel: actor.label,
           program: 'admin.users',
-          summary: `Created user ${created.email}`,
+          summary: `Created user ${created.email}${ssoSubject ? ' (SSO-linked)' : ''}`,
           changes: [
             { tableName: 'users', recordId: created.id, fieldName: 'email', oldValue: null, newValue: created.email },
             { tableName: 'users', recordId: created.id, fieldName: 'status', oldValue: null, newValue: 'ACTIVE' },
+            ...(ssoSubject
+              ? [{ tableName: 'users', recordId: created.id, fieldName: 'ssoSubject', oldValue: null, newValue: ssoSubject }]
+              : []),
           ],
         },
         tx,
@@ -79,6 +95,104 @@ export class UsersService {
     });
 
     return { id: user.id, email: user.email };
+  }
+
+  /**
+   * Admin escape hatch for a lost authenticator: wipe the user's TOTP
+   * enrollment (secret, replay step, recovery codes) so they can log in with
+   * password only and re-enroll. Audited; refused when nothing is enrolled.
+   */
+  async resetMfa(id: string, actor: Actor) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.mfaEnabled) throw new BadRequestException('That user has no MFA enrollment.');
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id },
+        data: { mfaEnabled: false, mfaSecret: null, mfaLastStep: null, mfaRecoveryCodes: [] },
+      });
+      await this.audit.record(
+        {
+          action: 'user.mfa_reset',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'admin.users',
+          summary: `MFA reset for ${user.email}`,
+          changes: [
+            { tableName: 'users', recordId: id, fieldName: 'mfaEnabled', oldValue: 'true', newValue: 'false' },
+          ],
+        },
+        tx,
+      );
+    });
+    return { id, mfaEnabled: false };
+  }
+
+  /**
+   * Admin-set password for an existing user (audited; the user must change it
+   * at next login). This is the recovery path for SSO-only accounts that need
+   * to electronically sign — signatures always re-verify a password.
+   */
+  async setPassword(id: string, password: string, actor: Actor) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException('User not found');
+    await this.auth.assertPasswordPolicy(password);
+    const passwordHash = await this.auth.hashPassword(password);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id }, data: { passwordHash, mustChangePassword: true } });
+      await this.audit.record(
+        {
+          action: 'user.set_password',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'admin.users',
+          summary: `Password ${user.passwordHash ? 'reset' : 'set'} for ${user.email} (must change at next login)`,
+          changes: [
+            { tableName: 'users', recordId: id, fieldName: 'passwordHash', oldValue: user.passwordHash ? '(set)' : '(none)', newValue: '(reset)' },
+          ],
+        },
+        tx,
+      );
+    });
+    return { id, hasPassword: true };
+  }
+
+  /** Link (or unlink) the OIDC subject an SSO login resolves to. Uniqueness is
+   * enforced by the DB (unique index → 409 via the Prisma exception filter). */
+  async setSsoSubject(id: string, ssoSubject: string | null, actor: Actor) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException('User not found');
+    // An explicit blank is a malformed request, not an unlink — null unlinks.
+    if (ssoSubject !== null && !ssoSubject.trim()) {
+      throw new BadRequestException('SSO subject cannot be blank — pass null to unlink.');
+    }
+    const next = ssoSubject?.trim() || null;
+    if (next === user.ssoSubject) return { id, ssoSubject: next, unchanged: true };
+    // Unlinking SSO from a password-less user would leave the account with no
+    // way to log in — refuse (set a password first, or disable the account).
+    if (!next && !user.passwordHash) {
+      throw new BadRequestException('This user has no password — unlinking SSO would lock them out. Disable the account instead.');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id }, data: { ssoSubject: next } });
+      await this.audit.record(
+        {
+          action: 'user.set_sso',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'admin.users',
+          summary: `${next ? 'Linked' : 'Unlinked'} SSO subject for ${user.email}`,
+          changes: [
+            { tableName: 'users', recordId: id, fieldName: 'ssoSubject', oldValue: user.ssoSubject, newValue: next },
+          ],
+        },
+        tx,
+      );
+    });
+    return { id, ssoSubject: next };
   }
 
   /** The roles (groups) a user may be assigned to, for the role picker. */

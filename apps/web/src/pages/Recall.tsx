@@ -409,9 +409,11 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
   const [expiryDate, setExpiryDate] = useState('');
   const [reason, setReason] = useState('');
   const [password, setPassword] = useState('');
+  const [totp, setTotp] = useState('');
   const [showWitness, setShowWitness] = useState(false);
   const [witnessEmail, setWitnessEmail] = useState('');
   const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessTotp, setWitnessTotp] = useState('');
   const [witnessExplanation, setWitnessExplanation] = useState('');
 
   const r = req.data;
@@ -419,6 +421,7 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
   const reasonRequired = !!r?.requireReason;
   const witnessRequired = !!r?.requireWitness;
   const witnessOpen = witnessRequired || showWitness;
+  const mfaOn = !!me.data?.mfaEnabled;
 
   const m = useMutation({
     mutationFn: () =>
@@ -428,19 +431,21 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
         expiryDate: expiryDate || undefined,
         reason: reason || undefined,
         password: password || undefined,
+        totpCode: sig && totp ? totp : undefined,
         witnessEmail: witnessOpen && witnessEmail ? witnessEmail : undefined,
         witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
+        witnessTotpCode: witnessOpen && witnessTotp ? witnessTotp : undefined,
         witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
       }),
     // A request-only group's disposition comes back pending (awaiting approval) —
     // keep the panel open to show that; an enacted one closes.
-    onSuccess: (res) => { setPassword(''); setWitnessPassword(''); if (!res.pending) setOpen(false); onDone(); },
+    onSuccess: (res) => { setPassword(''); setTotp(''); setWitnessPassword(''); setWitnessTotp(''); if (!res.pending) setOpen(false); onDone(); },
   });
 
   const canSubmit =
     !req.isLoading &&
     (!reasonRequired || !!reason.trim()) &&
-    (!sig || !!password) &&
+    (!sig || (!!password && (!mfaOn || !!totp))) &&
     (!witnessRequired || (!!witnessEmail && !!witnessPassword));
 
   if (!open) {
@@ -463,11 +468,13 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
         <Field label="Expiry"><Input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className="w-40" /></Field>
         <Field label={reasonRequired ? 'Reason (required)' : 'Reason'}><Input value={reason} onChange={(e) => setReason(e.target.value)} className="w-48" /></Field>
         {sig && <Field label="Your password (sign)"><Input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} className="w-44" /></Field>}
+        {sig && mfaOn && <Field label="MFA code"><Input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} className="w-28" /></Field>}
       </div>
       {sig && witnessOpen && (
         <div className="mt-2 flex flex-wrap items-end gap-2">
           <Field label={`Witness email${witnessRequired ? ' (required)' : ''}`}><Input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} className="w-52" /></Field>
           <Field label="Witness password"><Input type="password" autoComplete="off" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} className="w-44" /></Field>
+          <Field label="Witness MFA (if enrolled)"><Input autoComplete="one-time-code" value={witnessTotp} onChange={(e) => setWitnessTotp(e.target.value)} className="w-36" /></Field>
           <Field label="Witness note"><Input value={witnessExplanation} onChange={(e) => setWitnessExplanation(e.target.value)} maxLength={500} className="w-48" /></Field>
         </div>
       )}

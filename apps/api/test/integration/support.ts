@@ -114,7 +114,7 @@ export function services(prisma: PrismaClient) {
   const settings = new SettingsService(p);
   const audit = new AuditService(p);
   const party = new PartyService(p);
-  const auth = new AuthService(p);
+  const auth = new AuthService(p, audit);
   const permissions = new PermissionService(p);
   const esign = new ESignatureService(p);
   const valuation = new ValuationService(p, settings);
@@ -131,6 +131,7 @@ export function services(prisma: PrismaClient) {
     sampling,
     settings,
     audit,
+    auth,
     party,
     valuation,
     movements,
@@ -155,7 +156,7 @@ export function services(prisma: PrismaClient) {
     itemTests: new ItemTestsService(p, audit),
     recipes: new RecipesService(p, settings),
     recipeEditor,
-    recipeReplacement: new RecipeReplacementService(p, audit, recipeEditor),
+    recipeReplacement: new RecipeReplacementService(p, audit, auth, recipeEditor),
     planning: new PlanningService(p, settings),
     planningRecalc: new PlanningRecalcService(p, audit, notifications),
     planningPo: new PlanningPoService(p, purchasing, priceVersions),

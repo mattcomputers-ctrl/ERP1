@@ -9,6 +9,8 @@ export interface Me {
   status: string;
   mustChangePassword: boolean;
   mfaEnabled: boolean;
+  hasPassword: boolean;
+  recoveryCodesLeft: number | null;
   roles: { code: string; name: string }[];
 }
 
@@ -25,10 +27,17 @@ export function useMe() {
   });
 }
 
+export interface LoginInput {
+  email: string;
+  password: string;
+  totpCode?: string;
+  recoveryCode?: string;
+}
+
 export function useLogin() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (creds: { email: string; password: string }) => api.post<Me>('/auth/login', creds),
+    mutationFn: (creds: LoginInput) => api.post<Me>('/auth/login', creds),
     onSuccess: (me) => qc.setQueryData(['me'], me),
   });
 }

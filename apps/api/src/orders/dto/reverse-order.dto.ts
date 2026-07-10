@@ -23,6 +23,16 @@ export class ReverseOrderDto {
   @IsString()
   witnessPassword?: string;
 
+  /** Signer's TOTP code — demanded when the signer is MFA-enrolled. */
+  @IsOptional()
+  @IsString()
+  totpCode?: string;
+
+  /** Witness's TOTP code — demanded when the witness is MFA-enrolled. */
+  @IsOptional()
+  @IsString()
+  witnessTotpCode?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(500)

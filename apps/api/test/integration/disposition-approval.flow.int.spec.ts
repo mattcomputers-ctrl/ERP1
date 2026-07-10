@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@erp1/db';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AuthService } from '../../src/auth/auth.service';
+import { AuditService } from '../../src/audit/audit.service';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import type { PrismaService } from '../../src/prisma/prisma.service';
 import { makePrisma, resetDb, services } from './support';
@@ -241,7 +242,7 @@ describe('QA disposition approval workflow (blocking)', () => {
 
   it('signs the request (requester) and the approval (approver) when the secured item requires it', async () => {
     const { releases } = services(prisma);
-    const auth = new AuthService(prisma as unknown as PrismaService);
+    const auth = new AuthService(prisma as unknown as PrismaService, new AuditService(prisma as unknown as PrismaService));
     const pwHash = await auth.hashPassword('Sup3rSecret!!');
     await prisma.securedItem.update({ where: { key: 'release.disposition' }, data: { requireSignature: true } });
 

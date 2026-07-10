@@ -1,6 +1,8 @@
 import type { PrismaClient } from '@erp1/db';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { generate as generateTotp } from 'otplib';
 import { AuthService } from '../../src/auth/auth.service';
+import { AuditService } from '../../src/audit/audit.service';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import type { PrismaService } from '../../src/prisma/prisma.service';
 import { addEntity, addItem, addPriceDetail, addPriceVersion, makePrisma, resetDb, seedActor, services } from './support';
@@ -314,7 +316,7 @@ describe('publish, versioning & the single-active rule', () => {
     await seedItems();
     await prisma.securedItem.update({ where: { key: 'recipe.publish' }, data: { requireSignature: true } });
     const svc = services(prisma);
-    const auth = new AuthService(prisma as unknown as PrismaService);
+    const auth = new AuthService(prisma as unknown as PrismaService, new AuditService(prisma as unknown as PrismaService));
     const pwHash = await auth.hashPassword('Sup3rSecret!!');
     const u = await prisma.user.create({
       data: {
@@ -334,6 +336,36 @@ describe('publish, versioning & the single-active rule', () => {
     const sig = await prisma.eSignature.findFirst({ where: { securedItemKey: 'recipe.publish' } });
     expect(sig).not.toBeNull();
     expect(sig!.masterId).toBe(String(draft.id));
+  });
+
+  it('demands the TOTP second factor from an MFA-enrolled signer (L19 e-sig plumbing)', async () => {
+    await seedItems();
+    await prisma.securedItem.update({ where: { key: 'recipe.publish' }, data: { requireSignature: true } });
+    const svc = services(prisma);
+    const auth = new AuthService(prisma as unknown as PrismaService, new AuditService(prisma as unknown as PrismaService));
+    const pwHash = await auth.hashPassword('Sup3rSecret!!');
+    const secret = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+    const u = await prisma.user.create({
+      data: {
+        email: 'mfa-signer@test.local', displayName: 'MFA Signer', status: 'ACTIVE', passwordHash: pwHash,
+        mfaEnabled: true, mfaSecret: secret,
+        roles: { create: { roleId: publisherRoleId } },
+      },
+      select: { id: true, displayName: true },
+    });
+    const signer: Actor = { id: u.id, label: u.displayName };
+    const draft = await draftBatchingRecipe(svc);
+
+    // Password alone no longer signs; a wrong code is refused; the DTO's
+    // totpCode reaches the shared credential check and the publish goes through.
+    await expect(svc.recipeEditor.publish(draft.id, { password: 'Sup3rSecret!!' }, signer))
+      .rejects.toMatchObject({ response: { code: 'MFA_REQUIRED' } });
+    await expect(
+      svc.recipeEditor.publish(draft.id, { password: 'Sup3rSecret!!', totpCode: '000000' }, signer),
+    ).rejects.toThrow(/multi-factor/i);
+    const code = await generateTotp({ secret });
+    const ok = await svc.recipeEditor.publish(draft.id, { password: 'Sup3rSecret!!', totpCode: code }, signer);
+    expect(ok.published).toBe(true);
   });
 
   it('refuses publishing twice and enforces the perform grant + required reason', async () => {

@@ -26,12 +26,28 @@ const PASSWORD = 'Sup3rSecretPw!';
 
 // Routes that are intentionally reachable without a session (normalized without
 // the /api prefix as `METHOD path`). Everything else MUST reject anonymous access.
-const PUBLIC_ROUTES = new Set(['POST /auth/login', 'POST /auth/logout', 'GET /health']);
+const PUBLIC_ROUTES = new Set([
+  'POST /auth/login',
+  'POST /auth/logout',
+  'GET /health',
+  // OIDC SSO: the login page probes /sso anonymously; start/callback ARE the
+  // anonymous login flow (both refuse work unless sso.enabled + a pending
+  // handshake — pinned in auth-oidc.http.spec.ts).
+  'GET /auth/sso',
+  'GET /auth/oidc/start',
+  'GET /auth/oidc/callback',
+]);
 
 // Routes that require a session but NO specific program — any authenticated user
-// may reach them (own profile, self-service password change). Still covered by
-// the anonymous 401 invariant; excluded only from the zero-program 403 invariant.
-const SESSION_ONLY_ROUTES = new Set(['GET /auth/me', 'POST /auth/change-password']);
+// may reach them (own profile, self-service password change/MFA). Still covered
+// by the anonymous 401 invariant; excluded only from the zero-program 403 invariant.
+const SESSION_ONLY_ROUTES = new Set([
+  'GET /auth/me',
+  'POST /auth/change-password',
+  'POST /auth/mfa/enroll',
+  'POST /auth/mfa/confirm',
+  'POST /auth/mfa/disable',
+]);
 
 // Routes whose program key is DYNAMIC (one route serves many viewers, each with
 // its own program) so authorization runs in the service, not @RequireProgram —

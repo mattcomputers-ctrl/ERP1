@@ -470,19 +470,21 @@ export class ReleasesService {
    * before the transaction (Argon2 is slow). Returns the witness identity if any. */
   private async verifyDispositionSignature(
     req: { requireSignature: boolean; requireWitness: boolean },
-    dto: { password?: string; witnessEmail?: string; witnessPassword?: string },
+    dto: { password?: string; totpCode?: string; witnessEmail?: string; witnessPassword?: string; witnessTotpCode?: string },
     actor: Actor,
   ): Promise<{ id: string; label: string } | null> {
     if (!req.requireSignature) return null;
     if (!dto.password) throw new BadRequestException('Your password is required to sign this disposition.');
-    await this.auth.verifyPasswordById(actor.id, dto.password);
+    // MFA-enrolled signers/witnesses must present their TOTP code too (the
+    // credential check throws 401 MFA_REQUIRED when it is missing).
+    await this.auth.verifyPasswordById(actor.id, dto.password, { totpCode: dto.totpCode });
 
     if (req.requireWitness && !dto.witnessEmail) {
       throw new BadRequestException('A witness signature is required for this disposition.');
     }
     if (dto.witnessEmail) {
       if (!dto.witnessPassword) throw new BadRequestException('Witness password is required.');
-      const w = await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false);
+      const w = await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false, { totpCode: dto.witnessTotpCode });
       if (w.id === actor.id) throw new BadRequestException('The witness must be a different user.');
       if (!(await this.permissions.canWitness(w.id, DISPOSITION_SECURED_ITEM))) {
         throw new ForbiddenException('That user is not permitted to witness QA dispositions.');

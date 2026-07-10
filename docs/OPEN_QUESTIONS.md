@@ -74,6 +74,19 @@ is enabled but has never run to an outcome. No ERP1 action needed (the §13
 IIF/CSV export replaces this), but before cutover confirm the plant disables
 these SQL Agent-driven jobs so nothing keeps touching the QuickBooks file.
 
+## Entra ID tenant details for OIDC SSO (noted 2026-07-10)
+
+The OIDC SSO flow (L19, ASSUMPTIONS §24) is built and seam-tested, but the
+plant's Microsoft Entra ID specifics are unknown: tenant id (→ `sso.issuer` =
+`https://login.microsoftonline.com/<tenant-id>/v2.0`), the app registration
+(client id + secret; redirect URI to register is
+`<public base URL>/api/auth/oidc/callback`), and which claim to provision
+into `users.ssoSubject` (default: the `sub` claim; Entra's object-id `oid`
+is friendlier for admins — if the plant prefers `oid`, provision that value
+as the subject or extend the provider to map it). Also decide whether any
+users should become SSO-only (no ERP1 password). Nothing blocks: SSO ships
+disabled until `sso.*` settings are filled in on the Configuration page.
+
 ## Native inventory-movement emission — RESOLVED 2026-07-08
 
 Retrofitted the movement-recorder at the writer seam (ASSUMPTIONS §20):

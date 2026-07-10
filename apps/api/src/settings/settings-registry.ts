@@ -175,6 +175,26 @@ export const SETTINGS_REGISTRY: SettingDef[] = [
     key: 'security.lockoutDurationMinutes', group: 'Security', label: 'Lockout duration (minutes)', type: 'number', defaultValue: '15',
     description: 'How long a locked account stays locked (legacy ParamsUser.LockoutDuration).',
   },
+  {
+    key: 'sso.enabled', group: 'Security', label: 'OIDC single sign-on', type: 'boolean', defaultValue: 'false',
+    description: 'Master switch for OIDC SSO login (e.g. Microsoft Entra ID). Only takes effect once issuer, client id and client secret are set. Only users whose SSO subject an administrator has provisioned (Users page) can sign in this way — there is no self-provisioning.',
+  },
+  {
+    key: 'sso.issuer', group: 'Security', label: 'OIDC issuer URL', type: 'text', defaultValue: '',
+    description: 'OIDC issuer (discovery) URL, e.g. https://login.microsoftonline.com/<tenant-id>/v2.0 — the provider must serve /.well-known/openid-configuration under it.',
+  },
+  {
+    key: 'sso.clientId', group: 'Security', label: 'OIDC client id', type: 'text', defaultValue: '',
+    description: 'Application (client) id registered with the identity provider. The redirect URI to register is <public base URL>/api/auth/oidc/callback.',
+  },
+  {
+    key: 'sso.clientSecret', group: 'Security', label: 'OIDC client secret', type: 'password', defaultValue: '',
+    description: 'Client secret issued by the identity provider.',
+  },
+  {
+    key: 'sso.buttonLabel', group: 'Security', label: 'SSO button label', type: 'text', defaultValue: 'Sign in with SSO',
+    description: 'Label of the SSO button on the login page.',
+  },
 
   // --- System (read-only state) --------------------------------------------------
   {

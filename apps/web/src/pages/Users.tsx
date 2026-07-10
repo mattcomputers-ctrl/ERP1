@@ -9,6 +9,9 @@ interface UserRow {
   displayName: string;
   status: string;
   roles: string[];
+  mfaEnabled: boolean;
+  ssoSubject: string | null;
+  hasPassword: boolean;
   lastLoginAt: string | null;
 }
 interface RoleOption { code: string; name: string; isSystem: boolean }
@@ -17,20 +20,34 @@ export function Users() {
   const qc = useQueryClient();
   const users = useQuery({ queryKey: ['users'], queryFn: () => api.get<UserRow[]>('/users') });
   const roleOpts = useQuery({ queryKey: ['user-role-options'], queryFn: () => api.get<{ rows: RoleOption[] }>('/users/role-options') });
-  const [form, setForm] = useState({ email: '', displayName: '', initialPassword: '', roleCode: '' });
+  const [form, setForm] = useState({ email: '', displayName: '', initialPassword: '', ssoSubject: '', roleCode: '' });
   const [editingRoles, setEditingRoles] = useState<string | null>(null);
+  const [editingSso, setEditingSso] = useState<string | null>(null);
+  const [editingPassword, setEditingPassword] = useState<string | null>(null);
 
   const create = useMutation({
-    mutationFn: () => api.post('/users', { ...form, roleCode: form.roleCode || undefined }),
+    mutationFn: () =>
+      api.post('/users', {
+        email: form.email,
+        displayName: form.displayName,
+        initialPassword: form.initialPassword || undefined,
+        ssoSubject: form.ssoSubject || undefined,
+        roleCode: form.roleCode || undefined,
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['users'] });
-      setForm({ email: '', displayName: '', initialPassword: '', roleCode: '' });
+      setForm({ email: '', displayName: '', initialPassword: '', ssoSubject: '', roleCode: '' });
     },
   });
 
   const setStatus = useMutation({
     mutationFn: (v: { id: string; status: string }) =>
       api.patch(`/users/${v.id}/status`, { status: v.status }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
+  });
+
+  const resetMfa = useMutation({
+    mutationFn: (id: string) => api.post(`/users/${id}/mfa-reset`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
   });
 
@@ -62,13 +79,19 @@ export function Users() {
               required
             />
           </Field>
-          <Field label="Initial password">
+          <Field label="Initial password (blank = SSO-only)">
             <Input
               type="password"
               value={form.initialPassword}
               onChange={(e) => setForm({ ...form, initialPassword: e.target.value })}
               minLength={12}
-              required
+            />
+          </Field>
+          <Field label="SSO subject (optional)">
+            <Input
+              value={form.ssoSubject}
+              onChange={(e) => setForm({ ...form, ssoSubject: e.target.value })}
+              placeholder="OIDC sub claim"
             />
           </Field>
           <Field label="Role code (optional)">
@@ -96,6 +119,7 @@ export function Users() {
               <th className="px-4 py-3 font-medium">Email</th>
               <th className="px-4 py-3 font-medium">Name</th>
               <th className="px-4 py-3 font-medium">Roles</th>
+              <th className="px-4 py-3 font-medium">Sign-in</th>
               <th className="px-4 py-3 font-medium">Status</th>
               <th className="px-4 py-3" />
             </tr>
@@ -108,6 +132,19 @@ export function Users() {
                   <td className="px-4 py-3">{u.displayName}</td>
                   <td className="px-4 py-3">{u.roles.join(', ') || '—'}</td>
                   <td className="px-4 py-3">
+                    <span className="flex flex-wrap gap-1">
+                      {u.hasPassword && (
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">password</span>
+                      )}
+                      {u.mfaEnabled && (
+                        <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs text-emerald-700">MFA</span>
+                      )}
+                      {u.ssoSubject && (
+                        <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700" title={u.ssoSubject}>SSO</span>
+                      )}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
                     <span
                       className={`rounded-full px-2 py-0.5 text-xs ${
                         u.status === 'ACTIVE' ? 'bg-green-50 text-green-700' : 'bg-slate-100 text-slate-600'
@@ -118,11 +155,35 @@ export function Users() {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <button
-                      onClick={() => setEditingRoles((v) => (v === u.id ? null : u.id))}
+                      onClick={() => { setEditingRoles((v) => (v === u.id ? null : u.id)); setEditingSso(null); setEditingPassword(null); }}
                       className="mr-3 text-indigo-600 hover:underline"
                     >
                       Edit roles
                     </button>
+                    <button
+                      onClick={() => { setEditingSso((v) => (v === u.id ? null : u.id)); setEditingRoles(null); setEditingPassword(null); }}
+                      className="mr-3 text-indigo-600 hover:underline"
+                    >
+                      SSO
+                    </button>
+                    <button
+                      onClick={() => { setEditingPassword((v) => (v === u.id ? null : u.id)); setEditingRoles(null); setEditingSso(null); }}
+                      className="mr-3 text-indigo-600 hover:underline"
+                    >
+                      {u.hasPassword ? 'Reset password' : 'Set password'}
+                    </button>
+                    {u.mfaEnabled && (
+                      <button
+                        onClick={() => {
+                          if (window.confirm(`Reset MFA for ${u.email}? They will sign in with password only until they re-enroll.`)) {
+                            resetMfa.mutate(u.id);
+                          }
+                        }}
+                        className="mr-3 text-amber-600 hover:underline"
+                      >
+                        Reset MFA
+                      </button>
+                    )}
                     {u.status === 'ACTIVE' ? (
                       <button onClick={() => setStatus.mutate({ id: u.id, status: 'DISABLED' })} className="text-slate-500 hover:text-red-600">Disable</button>
                     ) : (
@@ -132,7 +193,7 @@ export function Users() {
                 </tr>
                 {editingRoles === u.id && (
                   <tr className="bg-slate-50">
-                    <td colSpan={5} className="px-4 py-3">
+                    <td colSpan={6} className="px-4 py-3">
                       <RolesEditor
                         user={u}
                         options={roleOpts.data?.rows ?? []}
@@ -141,17 +202,40 @@ export function Users() {
                     </td>
                   </tr>
                 )}
+                {editingSso === u.id && (
+                  <tr className="bg-slate-50">
+                    <td colSpan={6} className="px-4 py-3">
+                      <SsoEditor
+                        user={u}
+                        onDone={() => { setEditingSso(null); qc.invalidateQueries({ queryKey: ['users'] }); }}
+                      />
+                    </td>
+                  </tr>
+                )}
+                {editingPassword === u.id && (
+                  <tr className="bg-slate-50">
+                    <td colSpan={6} className="px-4 py-3">
+                      <PasswordEditor
+                        user={u}
+                        onDone={() => { setEditingPassword(null); qc.invalidateQueries({ queryKey: ['users'] }); }}
+                      />
+                    </td>
+                  </tr>
+                )}
               </Fragment>
             ))}
             {users.isLoading && (
               <tr>
-                <td className="px-4 py-6 text-slate-500" colSpan={5}>
+                <td className="px-4 py-6 text-slate-500" colSpan={6}>
                   Loading…
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+        {resetMfa.isError && (
+          <p className="px-4 py-2 text-sm text-red-600">{(resetMfa.error as Error).message}</p>
+        )}
       </Card>
     </div>
   );
@@ -182,6 +266,76 @@ function RolesEditor({ user, options, onDone }: { user: UserRow; options: RoleOp
       </div>
       <div className="mt-3 flex items-center gap-3">
         <Button onClick={() => m.mutate()} disabled={!dirty || m.isPending}>{m.isPending ? 'Saving…' : 'Save groups'}</Button>
+        <button type="button" onClick={onDone} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
+    </div>
+  );
+}
+
+// Inline editor to set/reset a user's password (the user must change it at
+// next login) — the recovery path for SSO-only accounts that need to e-sign.
+function PasswordEditor({ user, onDone }: { user: UserRow; onDone: () => void }) {
+  const [password, setPassword] = useState('');
+  const m = useMutation({
+    mutationFn: () => api.patch(`/users/${user.id}/password`, { password }),
+    onSuccess: onDone,
+  });
+
+  return (
+    <div>
+      <div className="mb-2 text-sm font-medium text-slate-700">
+        {user.hasPassword ? 'Reset password for' : 'Set password for'} {user.email}
+      </div>
+      <p className="mb-2 text-xs text-slate-500">
+        The user must change it at their next password login. Electronic signatures require a
+        password even for SSO accounts.
+      </p>
+      <div className="flex items-center gap-3">
+        <input
+          type="password"
+          autoComplete="new-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          minLength={12}
+          placeholder="New password (min 12 characters)"
+          className="w-72 rounded border border-slate-300 px-2 py-1 text-sm"
+        />
+        <Button onClick={() => m.mutate()} disabled={m.isPending || password.length < 12}>
+          {m.isPending ? 'Saving…' : 'Save'}
+        </Button>
+        <button type="button" onClick={onDone} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
+    </div>
+  );
+}
+
+// Inline editor to provision (or unlink) the OIDC subject an SSO login maps to.
+function SsoEditor({ user, onDone }: { user: UserRow; onDone: () => void }) {
+  const [subject, setSubject] = useState(user.ssoSubject ?? '');
+  const m = useMutation({
+    mutationFn: () => api.patch(`/users/${user.id}/sso`, { ssoSubject: subject.trim() || null }),
+    onSuccess: onDone,
+  });
+
+  return (
+    <div>
+      <div className="mb-2 text-sm font-medium text-slate-700">SSO subject for {user.email}</div>
+      <p className="mb-2 text-xs text-slate-500">
+        The OIDC <code>sub</code> claim from the identity provider (for Entra ID: the user's object id).
+        Blank unlinks SSO.
+      </p>
+      <div className="flex items-center gap-3">
+        <input
+          value={subject}
+          onChange={(e) => setSubject(e.target.value)}
+          placeholder="e.g. 00000000-0000-0000-0000-000000000000"
+          className="w-96 rounded border border-slate-300 px-2 py-1 font-mono text-sm"
+        />
+        <Button onClick={() => m.mutate()} disabled={m.isPending || (subject.trim() || null) === user.ssoSubject}>
+          {m.isPending ? 'Saving…' : 'Save'}
+        </Button>
         <button type="button" onClick={onDone} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
         {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
       </div>

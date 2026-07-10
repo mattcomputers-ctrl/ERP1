@@ -1446,7 +1446,7 @@ export class OrdersService {
    */
   private async verifySignatures(
     actor: Actor,
-    dto: { password?: string; witnessEmail?: string; witnessPassword?: string },
+    dto: { password?: string; totpCode?: string; witnessEmail?: string; witnessPassword?: string; witnessTotpCode?: string },
     req: { requireSignature: boolean; requireWitness: boolean },
     securedItemKey: string,
     msgs: { password: string; witnessRequired: string; witnessNotPermitted: string },
@@ -1455,14 +1455,17 @@ export class OrdersService {
     if (!dto.password) {
       throw new BadRequestException(msgs.password);
     }
-    await this.auth.verifyPasswordById(actor.id, dto.password);
+    // MFA-enrolled signers/witnesses must present their TOTP code too — the
+    // second factor is enforced inside the credential check (401 MFA_REQUIRED
+    // when missing), so no signature path downgrades to password-only.
+    await this.auth.verifyPasswordById(actor.id, dto.password, { totpCode: dto.totpCode });
 
     if (req.requireWitness && !dto.witnessEmail) {
       throw new BadRequestException(msgs.witnessRequired);
     }
     if (!dto.witnessEmail) return null;
     if (!dto.witnessPassword) throw new BadRequestException('Witness password is required.');
-    const w = await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false);
+    const w = await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false, { totpCode: dto.witnessTotpCode });
     if (w.id === actor.id) throw new BadRequestException('The witness must be a different user.');
     if (!(await this.permissions.canWitness(w.id, securedItemKey))) {
       throw new ForbiddenException(msgs.witnessNotPermitted);

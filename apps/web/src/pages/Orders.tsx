@@ -1530,9 +1530,11 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
   const [batchSize, setBatchSize] = useState('');
   const [reason, setReason] = useState('');
   const [password, setPassword] = useState('');
+  const [totp, setTotp] = useState('');
   const [showWitness, setShowWitness] = useState(false);
   const [witnessEmail, setWitnessEmail] = useState('');
   const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessTotp, setWitnessTotp] = useState('');
   const [witnessExplanation, setWitnessExplanation] = useState('');
 
   const r = req.data;
@@ -1540,6 +1542,7 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
   const reasonRequired = !!r?.requireReason;
   const witnessRequired = !!r?.requireWitness;
   const witnessOpen = witnessRequired || showWitness;
+  const mfaOn = !!me.data?.mfaEnabled;
 
   const m = useMutation({
     mutationFn: () =>
@@ -1547,8 +1550,10 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
         actualBatchSize: batchSize ? Number(batchSize) : undefined,
         reason: reason || undefined,
         password: password || undefined,
+        totpCode: sig && totp ? totp : undefined,
         witnessEmail: witnessOpen && witnessEmail ? witnessEmail : undefined,
         witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
+        witnessTotpCode: witnessOpen && witnessTotp ? witnessTotp : undefined,
         witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
       }),
     onSuccess: (res) => {
@@ -1565,7 +1570,7 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
   const canSubmit =
     !!r &&
     (!reasonRequired || !!reason.trim()) &&
-    (!sig || !!password) &&
+    (!sig || (!!password && (!mfaOn || !!totp))) &&
     (!witnessRequired || (!!witnessEmail && !!witnessPassword));
 
   if (req.isLoading) return <span className="text-sm text-slate-400">Loading…</span>;
@@ -1583,10 +1588,14 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
       {sig && (
         <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password (sign)" className="w-44 rounded border border-slate-300 px-2 py-1" />
       )}
+      {sig && mfaOn && (
+        <input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} placeholder="MFA code" className="w-28 rounded border border-slate-300 px-2 py-1" />
+      )}
       {sig && witnessOpen && (
         <>
           <input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} placeholder={`Witness email${witnessRequired ? ' (required)' : ''}`} className="w-48 rounded border border-slate-300 px-2 py-1" />
           <input type="password" autoComplete="off" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} placeholder="Witness password" className="w-44 rounded border border-slate-300 px-2 py-1" />
+          <input autoComplete="one-time-code" value={witnessTotp} onChange={(e) => setWitnessTotp(e.target.value)} placeholder="Witness MFA (if enrolled)" className="w-44 rounded border border-slate-300 px-2 py-1" />
           <input value={witnessExplanation} onChange={(e) => setWitnessExplanation(e.target.value)} maxLength={500} placeholder="Witness note (optional)" className="w-48 rounded border border-slate-300 px-2 py-1" />
         </>
       )}
@@ -1619,9 +1628,11 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
   });
   const [reason, setReason] = useState('');
   const [password, setPassword] = useState('');
+  const [totp, setTotp] = useState('');
   const [showWitness, setShowWitness] = useState(false);
   const [witnessEmail, setWitnessEmail] = useState('');
   const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessTotp, setWitnessTotp] = useState('');
   const [witnessExplanation, setWitnessExplanation] = useState('');
 
   const r = req.data;
@@ -1629,14 +1640,17 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
   const reasonRequired = !!r?.requireReason;
   const witnessRequired = !!r?.requireWitness;
   const witnessOpen = witnessRequired || showWitness;
+  const mfaOn = !!me.data?.mfaEnabled;
 
   const m = useMutation({
     mutationFn: () =>
       api.post(`/orders/${orderId}/reverse`, {
         reason: reason || undefined,
         password: password || undefined,
+        totpCode: sig && totp ? totp : undefined,
         witnessEmail: witnessOpen && witnessEmail ? witnessEmail : undefined,
         witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
+        witnessTotpCode: witnessOpen && witnessTotp ? witnessTotp : undefined,
         witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
       }),
     onSuccess: onDone,
@@ -1648,7 +1662,7 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
   const canSubmit =
     !!r &&
     (!reasonRequired || !!reason.trim()) &&
-    (!sig || !!password) &&
+    (!sig || (!!password && (!mfaOn || !!totp))) &&
     (!witnessRequired || (!!witnessEmail && !!witnessPassword));
 
   if (!open) {
@@ -1681,10 +1695,14 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
             {sig && (
               <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password (sign)" className="w-44 rounded border border-slate-300 px-2 py-1" />
             )}
+            {sig && mfaOn && (
+              <input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} placeholder="MFA code" className="w-28 rounded border border-slate-300 px-2 py-1" />
+            )}
             {sig && witnessOpen && (
               <>
                 <input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} placeholder={`Witness email${witnessRequired ? ' (required)' : ''}`} className="w-48 rounded border border-slate-300 px-2 py-1" />
                 <input type="password" autoComplete="off" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} placeholder="Witness password" className="w-44 rounded border border-slate-300 px-2 py-1" />
+                <input autoComplete="one-time-code" value={witnessTotp} onChange={(e) => setWitnessTotp(e.target.value)} placeholder="Witness MFA (if enrolled)" className="w-44 rounded border border-slate-300 px-2 py-1" />
                 <input value={witnessExplanation} onChange={(e) => setWitnessExplanation(e.target.value)} maxLength={500} placeholder="Witness note (optional)" className="w-48 rounded border border-slate-300 px-2 py-1" />
               </>
             )}
@@ -2163,9 +2181,11 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
   });
   const [reason, setReason] = useState('');
   const [password, setPassword] = useState('');
+  const [totp, setTotp] = useState('');
   const [showWitness, setShowWitness] = useState(false);
   const [witnessEmail, setWitnessEmail] = useState('');
   const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessTotp, setWitnessTotp] = useState('');
   const [witnessExplanation, setWitnessExplanation] = useState('');
   const [rejectReason, setRejectReason] = useState('');
 
@@ -2174,6 +2194,7 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
   const reasonRequired = !!r?.requireReason;
   const witnessRequired = !!r?.requireWitness;
   const witnessOpen = witnessRequired || showWitness;
+  const mfaOn = !!me.data?.mfaEnabled;
 
   const publish = useMutation({
     mutationFn: () =>
@@ -2184,8 +2205,10 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
         draftUpdatedAt: draftUpdatedAt ?? undefined,
         reason: reason || undefined,
         password: password || undefined,
+        totpCode: sig && totp ? totp : undefined,
         witnessEmail: witnessOpen && witnessEmail ? witnessEmail : undefined,
         witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
+        witnessTotpCode: witnessOpen && witnessTotp ? witnessTotp : undefined,
         witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
       }),
     onSuccess: onDone,
@@ -2200,7 +2223,7 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
     !!r &&
     hasComment &&
     (!reasonRequired || !!reason.trim()) &&
-    (!sig || !!password) &&
+    (!sig || (!!password && (!mfaOn || !!totp))) &&
     (!witnessRequired || (!!witnessEmail && !!witnessPassword));
 
   return (
@@ -2221,10 +2244,14 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
           {sig && (
             <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password (sign)" className="w-44 rounded border border-slate-300 px-2 py-1 text-sm" />
           )}
+          {sig && mfaOn && (
+            <input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} placeholder="MFA code" className="w-28 rounded border border-slate-300 px-2 py-1 text-sm" />
+          )}
           {sig && witnessOpen && (
             <>
               <input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} placeholder={`Witness email${witnessRequired ? ' (required)' : ''}`} className="w-48 rounded border border-slate-300 px-2 py-1 text-sm" />
               <input type="password" autoComplete="off" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} placeholder="Witness password" className="w-44 rounded border border-slate-300 px-2 py-1 text-sm" />
+              <input autoComplete="one-time-code" value={witnessTotp} onChange={(e) => setWitnessTotp(e.target.value)} placeholder="Witness MFA (if enrolled)" className="w-44 rounded border border-slate-300 px-2 py-1 text-sm" />
               <input value={witnessExplanation} onChange={(e) => setWitnessExplanation(e.target.value)} maxLength={500} placeholder="Witness note (optional)" className="w-48 rounded border border-slate-300 px-2 py-1 text-sm" />
             </>
           )}

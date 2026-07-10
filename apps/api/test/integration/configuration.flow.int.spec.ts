@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@erp1/db';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { AuthService } from '../../src/auth/auth.service';
+import { AuditService } from '../../src/audit/audit.service';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import type { PrismaService } from '../../src/prisma/prisma.service';
 import {
@@ -33,7 +34,7 @@ beforeEach(async () => {
   actor = await seedActor(prisma);
 });
 
-const auth = () => new AuthService(prisma as unknown as PrismaService);
+const auth = () => new AuthService(prisma as unknown as PrismaService, new AuditService(prisma as unknown as PrismaService));
 
 describe('security.* settings drive the auth policy', () => {
   async function userWithPassword(email: string, password: string) {

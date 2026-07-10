@@ -39,6 +39,8 @@ model User {
   mustChangePassword Boolean    @default(false)
   mfaEnabled         Boolean    @default(false)
   mfaSecret          String? // TOTP secret (encrypted at rest in a later increment)
+  mfaRecoveryCodes   String[]   @default([]) // SHA-256 hex of the UNUSED single-use recovery codes
+  mfaLastStep        Int? // highest accepted TOTP time step (RFC 6238 replay protection)
   ssoSubject         String?    @unique // OIDC subject for SSO users
   lastLoginAt        DateTime?
   failedLoginCount   Int        @default(0)
