@@ -1849,3 +1849,121 @@ Sweep evidence (2026-07-09) was the discovery; deltas found in-repo:
    grow 10×); Configuration save invalidates the branding cache; the pricing
    footnote no longer claims sub-recipes are excluded; sub-recipe rows show
    their child excess dollars at row level.
+
+## Item / entity edit-form gaps (§27 / L31 + L33 + L34, built 2026-07-10)
+
+Mechanical master-data edit-form additions on the existing Items / Entities
+editors (no schema change — every column already existed).
+
+1. **NAME aliases (L31)**: `Item.replacedById` is now settable on create + edit
+   (a NAME item aliases a real stock item — the plant's 2nd-busiest master-data
+   program). Self-alias + unknown-target rejected; the list shows `→ target`; the
+   web Items edit modal has an alias picker (shown when Type = NAME).
+2. **Planning knobs (L31)**: `GET`/`PATCH /items/:id/planning` reads/writes the
+   item's `ItemEntity` **ST row** (MinimumStock / LeadTime / TestingLeadTime — the
+   planning engine reads them, nothing natively wrote them). Updates the existing
+   ST row or mints a NATIVE one (id ≥ 1e9, Entity = the derived single site owner,
+   verified id 4). The planning engine keys min-stock/lead off exactly these rows.
+3. **Packaged-product binding (L31)**: `GET`/`POST /items/:id/packaged-products`
+   creates an `ItemPackagedProduct` (native id) so a new packaged product becomes
+   orderable; the RMPP recipe resolves to its active revision at read time
+   (packoutOptions), so recipeId is an optional hint. Dup + ref checks INSIDE the
+   locked tx.
+4. **Entity address book (L33/L34)**: `POST`/`PATCH`/`DELETE
+   /entities/:id/addresses` over `Address` + `AddressReference`. **The references
+   this install uses on entities are `Address` (primary/document) + `ShipToAddress`
+   — NOT the sweep's assumed "Main/Remit/Ship"** (verified: 1,074 `Address` + 57
+   `ShipToAddress` refs on Entity; PartyService + all documents resolve the display
+   address off `Reference='Address'`). Standardised the primary reference on
+   `Address` (the old `create()` wrote a divergent `'Main'` that documents never
+   read). One primary per entity enforced INSIDE the tx. `Entity.parentId`
+   (ship-to hierarchy) exposed on create/edit + an entity picker.
+5. **Review round (§27.5)**: 5 lenses → 9 raw → 5 unique dual-confirmed, all
+   fixed. **MAJOR: copy-on-write in `updateAddress`** — a legacy/shared `Address`
+   (referenced by `Ordr`/`Waybill`/`Location` ShipToAddress document snapshots —
+   e.g. legacy Address #4 is shared by 4,143 references) is now COPIED to a fresh
+   native row with this entity's refs repointed, instead of mutating the shared row
+   in place (which would silently rewrite ~4,142 historical documents). Minors:
+   `addAddress` single-primary check + `createPackagedProduct` dup check moved
+   INSIDE the locked tx (were TOCTOU-racy); `updatePlanning` audit records the real
+   native id; web AddressForm sends `null` (not `undefined`) to clear a field on
+   edit.
+
+## Supplier price-version editor (§28 / L37 + L48, built 2026-07-10)
+
+The write counterpart of the read-only Purchase Price Detail Set Viewer + PO
+line-sourcing. `SupplierPricingService` + `/supplier-pricing`; programs
+`purchasing.priceVersions` (browse) + `purchasing.priceVersionEditor` (write).
+
+1. **Supplier-keyed, not list-keyed**: the price-version-owning entity IS the
+   supplier (`PriceVersion.Entity = supplierId`; suppliers self-reference their
+   price list), so — unlike the sales editor (mints an `IsPriceList` Entity, keys
+   details off `InvItem`) — there is no list to create; the supplier already
+   exists, and details key off **`Item`**.
+2. **Multiple details per item ALLOWED**: verified 362 live (version, item) pairs
+   with >1 detail (different package sizes / manufacturers). Only an EXACT
+   (item + package + manufacturer) duplicate — a dead shadowed row the read path
+   (`effectivePriceDetail`, lowest-id) would never surface — is refused.
+   Manufacturer pin is 0-row here but the read path is manufacturer-aware, so it's
+   supported for parity.
+3. **Effective-version rule REUSED** from `PriceVersionService.effectiveVersion`
+   (latest EffectiveDate ≤ now, ties by version then id desc), never re-derived.
+   Native ids ≥ 1e9 under the alloc lock; atomic audit; IDOR-safe
+   (version/detail must belong to the supplier); packaging all-or-nothing.
+4. **Review round (§28.4)**: 5 lenses → 6 raw → 4 dual-confirmed (2 UX nits
+   refuted), all in `updateDetail`, fixed: (a) it now re-asserts **packaging
+   all-or-nothing against the MERGED post-update row** — else a PATCH could set
+   `priceByPackage`/`entityQuantity` with no package type and the by-package trap
+   (accounting-model) would divide the tier price ~1/50× at valuation; (b) it now
+   re-checks the exact (item+package+manufacturer) identity **inside the locked
+   tx** so a re-point can't create the shadowed duplicate `addDetail` refuses.
+
+## Inventory count sheets (§29 / L62, built 2026-07-10)
+
+Discovery FIRST (read-only legacy DB), then built composing the existing adjust
+engine. **The escape hatch was NOT triggered** — posting reuses the shipped
+per-parcel adjust core under one COUNT ChangeSet; no new depletion/movement logic.
+
+1. **Discovery (verified live 2026-07-10)**: `InventoryCount` (id/Owner/
+   Description/EffectiveDate/Posted/Version/ChangeSet) + `InventoryCountDetail`
+   (id/InventoryCount/Item/Sublot/Location/QtyEntered/Qty/QtyAdjust). Semantics:
+   `Qty` = `QtyEntered` (varchar raw) = the **counted** quantity; `QtyAdjust` =
+   **counted − book** (signed; e.g. counted 424.8, adjust +312.3 ⇒ book 112.5).
+   Posted headers link 1:1 to a `Context='COUNT'` ChangeSet (**1,499 posted
+   headers ↔ 1,499 distinct COUNT change sets, 0 shared**). Owner = the site
+   entity (4); all live counts at one location (10669). Both tables **are in the
+   LogResult change feed** (4,612 / 79,493) ⇒ standard **log-driven sync** spec.
+2. **KEY DEVIATION (documented, deliberate)**: **ALL 21,053 legacy detail rows
+   have `Sublot = NULL`** — legacy counted at **Item+Location aggregate** grain.
+   ERP1 inventory is lot-traced per PARCEL, so ERP1 native counts are **per-parcel**
+   (each `InventoryCountDetail` populates `Sublot` + the ERP1-only
+   `erp1_inventory_id` parcel link) — a strict refinement, and the grain at which
+   the existing adjust engine operates. The mirror keeps `Sublot` nullable so
+   imported legacy rows round-trip faithfully (their `erp1_inventory_id` is null).
+3. **Native workflow**: `createCount` snapshots the countable parcels at a
+   location (qty > 0, not reserved, item/status-narrowable; SMP/ASM refused) into a
+   draft; `enterCounts` sets counted qty per parcel (draft-only; the adjust preview
+   is computed at READ time against the LIVE book, never stored stale); `postCount`
+   creates **ONE** COUNT ChangeSet and applies every counted line through
+   `InventoryService.setParcelQtyInTx` — the core extracted from `adjust()` (qty
+   set + signed US movement leg valued at lot cost + reweigh notification), stores
+   each line's ACTUAL delta (counted − live book, so drift between entry and post
+   is handled), and marks the header posted + linked. Unposted counts are editable/
+   deletable; posted counts immutable. Program `inventory.count`; web Inventory
+   Counts page.
+4. **Adjust refactor**: `adjust()` now composes the same `setParcelQtyInTx` core
+   (creating its own single COUNT cs), preserving its exact behaviour (no-op → no
+   change set; identical audit summary / movement leg / reweigh — all 5 existing
+   adjust tests green).
+5. **Review round (§29.5)**: 5 lenses → 9 raw → 7 dual-confirmed (4 distinct; 2
+   refuted), all fixed. (a) **adjust() SMP/ASM fence regression**: the refactor
+   moved the SMP/ASM fence into the core, which the no-op short-circuit skipped —
+   a same-qty adjust on an SMP retained-sample parcel (ordDetailId null, so the
+   reserved fence didn't catch it) returned 200 instead of 400; the fence is now
+   re-asserted before the no-op return. (b) MAJOR **deleteCount TOCTOU** +
+   (c) **enterCounts TOCTOU**: both checked `posted` only pre-tx; now re-assert it
+   INSIDE the locked tx (they take NATIVE_ID_ALLOC_LOCK, which postCount also
+   holds) so a concurrent post can't be deleted/overwritten. (d) **get() posted
+   uncounted line** now shows blank book/adjust (a line snapshotted but never
+   counted was computing a false `0 − 0 = 0` book). Full suite after: 502
+   integration + 114 unit green.

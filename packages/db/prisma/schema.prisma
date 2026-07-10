@@ -1754,3 +1754,46 @@ model ChangeSetReceipt {
   @@index([ordDetailId])
   @@map("ChangeSetReceipt")
 }
+
+// Inventory count sheet header (mirrors legacy). A worksheet of counted
+// quantities; posting applies the adjustments under ONE Context='COUNT' ChangeSet
+// (verified 1:1 — 1,499 posted headers to 1,499 distinct COUNT change sets).
+// Legacy counts at Item+Location grain (Sublot NULL on all 21,053 detail rows);
+// ERP1 native counts are per-PARCEL (its lot-traced grain) and compose the
+// existing adjust engine — see ASSUMPTIONS §29 for the deviation.
+model InventoryCount {
+  id            Int      @id @map("InventoryCount")
+  ownerId       Int      @map("Owner")
+  description   String?  @map("Description") @db.VarChar(256)
+  effectiveDate DateTime @map("EffectiveDate")
+  posted        Boolean  @default(false) @map("Posted")
+  version       Int?     @map("Version")
+  // The COUNT ChangeSet all this count's adjustments post under (set at post time).
+  changeSetId   Int?     @map("ChangeSet")
+  createdAt     DateTime @default(now()) @map("erp1_created_at")
+  updatedAt     DateTime @updatedAt @map("erp1_updated_at")
+
+  @@map("InventoryCount")
+}
+
+// Inventory count line (mirrors legacy). Qty = the COUNTED quantity (== QtyEntered,
+// the raw entry string), QtyAdjust = counted - book (signed; filled at post from
+// the LIVE parcel book). Legacy leaves Sublot NULL (item+location aggregate);
+// ERP1 native lines populate Sublot + the erp1_inventory_id parcel link so posting
+// adjusts the exact on-hand parcel.
+model InventoryCountDetail {
+  id               Int     @id @map("InventoryCountDetail")
+  inventoryCountId Int     @map("InventoryCount")
+  itemId           Int     @map("Item")
+  sublotId         Int?    @map("Sublot")
+  locationId       Int     @map("Location")
+  qtyEntered       String? @map("QtyEntered") @db.VarChar(20)
+  qty              Float?  @map("Qty")
+  qtyAdjust        Float?  @map("QtyAdjust")
+  // ERP1-only: the on-hand parcel this native line counts (NULL on imported legacy
+  // rows, which are item+location aggregates with no parcel identity).
+  inventoryId      Int?    @map("erp1_inventory_id")
+
+  @@index([inventoryCountId])
+  @@map("InventoryCountDetail")
+}

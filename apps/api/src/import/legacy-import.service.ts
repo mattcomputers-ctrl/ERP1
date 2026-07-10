@@ -537,6 +537,28 @@ const TABLES: TableSpec[] = [
     }),
   },
   {
+    // Inventory count headers. In the change feed (LogResult: 4,612 / 79,493
+    // rows) → standard log-driven sync. After ChangeSet (Posted headers point at
+    // a COUNT ChangeSet). ERP1-only columns (erp1_inventory_id on the detail) are
+    // never written by import.
+    name: 'InventoryCount', legacyTable: 'dbo.InventoryCount', delegate: 'inventoryCount', idColumn: 'InventoryCount',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.InventoryCount, ownerId: r.Owner, description: r.Description, effectiveDate: r.EffectiveDate,
+      posted: b(r.Posted) ?? false, version: r.Version, changeSetId: r.ChangeSet,
+    }),
+  },
+  {
+    // Inventory count lines. After InventoryCount (parent). Legacy Sublot is NULL
+    // on all rows (item+location aggregate); ERP1 native lines populate it.
+    name: 'InventoryCountDetail', legacyTable: 'dbo.InventoryCountDetail', delegate: 'inventoryCountDetail', idColumn: 'InventoryCountDetail',
+    where: (d) => ({ id: d.id }),
+    map: (r) => ({
+      id: r.InventoryCountDetail, inventoryCountId: r.InventoryCount, itemId: r.Item, sublotId: r.Sublot,
+      locationId: r.Location, qtyEntered: r.QtyEntered, qty: r.Qty, qtyAdjust: r.QtyAdjust,
+    }),
+  },
+  {
     // Movement event headers (§18 viewers). After ChangeSet (parent). Only the
     // live columns are mirrored — Scale/GLCode/Comment/*Entered are 0-use in
     // this install (ASSUMPTIONS §18).

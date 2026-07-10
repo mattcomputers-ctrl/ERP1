@@ -9,6 +9,8 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { SamplingService } from '../qa/sampling.service';
 import { SettingsModule } from '../settings/settings.module';
 import { InventoryController } from './inventory.controller';
+import { InventoryCountController } from './inventory-count.controller';
+import { InventoryCountService } from './inventory-count.service';
 import { InventoryService } from './inventory.service';
 import { MiscReceiptController } from './misc-receipt.controller';
 import { MiscReceiptService } from './misc-receipt.service';
@@ -17,8 +19,8 @@ import { ValuationService } from './valuation.service';
 
 @Module({
   imports: [AuthModule, SettingsModule, NotificationsModule],
-  controllers: [InventoryController, MiscReceiptController],
-  providers: [InventoryService, ValuationService, MiscReceiptService, MovementRecorderService, SamplingService],
+  controllers: [InventoryController, MiscReceiptController, InventoryCountController],
+  providers: [InventoryService, ValuationService, MiscReceiptService, MovementRecorderService, SamplingService, InventoryCountService],
   exports: [ValuationService, MovementRecorderService, SamplingService],
 })
 export class InventoryModule {}

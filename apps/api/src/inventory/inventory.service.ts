@@ -49,40 +49,36 @@ export class InventoryService {
   }
 
   /**
-   * Adjust an on-hand inventory parcel to a new absolute quantity (a count /
-   * correction — write-on or write-off), with a required reason. Records a
-   * `ChangeSet` Context='COUNT' header (native id) as the adjustment event and
-   * sets `Inventory.qty`; atomic, audited (the before→after quantity + reason). A
-   * no-op (same quantity) short-circuits without a transaction or change set.
+   * Set ONE on-hand parcel to an absolute quantity inside an EXISTING transaction,
+   * under an ALREADY-CREATED change set (the caller holds the tx + the alloc lock
+   * and writes the audit): re-reads the qty under the lock, updates it, posts the
+   * signed US movement leg (valued at the lot's unit cost — the legacy COUNT
+   * shape), and fires the 'Reweigh Outside Threshold' notification past the
+   * configured percentage. Returns before/after + delta + decoration for the
+   * caller's audit; a no-op (delta 0) posts nothing and returns skipped=true. The
+   * reserved / SMP / ASM fences are re-asserted here so neither caller can drain a
+   * reservation or a retained sample with COUNT semantics. Shared by adjust() (one
+   * change set per call) and inventory-count posting (ONE change set per sheet).
    */
-  async adjust(dto: AdjustInventoryDto, actor: Actor) {
-    if (!dto.reason?.trim()) throw new BadRequestException('A reason is required to adjust inventory.');
-    if (dto.newQty < 0) throw new BadRequestException('The adjusted quantity cannot be negative.');
-
-    const parcel = await this.prisma.inventory.findUnique({
-      where: { id: dto.inventoryId },
-      select: { id: true, itemId: true, sublotId: true, locationId: true, ordDetailId: true },
+  async setParcelQtyInTx(
+    tx: Parameters<MovementRecorderService['record']>[0],
+    opts: { parcelId: number; newQty: number; changeSetId: number; at: Date },
+  ): Promise<{ oldQty: number; newQty: number; delta: number; skipped: boolean; itemCode: string | null; lot: string | null; locationCode: string | null }> {
+    if (opts.newQty < 0) throw new BadRequestException('The adjusted quantity cannot be negative.');
+    const parcel = await tx.inventory.findUnique({
+      where: { id: opts.parcelId },
+      select: { id: true, itemId: true, sublotId: true, locationId: true, ordDetailId: true, qty: true },
     });
     if (!parcel) throw new NotFoundException('Inventory parcel not found');
-    // Reserved / special-namespace parcels are owned by their flows: a plain
-    // count on a staged parcel would silently inflate or drain a shipping
-    // reservation with COUNT (not PICK) semantics, and SMP retained samples
-    // are the QA flow's. Same fence as transfer() (2026-07-09 review).
     if (parcel.ordDetailId != null) {
       throw new BadRequestException('This parcel is reserved to a shipping order — unstage it from the order’s staging panel instead.');
     }
-
-    // Decoration for a readable audit summary (item / lot / location) — reference
-    // data, resolved outside the transaction.
     const [item, sublot, location] = await Promise.all([
       parcel.itemId != null
-        ? this.prisma.item.findUnique({
-            where: { id: parcel.itemId },
-            select: { itemCode: true, description: true, unit: true, securityGroup: true, ownerId: true },
-          })
+        ? tx.item.findUnique({ where: { id: parcel.itemId }, select: { itemCode: true, description: true, unit: true, securityGroup: true, ownerId: true } })
         : Promise.resolve(null),
-      parcel.sublotId != null ? this.prisma.sublot.findUnique({ where: { id: parcel.sublotId }, select: { lot: true } }) : Promise.resolve(null),
-      parcel.locationId != null ? this.prisma.location.findUnique({ where: { id: parcel.locationId }, select: { locationCode: true, context: true } }) : Promise.resolve(null),
+      parcel.sublotId != null ? tx.sublot.findUnique({ where: { id: parcel.sublotId }, select: { lot: true } }) : Promise.resolve(null),
+      parcel.locationId != null ? tx.location.findUnique({ where: { id: parcel.locationId }, select: { locationCode: true, context: true } }) : Promise.resolve(null),
     ]);
     if (location?.context === 'SMP' || location?.context === 'ASM') {
       throw new BadRequestException(
@@ -91,39 +87,90 @@ export class InventoryService {
           : 'Sample parcels are managed by the QA sampling flow — not by plain adjustment.',
       );
     }
+    const oldQty = parcel.qty ?? 0;
+    const delta = opts.newQty - oldQty;
+    const decoration = { itemCode: item?.itemCode ?? null, lot: sublot?.lot ?? null, locationCode: location?.locationCode ?? null };
+    if (delta === 0) return { oldQty, newQty: opts.newQty, delta: 0, skipped: true, ...decoration };
+
+    await tx.inventory.update({ where: { id: parcel.id }, data: { qty: opts.newQty } });
+    // Movement ledger: legacy COUNT shape — one US leg whose Qty is the signed
+    // DELTA (counted − book), valued at the lot's unit cost.
+    const unitCost = await this.lotUnitCost(tx, parcel.sublotId);
+    await this.movements.record(tx, [{
+      context: ADJUST_CONTEXT, changeSetId: opts.changeSetId, itemId: parcel.itemId, sublotId: parcel.sublotId,
+      legs: [{
+        context: 'US', ownerId: await this.movements.defaultOwnerId(tx), locationId: parcel.locationId,
+        qty: delta, value: unitCost != null ? this.movements.money4(delta * unitCost) : null,
+      }],
+    }]);
+
+    // UG §22.2.1 'Reweigh Outside Threshold': an adjustment beyond the configured
+    // percentage of the original quantity (legacy ParamsInventory.ReweighThreshold;
+    // ERP1 inventory.reweighThreshold, this plant's live value 5%). Only computable
+    // against a positive original quantity; 0 disables.
+    const thresholdRaw = (await tx.appSetting.findUnique({ where: { key: 'inventory.reweighThreshold' } }))?.value;
+    const threshold = Number(thresholdRaw ?? '5');
+    if (Number.isFinite(threshold) && threshold > 0 && oldQty > 0) {
+      const maxVariance = (oldQty * threshold) / 100;
+      if (Math.abs(delta) > maxVariance) {
+        const r6 = (n: number) => Math.round(n * 1e6) / 1e6;
+        await this.notifications.emit(tx, 'Reweigh Outside Threshold', {
+          securityGroup: item?.securityGroup,
+          ownerId: item?.ownerId,
+          params: {
+            Container: parcel.id, Adjustment: r6(delta), ReweighThreshold: threshold,
+            MaxVariance: r6(maxVariance), OriginalQty: oldQty, Unit: item?.unit,
+            ItemCode: item?.itemCode, Description: item?.description, Lot: sublot?.lot,
+          },
+          links: sublot?.lot ? { Lot: `/lot-tracking?focus=${encodeURIComponent(sublot.lot)}` } : undefined,
+        });
+      }
+    }
+    return { oldQty, newQty: opts.newQty, delta, skipped: false, ...decoration };
+  }
+
+  /**
+   * Adjust an on-hand inventory parcel to a new absolute quantity (a count /
+   * correction — write-on or write-off), with a required reason. Records a
+   * `ChangeSet` Context='COUNT' header (native id) and sets `Inventory.qty` via
+   * the shared per-parcel core; atomic, audited. A no-op (same quantity)
+   * short-circuits without a change set.
+   */
+  async adjust(dto: AdjustInventoryDto, actor: Actor) {
+    if (!dto.reason?.trim()) throw new BadRequestException('A reason is required to adjust inventory.');
+    if (dto.newQty < 0) throw new BadRequestException('The adjusted quantity cannot be negative.');
     const reason = dto.reason.trim();
     const at = new Date();
 
     return this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
-      // Read the current qty under the serialization lock so the recorded delta /
-      // before-value and the no-op check reflect any concurrent adjust that just
-      // committed (the lock makes adjusts mutually exclusive). The parcel can't be
-      // deleted in this app, but guard defensively. Re-assert the unreserved
-      // precondition under the lock too (stage() mints reserved parcels only
-      // at ASM locations, but the fence is cheap and closes the race).
-      const cur = await tx.inventory.findUnique({ where: { id: parcel.id }, select: { qty: true, ordDetailId: true } });
+      // Peek the current qty under the lock to preserve the no-op → no-change-set
+      // behavior (the shared core assumes the change set already exists). The
+      // reserved fence is re-asserted in the core too.
+      const cur = await tx.inventory.findUnique({ where: { id: dto.inventoryId }, select: { qty: true, ordDetailId: true, locationId: true } });
       if (!cur) throw new NotFoundException('Inventory parcel not found');
       if (cur.ordDetailId != null) {
         throw new BadRequestException('This parcel is reserved to a shipping order — unstage it from the order’s staging panel instead.');
       }
+      // Re-assert the SMP/ASM fence BEFORE the no-op short-circuit (setParcelQtyInTx
+      // holds it too, but that runs only for a real change — a no-op adjust on a
+      // sample/assembly parcel must still be refused, matching the pre-refactor path).
+      if (cur.locationId != null) {
+        const loc = await tx.location.findUnique({ where: { id: cur.locationId }, select: { context: true } });
+        if (loc?.context === 'SMP' || loc?.context === 'ASM') {
+          throw new BadRequestException(
+            loc.context === 'ASM'
+              ? 'Assembly parcels are managed from the shipping order’s staging panel — not by plain adjustment.'
+              : 'Sample parcels are managed by the QA sampling flow — not by plain adjustment.',
+          );
+        }
+      }
       const oldQty = cur.qty ?? 0;
-      const delta = dto.newQty - oldQty;
-      if (delta === 0) return { inventoryId: parcel.id, oldQty, newQty: dto.newQty, delta: 0, unchanged: true };
+      if (dto.newQty - oldQty === 0) return { inventoryId: dto.inventoryId, oldQty, newQty: dto.newQty, delta: 0, unchanged: true };
 
       const csId = ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
       await tx.changeSet.create({ data: { id: csId, context: ADJUST_CONTEXT, changeDate: at } });
-      await tx.inventory.update({ where: { id: parcel.id }, data: { qty: dto.newQty } });
-      // Movement ledger: legacy COUNT shape — one US leg whose Qty is the
-      // signed DELTA (counted − book), valued at the lot's unit cost.
-      const unitCost = await this.lotUnitCost(tx, parcel.sublotId);
-      await this.movements.record(tx, [{
-        context: ADJUST_CONTEXT, changeSetId: csId, itemId: parcel.itemId, sublotId: parcel.sublotId,
-        legs: [{
-          context: 'US', ownerId: await this.movements.defaultOwnerId(tx), locationId: parcel.locationId,
-          qty: delta, value: unitCost != null ? this.movements.money4(delta * unitCost) : null,
-        }],
-      }]);
+      const r = await this.setParcelQtyInTx(tx, { parcelId: dto.inventoryId, newQty: dto.newQty, changeSetId: csId, at });
       await this.audit.record(
         {
           action: 'inventory.adjust',
@@ -131,47 +178,16 @@ export class InventoryService {
           actorLabel: actor.label,
           program: 'inventory.adjust',
           summary:
-            `Inventory adjusted${item?.itemCode ? ` — ${item.itemCode}` : ''}${sublot?.lot ? ` lot ${sublot.lot}` : ''}` +
-            `${location?.locationCode ? ` @ ${location.locationCode}` : ''}: ${oldQty} → ${dto.newQty} (${delta > 0 ? '+' : ''}${delta}) — ${reason}`,
+            `Inventory adjusted${r.itemCode ? ` — ${r.itemCode}` : ''}${r.lot ? ` lot ${r.lot}` : ''}` +
+            `${r.locationCode ? ` @ ${r.locationCode}` : ''}: ${r.oldQty} → ${r.newQty} (${r.delta > 0 ? '+' : ''}${r.delta}) — ${reason}`,
           changes: [
-            { tableName: 'Inventory', recordId: String(parcel.id), fieldName: 'qty', oldValue: String(oldQty), newValue: String(dto.newQty) },
+            { tableName: 'Inventory', recordId: String(dto.inventoryId), fieldName: 'qty', oldValue: String(r.oldQty), newValue: String(r.newQty) },
             { tableName: 'ChangeSet', recordId: String(csId), fieldName: 'Context', oldValue: null, newValue: ADJUST_CONTEXT },
           ],
         },
         tx,
       );
-
-      // UG §22.2.1 'Reweigh Outside Threshold': an adjustment beyond the
-      // configured percentage of the original quantity (legacy
-      // ParamsInventory.ReweighThreshold; ERP1 inventory.reweighThreshold,
-      // seeded with this plant's live value 5%). Only computable against a
-      // positive original quantity; 0 disables.
-      const thresholdRaw = (await tx.appSetting.findUnique({ where: { key: 'inventory.reweighThreshold' } }))?.value;
-      const threshold = Number(thresholdRaw ?? '5');
-      if (Number.isFinite(threshold) && threshold > 0 && oldQty > 0) {
-        const maxVariance = (oldQty * threshold) / 100;
-        if (Math.abs(delta) > maxVariance) {
-          const r6 = (n: number) => Math.round(n * 1e6) / 1e6;
-          await this.notifications.emit(tx, 'Reweigh Outside Threshold', {
-            securityGroup: item?.securityGroup,
-            ownerId: item?.ownerId,
-            params: {
-              Container: parcel.id,
-              Adjustment: r6(delta),
-              ReweighThreshold: threshold,
-              MaxVariance: r6(maxVariance),
-              OriginalQty: oldQty,
-              Unit: item?.unit,
-              ItemCode: item?.itemCode,
-              Description: item?.description,
-              Lot: sublot?.lot,
-            },
-            links: sublot?.lot ? { Lot: `/lot-tracking?focus=${encodeURIComponent(sublot.lot)}` } : undefined,
-          });
-        }
-      }
-
-      return { inventoryId: parcel.id, oldQty, newQty: dto.newQty, delta, changeSetId: csId };
+      return { inventoryId: dto.inventoryId, oldQty: r.oldQty, newQty: r.newQty, delta: r.delta, changeSetId: csId };
     });
   }
 

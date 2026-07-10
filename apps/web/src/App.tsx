@@ -26,6 +26,7 @@ import { AssemblyLabelDoc } from './pages/AssemblyLabelDoc';
 import { ContainerLabelDoc } from './pages/ContainerLabelDoc';
 import { Login } from './pages/Login';
 import { LotTracking } from './pages/LotTracking';
+import { InventoryCounts } from './pages/InventoryCounts';
 import { MiscReceipts } from './pages/MiscReceipts';
 import { OrderEditApprovals } from './pages/OrderEditApprovals';
 import { Orders } from './pages/Orders';
@@ -99,6 +100,7 @@ export function App() {
         <Route path="/accounting" element={<Accounting />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/inventory-receipts" element={<MiscReceipts />} />
+        <Route path="/inventory-counts" element={<InventoryCounts />} />
         <Route path="/lot-tracking" element={<LotTracking />} />
         <Route path="/recall" element={<Recall />} />
         <Route path="/users" element={<Users />} />
@@ -143,6 +145,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/item-tests', label: 'Item Tests' },
     { to: '/inventory', label: 'Inventory' },
     { to: '/inventory-receipts', label: 'Inv. Receipts' },
+    { to: '/inventory-counts', label: 'Inv. Counts' },
     { to: '/lot-tracking', label: 'Lot Tracking' },
     { to: '/recall', label: 'Lot Trace' },
     { to: '/disposition-approvals', label: 'QA Approvals' },
