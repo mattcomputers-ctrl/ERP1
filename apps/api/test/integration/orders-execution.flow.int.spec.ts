@@ -1,21 +1,7 @@
 import type { PrismaClient } from '@erp1/db';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Actor } from '../../src/auth/current-user.decorator';
-import {
-  addInventory,
-  addItem,
-  addLocation,
-  addLot,
-  addOrdDetail,
-  addOrdDetailTest,
-  addOrder,
-  addSublot,
-  makePrisma,
-  onHandForLot,
-  resetDb,
-  seedActor,
-  services,
-} from './support';
+import { addInventory, addItem, addLocation, addLot, addOrdDetail, addOrdDetailTest, addOrder, addSublot, grantAllSecuredItems, makePrisma, onHandForLot, resetDb, seedActor, services } from './support';
 
 // Guided batch execution against a real Postgres: per-line record-actuals
 // (dispense lots / FIFO / skip / instruction check-off), batch additions,
@@ -313,6 +299,7 @@ describe('complete() stamps the legacy PK ExecStatus convention + re-rolls cost 
     await prisma.securedItem.create({
       data: { key: 'order.complete', description: 'order.complete', requireReason: true, requireSignature: false, requireWitness: false },
     });
+    await grantAllSecuredItems(prisma, actor.id);
     const { orders } = services(prisma);
     // Dispense 12 of RT (unit cost 5): during execution the divisor is the
     // planned 100 (ActualBatchSize as seeded at creation) -> 0.6/unit.

@@ -90,6 +90,16 @@ end with a fresh handoff prompt.
   (`AuditService.record(entry, tx)`) in the same transaction. E-sig actions
   use SecuredItems + `ESignatureService` (recipe publish / order complete /
   order reverse / order revise / QA disposition are templates).
+- **Auth/e-sig conventions (L19+L22)**: second factors are enforced INSIDE
+  the shared credential check (`verifyAndTrack`) — never add a password
+  verification that bypasses it; TOTP codes are single-use (batch actions
+  verify once via the internal `SecondFactor.preVerified`, recipe
+  replacement is the sole consumer); the five e-sig gates enforce the
+  PERFORM grant with supervisor elevation as the escape hatch (elevator =
+  ledger signer, operator = `onBehalfOf*`); `ESignature.canonical` includes
+  the onBehalfOf pair ONLY when one is set — changing that breaks
+  verification of every pre-existing row; integration fixtures that create
+  secured items must grant them (`grantAllSecuredItems` in support.ts).
 - Boolean mirror columns: explicit `false`, never NULL. Prisma `NOT`/`notIn`
   drop NULL rows; `@IsOptional()` skips ALL validators on explicit null —
   services re-assert numeric positivity. A single `notIn` list breaks past
@@ -137,38 +147,77 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. ~~APPLY THE PARITY SWEEP~~ **DONE** (ccc4f27). ~~QA module group~~
-   **DONE** (9d212cd + dac1af0). ~~SH staging (L113)~~ **DONE 2026-07-09**
-   (4723eed, ASSUMPTIONS §22). ~~Warehouse transfers + returns/credits
-   (L115)~~ **DONE 2026-07-09** (ASSUMPTIONS §23). **12 rows open, all
+1. ~~Parity sweep~~ ✅ · ~~QA module group~~ ✅ · ~~SH staging (L113)~~ ✅ ·
+   ~~Warehouse transfers/returns (L115)~~ ✅ · ~~MFA/TOTP + OIDC SSO
+   (L19)~~ **DONE 2026-07-10** (f6ffdfc, ASSUMPTIONS §24) · ~~Supervisor
+   in-place elevation + perform-grant enforcement (L22, closed the grant
+   chip too)~~ **DONE 2026-07-10** (ASSUMPTIONS §25). **10 rows open, all
    queued builds.**
 2. **Build the remaining gaps** (details + sizes in the sweep doc) — NEXT
-   UP: (a) MFA/TOTP + OIDC SSO (L19 — committed greenfield security
-   requirement, not legacy parity); (b) smaller: supervisor in-place
-   elevation (L22), item/entity edit-form gaps (L31/L33/L34), supplier
-   price-version editor (L37/L48), shipment reversal (L60 — RVSSH restores
-   INTO the ASM assembly per §22 discovery; the reversal must also unwind
-   QtyUsed/shipment_lot and respect reversal-pair invoice math), count
-   sheets (L62), label printing incl. sample labels (L64 — the assembly
-   label doc is the print template precedent), recipe expected-cost
-   sub-recipe rollup (L75 — CostingRecipe already imported, pure rollup
-   extension), doc logo upload (L153).
-3. Background chip pending: enforce secured-item PERFORM grant on
-   order.complete + release.disposition (+ order.revise now).
-4. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
-   YYMMDD### collisions; N-sequence invoice numbers can collide during
-   parallel running (reserve an E-prefix or cut invoicing over in one go);
-   Ordr.ReserveAmount on SH orders (45 rows) — surface on documents?;
-   items.create uses plain autoincrement, not the native-id range (new,
-   2026-07-05).
-5. Before cutover: one real install pass on the actual Proxmox VM; a live
+   UP, smallest-first is fine: item/entity edit-form gaps (L31/L33/L34),
+   supplier price-version editor (L37/L48), shipment reversal (L60 — RVSSH
+   restores INTO the ASM assembly per §22 discovery; the reversal must also
+   unwind QtyUsed/shipment_lot and respect reversal-pair invoice math),
+   count sheets (L62), label printing incl. sample labels (L64 — the
+   assembly label doc is the print template precedent), recipe
+   expected-cost sub-recipe rollup (L75 — CostingRecipe already imported,
+   pure rollup extension), doc logo upload (L153).
+3. OPEN_QUESTIONS: Entra tenant details for SSO (issuer/clientId/secret +
+   sub-vs-oid provisioning — new 2026-07-10); native-Lot marker column if
+   parallel running shows YYMMDD### collisions; N-sequence invoice numbers
+   can collide during parallel running (reserve an E-prefix or cut
+   invoicing over in one go); Ordr.ReserveAmount on SH orders (45 rows) —
+   surface on documents?; items.create uses plain autoincrement, not the
+   native-id range (2026-07-05).
+4. Before cutover: one real install pass on the actual Proxmox VM; a live
    `POST /import/sync` against the real legacy DB (seam-fake tested only —
    NOTE: the first sync after upgrading now also pulls the full 609K+972K
    InvMovement family if the full import predates the mirror); a FULL
    re-import (or re-run) after the numeric(19,4) migration restores the 4dp
    leg values the old money column cent-rounded (ASSUMPTIONS §20.12);
    disable the PlanTrace import spec (the native plan takes over — setting
-   `planning.source` already flips on first recalc).
+   `planning.source` already flips on first recalc). Post-upgrade note: the
+   four newly-enforced perform grants (order.complete/reverse/revise,
+   release.disposition) are seed-granted to ADMIN; grant them to the
+   operator groups on the Secured Items page before parallel running, or
+   operators will need supervisor elevation for every completion.
+
+## State of the world (as of 2026-07-10, L19 MFA/SSO + L22 elevation)
+
+- **MFA/TOTP + OIDC SSO ✅** (f6ffdfc, ASSUMPTIONS §24): TOTP enforced in the
+  ONE shared credential check (`AuthService.verifyAndTrack`) — login, e-sig
+  signer AND witness all demand the code once enrolled (401
+  `{code:'MFA_REQUIRED'}`; wrong codes hit the lockout policy); replay-proof
+  via `users.mfaLastStep` atomic conditional consume; 10 SHA-256 single-use
+  recovery codes (login+disable only, never e-sig); enrollment parks the
+  secret in the session and confirm is CONDITIONAL on the mfaSecret observed
+  at start (409 on double-submit/stale/post-reset — review catch); admin
+  `mfa-reset` + `PATCH /users/:id/password` (SSO-only signers need a
+  password for e-signatures). OIDC via openid-client v6 (ESM — loaded by
+  Node ≥22.12 require(esm)) behind the `OidcProviderService` seam (tests
+  fake it); STRICT pre-provisioned `users.ssoSubject`, no JIT; single-use
+  session handshake; `sso.*` settings gate everything; SSO-only users
+  (create without password). Multi-recipe replacement publishes verify the
+  single-use TOTP ONCE (`SecondFactor.preVerified`, internal-only).
+  Review: 12→10→9 dual-confirmed, all fixed (§24.11). otplib v13 functional
+  API (NOT v12 authenticator).
+- **Supervisor in-place elevation + perform-grant enforcement ✅**
+  (ASSUMPTIONS §25): order.complete/reverse/revise + release.disposition now
+  ENFORCE the secured-item perform grant (like recipe.publish; ADMIN
+  seed-granted; integration fixtures use `grantAllSecuredItems`). Elevation:
+  `elevator*` fields on the five gate DTOs; `ElevationService.verifyElevator`
+  = full credential check (password+TOTP, lockout) + different-user +
+  (perform grant OR canOverride); disposition elevation additionally needs
+  an ENACT capability and short-circuits the request queue. Ledger: elevator
+  = signer, operator in NEW `esignature.onBehalfOfUserId/Label` columns;
+  canonical hash includes the pair when EITHER is set (old rows byte-
+  identical — verifyChain-compatible, tamper test pinned); elevated actions
+  ALWAYS write a ledger row; audit actor stays the operator with
+  `(elevated by X)` in the summary. Web: five signing forms swap to
+  supervisor inputs when the requirement probe returns `allowed:false`.
+  Review: 11→7→4 dual-confirmed, all fixed (§25.7 — the major:
+  onBehalfOfLabel was outside the hash on non-elevated rows).
+- Suites: 114 unit + 473 integration green.
 
 ## State of the world (as of 2026-07-09 latest, SH staging + L115)
 

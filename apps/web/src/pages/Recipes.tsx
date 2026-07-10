@@ -81,6 +81,7 @@ interface ItemOpt {
   description: string | null;
 }
 interface PublishRequirement {
+  allowed: boolean;
   requireReason: boolean;
   requireSignature: boolean;
   requireWitness: boolean;
@@ -789,7 +790,11 @@ function PublishDialog({ id, recipeNumber, onDone, onCancel }: {
   const [witnessEmail, setWitnessEmail] = useState('');
   const [witnessPassword, setWitnessPassword] = useState('');
   const [witnessTotp, setWitnessTotp] = useState('');
+  const [elevEmail, setElevEmail] = useState('');
+  const [elevPassword, setElevPassword] = useState('');
+  const [elevTotp, setElevTotp] = useState('');
   const mfaOn = !!me.data?.mfaEnabled;
+  const blocked = requirement.data?.allowed === false;
 
   const m = useMutation({
     mutationFn: () =>
@@ -799,6 +804,8 @@ function PublishDialog({ id, recipeNumber, onDone, onCancel }: {
         ...(totp ? { totpCode: totp } : {}),
         ...(witnessEmail ? { witnessEmail, witnessPassword } : {}),
         ...(witnessEmail && witnessTotp ? { witnessTotpCode: witnessTotp } : {}),
+        ...(elevEmail ? { elevatorEmail: elevEmail, elevatorPassword: elevPassword } : {}),
+        ...(elevEmail && elevTotp ? { elevatorTotpCode: elevTotp } : {}),
       }),
     onSuccess: (r) =>
       onDone(
@@ -820,12 +827,21 @@ function PublishDialog({ id, recipeNumber, onDone, onCancel }: {
         <Field label={`Reason / revision note${req?.requireReason ? '' : ' (optional)'}`}>
           <Input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} />
         </Field>
-        {req?.requireSignature && (
+        {blocked && (
+          <Field label="Supervisor authorization (email + password + MFA if enrolled)">
+            <div className="flex gap-2">
+              <Input value={elevEmail} onChange={(e) => setElevEmail(e.target.value)} placeholder="supervisor@…" />
+              <Input type="password" autoComplete="off" value={elevPassword} onChange={(e) => setElevPassword(e.target.value)} />
+              <Input autoComplete="one-time-code" value={elevTotp} onChange={(e) => setElevTotp(e.target.value)} placeholder="MFA" className="w-24" />
+            </div>
+          </Field>
+        )}
+        {req?.requireSignature && !blocked && (
           <Field label="Your password (e-signature)">
             <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
           </Field>
         )}
-        {req?.requireSignature && mfaOn && (
+        {req?.requireSignature && !blocked && mfaOn && (
           <Field label="MFA code">
             <Input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} />
           </Field>
@@ -847,8 +863,10 @@ function PublishDialog({ id, recipeNumber, onDone, onCancel }: {
             m.isPending ||
             requirement.isLoading ||
             (req?.requireReason && !reason.trim()) ||
-            (req?.requireSignature && !password) ||
-            (req?.requireSignature && mfaOn && !totp)
+            (req?.requireWitness && (!witnessEmail || !witnessPassword)) ||
+            (blocked
+              ? !elevEmail || !elevPassword
+              : (req?.requireSignature && !password) || (req?.requireSignature && mfaOn && !totp))
           }
         >
           Publish

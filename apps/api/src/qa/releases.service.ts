@@ -5,6 +5,7 @@ import { ApprovalRequestService } from '../approval/approval-request.service';
 import { AuditService, type FieldChange } from '../audit/audit.service';
 import { ESignatureService } from '../audit/esignature.service';
 import { AuthService } from '../auth/auth.service';
+import { ElevationService } from '../auth/elevation.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { PermissionService } from '../auth/permission.service';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
@@ -64,6 +65,7 @@ export class ReleasesService {
     private readonly approvalPolicy: ApprovalPolicyService,
     private readonly approvalRequests: ApprovalRequestService,
     private readonly notifications: NotificationEngineService,
+    private readonly elevation: ElevationService,
   ) {}
 
   /** The effective e-signature/reason requirements for a QA disposition. */
@@ -81,6 +83,7 @@ export class ReleasesService {
     const item = await this.permissions.resolveSecuredItem(actorId, DISPOSITION_SECURED_ITEM);
     const requireWitness = item.requireWitness;
     return {
+      allowed: item.allowed,
       requireReason: !item.exists || item.requireReason,
       requireSignature: !item.exists || item.requireSignature || requireWitness,
       requireWitness,
@@ -114,22 +117,46 @@ export class ReleasesService {
       throw new BadRequestException('A reason is required to change this disposition.');
     }
 
+    // Supervisor in-place elevation (L22): a qualified supervisor's in-place
+    // credentials let a blocked or request-only operator's disposition ENACT
+    // immediately — the supervisor becomes the ledger signer, the operator is
+    // recorded as onBehalfOf.
+    let elevator: { id: string; label: string } | null = null;
+    if (dto.elevatorEmail || dto.elevatorPassword) {
+      elevator = await this.elevation.verifyElevator(actor, dto, DISPOSITION_SECURED_ITEM, 'perform QA dispositions');
+      // Elevation short-circuits the approval queue, so the elevator must be
+      // able to ENACT — the perform grant alone is not authority to approve.
+      const ecaps = await this.approvalPolicy.effectiveForUser(elevator.id);
+      if (!(ecaps.canApprove || ecaps.canApproveChange || ecaps.canOverride || ecaps.noApprovalRequired)) {
+        throw new ForbiddenException(
+          `${elevator.label} cannot enact dispositions (their group has no approval capability).`,
+        );
+      }
+    }
+
     // Approval policy: may this actor's group enact the change, or only request it?
     const caps = await this.approvalPolicy.effectiveForUser(actor.id);
     const canEnactDirectly = caps.canApprove || caps.canApproveChange || caps.canOverride || caps.noApprovalRequired;
-    if (!canEnactDirectly && !caps.canRequestApproval) {
-      throw new ForbiddenException('Your group is not permitted to disposition lots or request disposition approval.');
+    if (!elevator) {
+      if (!req.allowed) {
+        throw new ForbiddenException(
+          'Your group is not permitted to perform QA dispositions (release.disposition secured item) — a supervisor may authorize it in place.',
+        );
+      }
+      if (!canEnactDirectly && !caps.canRequestApproval) {
+        throw new ForbiddenException('Your group is not permitted to disposition lots or request disposition approval.');
+      }
     }
 
     const snap = this.snapFromDto(dto);
 
     // Verify signature(s) before opening the transaction (Argon2 verify is slow).
-    const witness = await this.verifyDispositionSignature(req, dto, actor);
+    const witness = await this.verifyDispositionSignature(req, dto, actor, elevator);
     const at = new Date();
 
     // Request path: capture the request as PENDING (on the shared ApprovalRequest
     // engine) and leave the Release untouched.
-    if (!canEnactDirectly) {
+    if (!canEnactDirectly && !elevator) {
       const payload: DispositionPayload = {
         status: snap.status,
         grade: snap.grade ?? null,
@@ -171,8 +198,9 @@ export class ReleasesService {
       });
     }
 
-    // Direct-enact path (authorized approver / exempt group).
-    const releasedBy = actor.label ?? actor.id;
+    // Direct-enact path (authorized approver / exempt group / elevated).
+    // ReleasedBy names the AUTHORITY: the elevator when elevated.
+    const releasedBy = elevator?.label ?? actor.label ?? actor.id;
     return this.prisma.$transaction(async (tx) => {
       const { u, changes } = await this.applyDispositionToRelease(tx, release, snap, releasedBy, at);
       const auditLog = await this.audit.record(
@@ -183,15 +211,18 @@ export class ReleasesService {
           program: 'qa.disposition',
           summary:
             `Lot disposition (release #${id}) → ${snap.status}${dto.reason ? ` — ${dto.reason}` : ''}` +
+            (elevator ? ` (elevated by ${elevator.label})` : '') +
             (witness ? ` (witnessed by ${witness.label}${dto.witnessExplanation ? `: ${dto.witnessExplanation}` : ''})` : ''),
           changes,
         },
         tx,
       );
-      if (req.requireSignature) {
-        await this.signDisposition(tx, 'QA lot disposition', id, actor, witness, dto.reason ?? null, dto.witnessExplanation ?? null, auditLog.id);
+      // An elevated action ALWAYS leaves a ledger row (the authorization event
+      // must be evidenced) even when the item doesn't demand a signature.
+      if (req.requireSignature || elevator) {
+        await this.signDisposition(tx, 'QA lot disposition', id, actor, witness, dto.reason ?? null, dto.witnessExplanation ?? null, auditLog.id, elevator);
       }
-      return { id, status: u.status, signed: req.requireSignature, witness: witness?.label ?? null };
+      return { id, status: u.status, signed: req.requireSignature || !!elevator, witness: witness?.label ?? null };
     });
   }
 
@@ -472,12 +503,18 @@ export class ReleasesService {
     req: { requireSignature: boolean; requireWitness: boolean },
     dto: { password?: string; totpCode?: string; witnessEmail?: string; witnessPassword?: string; witnessTotpCode?: string },
     actor: Actor,
+    elevator: { id: string; label: string } | null = null,
   ): Promise<{ id: string; label: string } | null> {
-    if (!req.requireSignature) return null;
-    if (!dto.password) throw new BadRequestException('Your password is required to sign this disposition.');
-    // MFA-enrolled signers/witnesses must present their TOTP code too (the
-    // credential check throws 401 MFA_REQUIRED when it is missing).
-    await this.auth.verifyPasswordById(actor.id, dto.password, { totpCode: dto.totpCode });
+    // Elevated action: the ELEVATOR's already-verified credentials are the
+    // signature — the blocked operator's password is not demanded. Witness
+    // requirements still apply.
+    if (!req.requireSignature && !elevator) return null;
+    if (!elevator) {
+      if (!dto.password) throw new BadRequestException('Your password is required to sign this disposition.');
+      // MFA-enrolled signers/witnesses must present their TOTP code too (the
+      // credential check throws 401 MFA_REQUIRED when it is missing).
+      await this.auth.verifyPasswordById(actor.id, dto.password, { totpCode: dto.totpCode });
+    }
 
     if (req.requireWitness && !dto.witnessEmail) {
       throw new BadRequestException('A witness signature is required for this disposition.');
@@ -486,6 +523,9 @@ export class ReleasesService {
       if (!dto.witnessPassword) throw new BadRequestException('Witness password is required.');
       const w = await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false, { totpCode: dto.witnessTotpCode });
       if (w.id === actor.id) throw new BadRequestException('The witness must be a different user.');
+      if (elevator && w.id === elevator.id) {
+        throw new BadRequestException('The witness must differ from the supervising user.');
+      }
       if (!(await this.permissions.canWitness(w.id, DISPOSITION_SECURED_ITEM))) {
         throw new ForbiddenException('That user is not permitted to witness QA dispositions.');
       }
@@ -505,17 +545,20 @@ export class ReleasesService {
     userExplanation: string | null,
     witnessExplanation: string | null,
     auditLogId: bigint,
+    elevator: { id: string; label: string } | null = null,
   ) {
     await this.esign.sign(
       {
         securedItemKey: DISPOSITION_SECURED_ITEM,
         meaning,
-        userId: actor.id,
-        userLabel: actor.label ?? actor.id,
+        userId: (elevator ?? actor).id,
+        userLabel: elevator ? elevator.label : actor.label ?? actor.id,
         userExplanation,
         witnessUserId: witness?.id ?? null,
         witnessLabel: witness?.label ?? null,
         witnessExplanation: witness ? witnessExplanation : null,
+        onBehalfOfUserId: elevator ? actor.id : null,
+        onBehalfOfLabel: elevator ? actor.label ?? actor.id : null,
         masterTable: 'Release',
         masterId: String(releaseId),
         auditLogId,

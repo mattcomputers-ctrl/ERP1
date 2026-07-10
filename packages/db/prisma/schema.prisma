@@ -262,6 +262,11 @@ model ESignature {
   witnessUserId      String?
   witnessLabel       String?
   witnessExplanation String?
+  // Supervisor in-place elevation (L22): when set, userId/userLabel are the
+  // ELEVATOR whose credentials authorized the action, and these carry the
+  // blocked operator it was performed on behalf of.
+  onBehalfOfUserId   String?
+  onBehalfOfLabel    String?
   masterTable        String?
   masterId           String?
   at                 DateTime  @default(now())

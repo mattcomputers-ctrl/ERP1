@@ -1,22 +1,7 @@
 import type { PrismaClient } from '@erp1/db';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Actor } from '../../src/auth/current-user.decorator';
-import {
-  addConsumptionEdge,
-  addInventory,
-  addItem,
-  addLocation,
-  addLot,
-  addOrdDetail,
-  addOrder,
-  addShipmentLot,
-  addSublot,
-  makePrisma,
-  onHandForLot,
-  resetDb,
-  seedActor,
-  services,
-} from './support';
+import { addConsumptionEdge, addInventory, addItem, addLocation, addLot, addOrdDetail, addOrder, addShipmentLot, addSublot, grantAllSecuredItems, makePrisma, onHandForLot, resetDb, seedActor, services } from './support';
 
 // Order reversal (§5): un-complete a batch ERP1 completed — produced on-hand
 // un-minted (identity Lot/Sublot kept), consumed materials restored from the
@@ -75,6 +60,7 @@ async function releasedNativeBatch() {
       data: { key, description: key, requireReason: true, requireSignature: false, requireWitness: false },
     });
   }
+  await grantAllSecuredItems(prisma, actor.id);
 }
 
 /** Execute the fixture order (traced + FIFO + instruction) and complete it. */
@@ -269,6 +255,7 @@ describe('OrdersService.reverse (un-complete a batch)', () => {
         data: { key, description: key, requireReason: true, requireSignature: false, requireWitness: false },
       });
     }
+    await grantAllSecuredItems(prisma, actor.id);
     const { orders } = services(prisma);
     await orders.recordLine(MFPP, 951, { actualQty: 40 }, actor);
     await orders.complete(MFPP, { reason: 'packed', actualBatchSize: 38 }, actor);

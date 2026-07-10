@@ -4,20 +4,7 @@ import { AccountingJournalService } from '../../src/accounting/journal.service';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import type { PrismaService } from '../../src/prisma/prisma.service';
 import { SettingsService } from '../../src/settings/settings.service';
-import {
-  addEntity,
-  addInventory,
-  addItem,
-  addLocation,
-  addLot,
-  addOrdDetail,
-  addOrder,
-  addSublot,
-  makePrisma,
-  resetDb,
-  seedActor,
-  services,
-} from './support';
+import { addEntity, addInventory, addItem, addLocation, addLot, addOrdDetail, addOrder, addSublot, grantAllSecuredItems, makePrisma, resetDb, seedActor, services } from './support';
 
 // Native InvMovement/InvMovementDtl emission: every ERP1 inventory writer posts
 // legacy-vocabulary movement legs in the same transaction, so the §18 movement /
@@ -233,6 +220,7 @@ describe('batch execution emits CMNGL consumption + PCKAGE production', () => {
         data: { key, description: key, requireReason: true, requireSignature: false, requireWitness: false },
       });
     }
+    await grantAllSecuredItems(prisma, actor.id);
     await addLot(prisma, { lot: 'PROD1', itemId: 1, ordDetailId: 900 });
     await addLot(prisma, { lot: 'RT', itemId: 2, unitCost: 5 });
     await addSublot(prisma, { id: 1, lot: 'RT' });
@@ -444,6 +432,7 @@ describe('the golden invariant across a full mixed flow', () => {
     await prisma.securedItem.create({
       data: { key: 'order.complete', description: 'complete', requireReason: true, requireSignature: false, requireWitness: false },
     });
+    await grantAllSecuredItems(prisma, actor.id);
     await orders.recordLine(800, 901, { actualQty: 20, lots: [{ lot: rawLot, qty: 20 }] }, actor);
     await orders.complete(800, { reason: 'done', actualBatchSize: 50 }, actor);
     // Adjust the produced stock, move some of it, ship some of it.
@@ -481,6 +470,7 @@ describe('review-round regressions (2026-07-09)', () => {
         data: { key, description: key, requireReason: true, requireSignature: false, requireWitness: false },
       });
     }
+    await grantAllSecuredItems(prisma, actor.id);
   }
 
   it('a post-completion FIFO consume that draws the produced lot still emits its leg (ledger === on-hand)', async () => {

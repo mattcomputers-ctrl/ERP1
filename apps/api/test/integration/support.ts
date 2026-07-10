@@ -8,6 +8,7 @@ import { ReleasesService } from '../../src/qa/releases.service';
 import { SamplingService } from '../../src/qa/sampling.service';
 import { ESignatureService } from '../../src/audit/esignature.service';
 import { AuthService } from '../../src/auth/auth.service';
+import { ElevationService } from '../../src/auth/elevation.service';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import { PermissionService } from '../../src/auth/permission.service';
 import { GenealogyService } from '../../src/genealogy/genealogy.service';
@@ -116,6 +117,7 @@ export function services(prisma: PrismaClient) {
   const party = new PartyService(p);
   const auth = new AuthService(p, audit);
   const permissions = new PermissionService(p);
+  const elevation = new ElevationService(p, auth, permissions);
   const esign = new ESignatureService(p);
   const valuation = new ValuationService(p, settings);
   const movements = new MovementRecorderService();
@@ -123,7 +125,7 @@ export function services(prisma: PrismaClient) {
   const salesPricing = new SalesPricingService(p, audit, party);
   const approvalPolicy = new ApprovalPolicyService(p, audit);
   const approvalRequests = new ApprovalRequestService(p);
-  const recipeEditor = new RecipeEditorService(p, audit, esign, auth, permissions);
+  const recipeEditor = new RecipeEditorService(p, audit, esign, auth, permissions, elevation);
   const notifications = new NotificationEngineService(p);
   const sampling = new SamplingService(movements, notifications);
   const purchasing = new PurchasingService(p, settings, audit, party, valuation, movements, priceVersions, approvalPolicy, approvalRequests, notifications, sampling);
@@ -132,12 +134,13 @@ export function services(prisma: PrismaClient) {
     settings,
     audit,
     auth,
+    esign,
     party,
     valuation,
     movements,
     priceVersions,
     salesPricing,
-    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation, movements, approvalPolicy, approvalRequests, notifications, sampling),
+    orders: new OrdersService(p, settings, audit, party, auth, permissions, esign, valuation, movements, approvalPolicy, approvalRequests, notifications, sampling, elevation),
     approvalRequests,
     purchasing,
     shipping: new ShippingService(p, audit, party, salesPricing, approvalPolicy, approvalRequests),
@@ -149,7 +152,7 @@ export function services(prisma: PrismaClient) {
     approvalPolicy,
     notifications,
     notificationRules: new NotificationsService(p, audit),
-    releases: new ReleasesService(p, audit, esign, auth, permissions, approvalPolicy, approvalRequests, notifications),
+    releases: new ReleasesService(p, audit, esign, auth, permissions, approvalPolicy, approvalRequests, notifications, elevation),
     roles: new RolesService(p, audit),
     users: new UsersService(p, auth, audit),
     securedItems: new SecuredItemsService(p, audit),
@@ -164,6 +167,25 @@ export function services(prisma: PrismaClient) {
     tax: new TaxService(p),
     invoices: new InvoicesService(p, settings, party, new TaxService(p), audit),
   };
+}
+
+/**
+ * Grant the user ALLOW on every secured item that currently exists (via a
+ * fresh role). Fixtures that create an ENABLED secured item must grant it —
+ * L22 enforces the PERFORM grant at the gates (a user whose groups hold no
+ * grant is refused unless a supervisor elevates in place).
+ */
+export async function grantAllSecuredItems(prisma: PrismaClient, userId: string): Promise<void> {
+  const items = await prisma.securedItem.findMany({ select: { id: true } });
+  if (!items.length) return;
+  const role = await prisma.role.create({
+    data: { code: `si-grant-${userId.slice(0, 12)}-${items.length}`, name: 'secured-item grants' },
+    select: { id: true },
+  });
+  await prisma.roleSecuredItem.createMany({
+    data: items.map((i) => ({ roleId: role.id, securedItemId: i.id, allow: true, allowWitness: true })),
+  });
+  await prisma.userRole.create({ data: { userId, roleId: role.id } });
 }
 
 /**

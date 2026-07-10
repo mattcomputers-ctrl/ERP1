@@ -1731,3 +1731,65 @@ are ERP1 design choices, not legacy discovery:
       after a disable.
     - Refuted (split verdict): the failed-login counter's read-modify-write
       race — pre-existing pattern, unchanged by this build.
+
+## Supervisor in-place elevation + perform-grant enforcement (§25 / L22, built 2026-07-10)
+
+Greenfield (brief §5; ARCHITECTURE commits to it): the legacy at-station
+credential swap existed but was NEVER used in this install (all 17,512
+signed secured-item responses were self-signed — sweep L22 evidence), so
+semantics are ERP1 design decisions:
+
+1. **Perform-grant enforcement closed the pending chip**: order.complete /
+   order.reverse / order.revise-publish / release.disposition now refuse an
+   actor whose groups hold no ALLOW grant on the ENABLED secured item —
+   exactly like recipe.publish always did (missing/disabled item = no gate;
+   seed auto-grants ADMIN). The refusal message points at elevation.
+2. **Elevation model**: elevator credentials ride the SAME action DTO
+   (`elevatorEmail/elevatorPassword/elevatorTotpCode` on the five gates).
+   `ElevationService.verifyElevator` (AuthModule): full credential check
+   (password + enrolled TOTP, lockout-tracked, same `validateUser` path as
+   login/witness), MUST be a different user, and must be qualified — the
+   secured item's perform grant OR the `canOverride` approval capability.
+   Elevation is honored whenever supplied (even for an allowed operator —
+   legacy credential-swap semantics).
+3. **Ledger semantics**: the elevator is the SIGNER (`userId/userLabel`);
+   the blocked operator lands in the NEW nullable
+   `esignature.onBehalfOfUserId/onBehalfOfLabel` columns; the audit actor
+   stays the operator (their session performed the action). The canonical
+   hash payload includes the onBehalfOf fields ONLY when set, so every
+   pre-existing row still canonicalizes byte-identically (verifyChain
+   compatible — pinned in tests). An elevated action ALWAYS writes a ledger
+   row, even when the item demands no signature: the authorization event
+   must be evidenced. When elevated, the operator's own password is NOT
+   demanded (the elevator's credentials are the signature); witnesses must
+   differ from both operator and elevator.
+4. **Disposition specifics**: elevation short-circuits the approval queue
+   (request-only operator + qualified supervisor → ENACT immediately), so
+   the elevator must additionally hold an ENACT capability (canApprove /
+   canApproveChange / canOverride / noApprovalRequired) — the perform grant
+   alone is not authority to approve. ReleasedBy names the elevator (the
+   authority). The approve-queue endpoints have NO elevation (approvers are
+   qualified by definition); PO/SH line edits + order edit keep their
+   queues (elevation scope = the five e-sig gates, per the sweep).
+5. **Recipe replacement** is NOT elevatable (its DTO carries no elevator
+   fields): the runner needs the recipe.publish grant up front — a blocked
+   runner gets the existing clear refusal.
+6. Requirements endpoints (`complete/reverse/revise/disposition/publish
+   -requirement`) now expose `allowed`; the five web signing forms swap the
+   self-password inputs for supervisor email/password/MFA inputs when
+   blocked (amber), and canSubmit mirrors the server.
+7. **Review round (§25.7, 2026-07-10)**: 5 lenses → 11 raw → 7 unique → 4
+   dual-confirmed, all fixed: (major) `onBehalfOfLabel` was outside the hash
+   whenever `onBehalfOfUserId` was null — a stored, displayed ledger column
+   an insider could falsify without verifyChain noticing; the canonical
+   payload now pulls BOTH fields in when EITHER is set (old rows have both
+   null → bytes unchanged; tamper test pinned). (minors) reverse() now
+   reports `signed` like its siblings for elevated no-signature actions;
+   all five gates' audit summaries carry `(elevated by X)` (only
+   disposition did); the recipe publish dialog enforces the witness
+   requirement in its disabled logic. Refuted on split verdicts: stale
+   PENDING request surviving an elevated disposition (approval CAS +
+   re-read make the replay harmless), web reachability of request-only
+   elevation (the disposition form shows elevation whenever blocked), and
+   the SSO-only supervisor message (pre-existing generic-credential
+   behavior, L19-documented).

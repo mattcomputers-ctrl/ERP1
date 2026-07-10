@@ -4,17 +4,7 @@ import type { Actor } from '../../src/auth/current-user.decorator';
 import { AuthService } from '../../src/auth/auth.service';
 import { AuditService } from '../../src/audit/audit.service';
 import type { PrismaService } from '../../src/prisma/prisma.service';
-import {
-  addItem,
-  addOrdDetail,
-  addOrdDetailCommit,
-  addOrdDetailTest,
-  addOrder,
-  makePrisma,
-  resetDb,
-  seedActor,
-  services,
-} from './support';
+import { addItem, addOrdDetail, addOrdDetailCommit, addOrdDetailTest, addOrder, grantAllSecuredItems, makePrisma, resetDb, seedActor, services } from './support';
 
 // Order-edit revisions (§5, UG §7): revise a RELEASED production order via a
 // draft (OrdrEdit STD) that flips the order to EDT — blocking execution and
@@ -63,6 +53,7 @@ async function releasedBatch() {
   await prisma.securedItem.create({
     data: { key: 'order.revise', description: 'revise', requireReason: false, requireSignature: false, requireWitness: false },
   });
+  await grantAllSecuredItems(prisma, actor.id);
   await prisma.test.create({ data: { test: 'VISC' } });
 }
 
@@ -471,6 +462,9 @@ describe('order revisions: publish', () => {
       select: { id: true, displayName: true },
     });
     const signer: Actor = { id: u.id, label: u.displayName };
+    // The signer needs the PERFORM grant (enforced since L22) — this test is
+    // about the SIGNATURE requirement, not the grant gate.
+    await grantAllSecuredItems(prisma, u.id);
 
     const { orders } = services(prisma);
     const { editId } = await orders.createRevision(ORDER, signer);

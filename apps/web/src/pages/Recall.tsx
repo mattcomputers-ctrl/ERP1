@@ -401,7 +401,7 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
   const me = useMe();
   const req = useQuery({
     queryKey: ['disposition-requirement', me.data?.id],
-    queryFn: () => api.get<{ requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>('/releases/disposition-requirement'),
+    queryFn: () => api.get<{ allowed: boolean; requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>('/releases/disposition-requirement'),
   });
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState(currentStatus && DISPO_STATUSES.includes(currentStatus) ? currentStatus : 'Approved');
@@ -415,6 +415,9 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
   const [witnessPassword, setWitnessPassword] = useState('');
   const [witnessTotp, setWitnessTotp] = useState('');
   const [witnessExplanation, setWitnessExplanation] = useState('');
+  const [elevEmail, setElevEmail] = useState('');
+  const [elevPassword, setElevPassword] = useState('');
+  const [elevTotp, setElevTotp] = useState('');
 
   const r = req.data;
   const sig = !!r?.requireSignature;
@@ -422,6 +425,7 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
   const witnessRequired = !!r?.requireWitness;
   const witnessOpen = witnessRequired || showWitness;
   const mfaOn = !!me.data?.mfaEnabled;
+  const blocked = !!r && r.allowed === false;
 
   const m = useMutation({
     mutationFn: () =>
@@ -436,16 +440,21 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
         witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
         witnessTotpCode: witnessOpen && witnessTotp ? witnessTotp : undefined,
         witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
+        elevatorEmail: elevEmail || undefined,
+        elevatorPassword: elevPassword || undefined,
+        elevatorTotpCode: elevTotp || undefined,
       }),
     // A request-only group's disposition comes back pending (awaiting approval) —
     // keep the panel open to show that; an enacted one closes.
-    onSuccess: (res) => { setPassword(''); setTotp(''); setWitnessPassword(''); setWitnessTotp(''); if (!res.pending) setOpen(false); onDone(); },
+    onSuccess: (res) => { setPassword(''); setTotp(''); setWitnessPassword(''); setWitnessTotp(''); setElevPassword(''); setElevTotp(''); if (!res.pending) setOpen(false); onDone(); },
   });
 
   const canSubmit =
     !req.isLoading &&
     (!reasonRequired || !!reason.trim()) &&
-    (!sig || (!!password && (!mfaOn || !!totp))) &&
+    (blocked
+      ? !!elevEmail && !!elevPassword
+      : !sig || (!!password && (!mfaOn || !!totp))) &&
     (!witnessRequired || (!!witnessEmail && !!witnessPassword));
 
   if (!open) {
@@ -467,9 +476,19 @@ function DispositionControls({ releaseId, currentStatus, onDone }: { releaseId: 
         <Field label="Grade"><Input value={grade} onChange={(e) => setGrade(e.target.value)} placeholder="e.g. GMP" className="w-28" /></Field>
         <Field label="Expiry"><Input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className="w-40" /></Field>
         <Field label={reasonRequired ? 'Reason (required)' : 'Reason'}><Input value={reason} onChange={(e) => setReason(e.target.value)} className="w-48" /></Field>
-        {sig && <Field label="Your password (sign)"><Input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} className="w-44" /></Field>}
-        {sig && mfaOn && <Field label="MFA code"><Input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} className="w-28" /></Field>}
+        {sig && !blocked && <Field label="Your password (sign)"><Input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} className="w-44" /></Field>}
+        {sig && !blocked && mfaOn && <Field label="MFA code"><Input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} className="w-28" /></Field>}
       </div>
+      {blocked && (
+        <div className="mt-2 flex flex-wrap items-end gap-2">
+          <span className="w-full text-xs text-amber-700">
+            Your group is not permitted to perform dispositions — a supervisor can authorize it here (their signature goes on the ledger).
+          </span>
+          <Field label="Supervisor email"><Input value={elevEmail} onChange={(e) => setElevEmail(e.target.value)} className="w-52" /></Field>
+          <Field label="Supervisor password"><Input type="password" autoComplete="off" value={elevPassword} onChange={(e) => setElevPassword(e.target.value)} className="w-44" /></Field>
+          <Field label="Supervisor MFA (if enrolled)"><Input autoComplete="one-time-code" value={elevTotp} onChange={(e) => setElevTotp(e.target.value)} className="w-36" /></Field>
+        </div>
+      )}
       {sig && witnessOpen && (
         <div className="mt-2 flex flex-wrap items-end gap-2">
           <Field label={`Witness email${witnessRequired ? ' (required)' : ''}`}><Input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} className="w-52" /></Field>

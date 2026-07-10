@@ -5,6 +5,7 @@ import { Prisma } from '@erp1/db';
 import { AuditService, type FieldChange } from '../audit/audit.service';
 import { ESignatureService } from '../audit/esignature.service';
 import { AuthService } from '../auth/auth.service';
+import { ElevationService } from '../auth/elevation.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { PermissionService } from '../auth/permission.service';
 import { NATIVE_ID_ALLOC_LOCK, NATIVE_ID_BASE } from '../common/locks';
@@ -62,6 +63,7 @@ export class RecipeEditorService {
     private readonly esign: ESignatureService,
     private readonly auth: AuthService,
     private readonly permissions: PermissionService,
+    private readonly elevation: ElevationService,
   ) {}
 
   // --- create / clone ------------------------------------------------------
@@ -628,13 +630,21 @@ export class RecipeEditorService {
     }
 
     const req = await this.publishRequirement(actor.id);
-    if (!req.allowed) {
-      throw new ForbiddenException('Your group is not permitted to publish recipes (recipe.publish secured item).');
+    // Supervisor in-place elevation (L22): a blocked publisher may proceed
+    // when a qualified supervisor authenticates in place (they become the
+    // ledger signer, the operator is recorded as onBehalfOf).
+    let elevator: { id: string; label: string } | null = null;
+    if (dto.elevatorEmail || dto.elevatorPassword) {
+      elevator = await this.elevation.verifyElevator(actor, dto, PUBLISH_SECURED_ITEM, 'publish recipes');
+    } else if (!req.allowed) {
+      throw new ForbiddenException(
+        'Your group is not permitted to publish recipes (recipe.publish secured item) — a supervisor may authorize it in place.',
+      );
     }
     if (req.requireReason && !dto.reason?.trim()) {
       throw new BadRequestException('A reason is required to publish this recipe.');
     }
-    const witness = await this.verifySignature(req, dto, actor, 'publish this recipe', opts.secondFactorPreVerified);
+    const witness = await this.verifySignature(req, dto, actor, 'publish this recipe', opts.secondFactorPreVerified, elevator);
     const at = new Date();
 
     return this.prisma.$transaction(async (tx) => {
@@ -675,23 +685,28 @@ export class RecipeEditorService {
           summary:
             `Recipe ${recipe.recipeNumber} published${dto.reason ? ` — ${dto.reason.trim()}` : ''}` +
             (siblings.length ? ` (deactivated ${siblings.map((s) => s.recipeNumber).join(', ')})` : '') +
+            (elevator ? ` (elevated by ${elevator.label})` : '') +
             (witness ? ` (witnessed by ${witness.label})` : ''),
           changes,
         },
         tx,
       );
 
-      if (req.requireSignature) {
+      // An elevated action ALWAYS leaves a ledger row (the authorization event
+      // must be evidenced) even when the item doesn't demand a signature.
+      if (req.requireSignature || elevator) {
         await this.esign.sign(
           {
             securedItemKey: PUBLISH_SECURED_ITEM,
             meaning: 'Recipe publication',
-            userId: actor.id,
-            userLabel: actor.label ?? actor.id,
+            userId: (elevator ?? actor).id,
+            userLabel: elevator ? elevator.label : actor.label ?? actor.id,
             userExplanation: dto.reason?.trim() || null,
             witnessUserId: witness?.id ?? null,
             witnessLabel: witness?.label ?? null,
             witnessExplanation: witness ? (dto.witnessExplanation?.trim() || null) : null,
+            onBehalfOfUserId: elevator ? actor.id : null,
+            onBehalfOfLabel: elevator ? actor.label ?? actor.id : null,
             masterTable: 'Recipe',
             masterId: String(id),
             auditLogId: auditLog.id,
@@ -924,18 +939,24 @@ export class RecipeEditorService {
     actor: Actor,
     what: string,
     secondFactorPreVerified = false,
+    elevator: { id: string; label: string } | null = null,
   ): Promise<{ id: string; label: string } | null> {
-    if (!req.requireSignature) return null;
-    if (!dto.password) throw new BadRequestException(`Your password is required to ${what}.`);
-    // MFA-enrolled signers/witnesses must present their TOTP code too (the
-    // credential check throws 401 MFA_REQUIRED when it is missing). For a
-    // multi-recipe replacement job the single-use code was verified once up
-    // front (preVerified) — passwords are still re-verified per publish.
-    await this.auth.verifyPasswordById(
-      actor.id,
-      dto.password,
-      secondFactorPreVerified ? { preVerified: true } : { totpCode: dto.totpCode },
-    );
+    // Elevated action: the ELEVATOR's already-verified credentials are the
+    // signature — the blocked operator's password is not demanded. Witness
+    // requirements still apply.
+    if (!req.requireSignature && !elevator) return null;
+    if (!elevator) {
+      if (!dto.password) throw new BadRequestException(`Your password is required to ${what}.`);
+      // MFA-enrolled signers/witnesses must present their TOTP code too (the
+      // credential check throws 401 MFA_REQUIRED when it is missing). For a
+      // multi-recipe replacement job the single-use code was verified once up
+      // front (preVerified) — passwords are still re-verified per publish.
+      await this.auth.verifyPasswordById(
+        actor.id,
+        dto.password,
+        secondFactorPreVerified ? { preVerified: true } : { totpCode: dto.totpCode },
+      );
+    }
 
     if (req.requireWitness && !dto.witnessEmail) {
       throw new BadRequestException(`A witness signature is required to ${what}.`);
@@ -949,6 +970,9 @@ export class RecipeEditorService {
         secondFactorPreVerified ? { preVerified: true } : { totpCode: dto.witnessTotpCode },
       );
       if (w.id === actor.id) throw new BadRequestException('The witness must be a different user.');
+      if (elevator && w.id === elevator.id) {
+        throw new BadRequestException('The witness must differ from the supervising user.');
+      }
       if (!(await this.permissions.canWitness(w.id, PUBLISH_SECURED_ITEM))) {
         throw new ForbiddenException('That user is not permitted to witness recipe publication.');
       }

@@ -15,6 +15,11 @@ export interface SignatureEntry {
   witnessUserId?: string | null;
   witnessLabel?: string | null;
   witnessExplanation?: string | null;
+  /** Supervisor in-place elevation: userId/userLabel are the ELEVATOR whose
+   * credentials authorized the action; these carry the blocked operator it
+   * was performed on behalf of. */
+  onBehalfOfUserId?: string | null;
+  onBehalfOfLabel?: string | null;
   /** Affected master record, for lookup (e.g. masterTable='Ordr', masterId='123'). */
   masterTable?: string | null;
   masterId?: string | null;
@@ -59,6 +64,8 @@ export class ESignatureService {
         witnessUserId: entry.witnessUserId ?? null,
         witnessLabel: entry.witnessLabel ?? null,
         witnessExplanation: entry.witnessExplanation ?? null,
+        onBehalfOfUserId: entry.onBehalfOfUserId ?? null,
+        onBehalfOfLabel: entry.onBehalfOfLabel ?? null,
         masterTable: entry.masterTable ?? null,
         masterId: entry.masterId ?? null,
         at,
@@ -115,6 +122,8 @@ function canonical(
     witnessUserId?: string | null;
     witnessLabel?: string | null;
     witnessExplanation?: string | null;
+    onBehalfOfUserId?: string | null;
+    onBehalfOfLabel?: string | null;
     masterTable?: string | null;
     masterId?: string | null;
     auditLogId?: bigint | null;
@@ -131,6 +140,15 @@ function canonical(
     witnessUserId: e.witnessUserId ?? null,
     witnessLabel: e.witnessLabel ?? null,
     witnessExplanation: e.witnessExplanation ?? null,
+    // Included ONLY when set: rows signed before the elevation columns existed
+    // (and every non-elevated row, where both are null) must canonicalize
+    // byte-identically to how they were hashed, or verifyChain would report
+    // the whole ledger broken. EITHER field being set pulls BOTH into the
+    // hash — otherwise a stored-but-unhashed onBehalfOfLabel on a
+    // null-userId row could be falsified without verifyChain noticing.
+    ...(e.onBehalfOfUserId != null || e.onBehalfOfLabel != null
+      ? { onBehalfOfUserId: e.onBehalfOfUserId ?? null, onBehalfOfLabel: e.onBehalfOfLabel ?? null }
+      : {}),
     masterTable: e.masterTable ?? null,
     masterId: e.masterId ?? null,
     auditLogId: e.auditLogId != null ? e.auditLogId.toString() : null,

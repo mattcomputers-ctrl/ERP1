@@ -2,20 +2,7 @@ import type { PrismaClient } from '@erp1/db';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import { NATIVE_ID_BASE } from '../../src/common/locks';
-import {
-  addEntity,
-  addInventory,
-  addItem,
-  addLocation,
-  addLot,
-  addOrdDetail,
-  addOrder,
-  addSublot,
-  makePrisma,
-  resetDb,
-  seedActor,
-  services,
-} from './support';
+import { addEntity, addInventory, addItem, addLocation, addLot, addOrdDetail, addOrder, addSublot, grantAllSecuredItems, makePrisma, resetDb, seedActor, services } from './support';
 
 // Native QA sampling (ASSUMPTIONS §21): every ERP1-born sublot gets a Release
 // at birth — Approved at the receiving/opening seams, Hold + a native sample
@@ -54,11 +41,13 @@ async function relaxCompleteSignature() {
   await prisma.securedItem.create({
     data: { key: 'order.complete', description: 'order.complete', requireReason: false, requireSignature: false, requireWitness: false },
   });
+  await grantAllSecuredItems(prisma, actor.id);
 }
 async function relaxReverseSignature() {
   await prisma.securedItem.create({
     data: { key: 'order.reverse', description: 'order.reverse', requireReason: false, requireSignature: false, requireWitness: false },
   });
+  await grantAllSecuredItems(prisma, actor.id);
 }
 
 /** A Released MFBA order producing item 1 (lot PROD1) with one FIFO raw line. */
@@ -448,6 +437,7 @@ describe('Native CofA header', () => {
     await prisma.securedItem.create({
       data: { key: 'release.disposition', description: 'x', requireReason: false, requireSignature: false, requireWitness: false },
     });
+    await grantAllSecuredItems(prisma, actor.id);
     await prisma.user.update({
       where: { id: actor.id },
       data: {

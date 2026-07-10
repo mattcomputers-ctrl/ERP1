@@ -5,6 +5,7 @@ import { ApprovalRequestService } from '../approval/approval-request.service';
 import { AuditService, type FieldChange } from '../audit/audit.service';
 import { ESignatureService } from '../audit/esignature.service';
 import { AuthService } from '../auth/auth.service';
+import { ElevationService } from '../auth/elevation.service';
 import type { Actor } from '../auth/current-user.decorator';
 import { PermissionService } from '../auth/permission.service';
 import { buildList, type ListQuery } from '../common/list';
@@ -129,6 +130,7 @@ export class OrdersService {
     private readonly approvalRequests: ApprovalRequestService,
     private readonly notifications: NotificationEngineService,
     private readonly sampling: SamplingService,
+    private readonly elevation: ElevationService,
   ) {}
 
   async list(query: OrdersListQuery) {
@@ -1425,16 +1427,43 @@ export class OrdersService {
    * Effective requirements for a secured order action. Fail-safe: a missing or
    * disabled secured item must NOT silently drop the control, so a signature +
    * reason are required unless an *enabled* item explicitly relaxes them; a
-   * required witness implies a required signature.
+   * required witness implies a required signature. `allowed` is the actor's
+   * PERFORM grant (true when the item is missing/disabled — no gate).
    */
   private async securedRequirements(actorId: string, securedItemKey: string) {
     const item = await this.permissions.resolveSecuredItem(actorId, securedItemKey);
     const requireWitness = item.requireWitness;
     return {
+      allowed: item.allowed,
       requireReason: !item.exists || item.requireReason,
       requireSignature: !item.exists || item.requireSignature || requireWitness,
       requireWitness,
     };
+  }
+
+  /**
+   * Resolve supervisor in-place elevation for a secured order action: when
+   * elevator credentials are supplied they are verified (password + enrolled
+   * TOTP, different user, perform grant or Override); otherwise a blocked
+   * actor is refused with a pointer at elevation. Returns the elevator
+   * identity (the ledger signer) or null for an ordinary self-signed action.
+   */
+  private async resolveElevation(
+    actor: Actor,
+    dto: { elevatorEmail?: string; elevatorPassword?: string; elevatorTotpCode?: string },
+    allowed: boolean,
+    securedItemKey: string,
+    what: string,
+  ): Promise<{ id: string; label: string } | null> {
+    if (dto.elevatorEmail || dto.elevatorPassword) {
+      return this.elevation.verifyElevator(actor, dto, securedItemKey, what);
+    }
+    if (!allowed) {
+      throw new ForbiddenException(
+        `Your group is not permitted to ${what} (${securedItemKey} secured item) — a supervisor may authorize it in place.`,
+      );
+    }
+    return null;
   }
 
   /**
@@ -1450,15 +1479,21 @@ export class OrdersService {
     req: { requireSignature: boolean; requireWitness: boolean },
     securedItemKey: string,
     msgs: { password: string; witnessRequired: string; witnessNotPermitted: string },
+    elevator: { id: string; label: string } | null = null,
   ): Promise<{ id: string; label: string } | null> {
-    if (!req.requireSignature) return null;
-    if (!dto.password) {
-      throw new BadRequestException(msgs.password);
+    // Elevated action: the ELEVATOR's already-verified credentials are the
+    // signature — the blocked operator's password is not demanded (they may
+    // hold no signing authority at all). Witness requirements still apply.
+    if (!req.requireSignature && !elevator) return null;
+    if (!elevator) {
+      if (!dto.password) {
+        throw new BadRequestException(msgs.password);
+      }
+      // MFA-enrolled signers/witnesses must present their TOTP code too — the
+      // second factor is enforced inside the credential check (401 MFA_REQUIRED
+      // when missing), so no signature path downgrades to password-only.
+      await this.auth.verifyPasswordById(actor.id, dto.password, { totpCode: dto.totpCode });
     }
-    // MFA-enrolled signers/witnesses must present their TOTP code too — the
-    // second factor is enforced inside the credential check (401 MFA_REQUIRED
-    // when missing), so no signature path downgrades to password-only.
-    await this.auth.verifyPasswordById(actor.id, dto.password, { totpCode: dto.totpCode });
 
     if (req.requireWitness && !dto.witnessEmail) {
       throw new BadRequestException(msgs.witnessRequired);
@@ -1467,6 +1502,9 @@ export class OrdersService {
     if (!dto.witnessPassword) throw new BadRequestException('Witness password is required.');
     const w = await this.auth.validateUser(dto.witnessEmail, dto.witnessPassword, false, { totpCode: dto.witnessTotpCode });
     if (w.id === actor.id) throw new BadRequestException('The witness must be a different user.');
+    if (elevator && w.id === elevator.id) {
+      throw new BadRequestException('The witness must differ from the supervising user.');
+    }
     if (!(await this.permissions.canWitness(w.id, securedItemKey))) {
       throw new ForbiddenException(msgs.witnessNotPermitted);
     }
@@ -1489,11 +1527,12 @@ export class OrdersService {
     if (req.requireReason && !dto.reason?.trim()) {
       throw new BadRequestException('A reason is required to complete this order.');
     }
+    const elevator = await this.resolveElevation(actor, dto, req.allowed, COMPLETE_SECURED_ITEM, 'complete orders');
     const witness = await this.verifySignatures(actor, dto, req, COMPLETE_SECURED_ITEM, {
       password: 'Your password is required to sign this completion.',
       witnessRequired: 'A witness signature is required to complete this order.',
       witnessNotPermitted: 'That user is not permitted to witness order completion.',
-    });
+    }, elevator);
 
     // Yield check (legacy ParamsBatchExecution.YieldTolerance, live value 5%):
     // an actual batch size deviating from the PLANNED size (ActualBatchSize
@@ -1653,6 +1692,7 @@ export class OrdersService {
           program: 'orders.complete',
           summary:
             `Order #${id} completed${dto.reason ? ` — ${dto.reason}` : ''}` +
+            (elevator ? ` (elevated by ${elevator.label})` : '') +
             (witness
               ? ` (witnessed by ${witness.label}${dto.witnessExplanation ? `: ${dto.witnessExplanation}` : ''})`
               : ''),
@@ -1661,17 +1701,21 @@ export class OrdersService {
         tx,
       );
 
-      if (req.requireSignature) {
+      // An elevated action ALWAYS leaves a ledger row (the authorization event
+      // must be evidenced) even when the item doesn't demand a signature.
+      if (req.requireSignature || elevator) {
         await this.esign.sign(
           {
             securedItemKey: COMPLETE_SECURED_ITEM,
             meaning: 'Order completion',
-            userId: actor.id,
-            userLabel: actor.label ?? actor.id,
+            userId: (elevator ?? actor).id,
+            userLabel: elevator ? elevator.label : actor.label ?? actor.id,
             userExplanation: dto.reason ?? null,
             witnessUserId: witness?.id ?? null,
             witnessLabel: witness?.label ?? null,
             witnessExplanation: witness ? dto.witnessExplanation ?? null : null,
+            onBehalfOfUserId: elevator ? actor.id : null,
+            onBehalfOfLabel: elevator ? actor.label ?? actor.id : null,
             masterTable: 'Ordr',
             masterId: String(id),
             auditLogId: auditLog.id,
@@ -1682,7 +1726,7 @@ export class OrdersService {
 
       await this.notifications.emitOrderEvent(tx, 'Mark Manufacturing Order Complete', id, actor);
 
-      return { id, status: u.status, signed: req.requireSignature, witness: witness?.label ?? null, warnings, qa: qaCreated };
+      return { id, status: u.status, signed: req.requireSignature || !!elevator, witness: witness?.label ?? null, warnings, qa: qaCreated };
     });
   }
 
@@ -1801,11 +1845,12 @@ export class OrdersService {
     if (req.requireReason && !dto.reason?.trim()) {
       throw new BadRequestException('A reason is required to reverse this order.');
     }
+    const elevator = await this.resolveElevation(actor, dto, req.allowed, REVERSE_SECURED_ITEM, 'reverse completed orders');
     const witness = await this.verifySignatures(actor, dto, req, REVERSE_SECURED_ITEM, {
       password: 'Your password is required to sign this reversal.',
       witnessRequired: 'A witness signature is required to reverse this order.',
       witnessNotPermitted: 'That user is not permitted to witness order reversal.',
-    });
+    }, elevator);
 
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
@@ -2200,6 +2245,7 @@ export class OrdersService {
             `${qaSampleSets.length ? `, unwound ${qaSampleSets.length} sample set${qaSampleSets.length === 1 ? '' : 's'}` : ''}` +
             `${qaReleases.length ? `, removed ${qaReleases.length} QA release${qaReleases.length === 1 ? '' : 's'}` : ''}` +
             `${reason ? ` — ${reason}` : ''}` +
+            (elevator ? ` (elevated by ${elevator.label})` : '') +
             (witness ? ` (witnessed by ${witness.label}${dto.witnessExplanation ? `: ${dto.witnessExplanation}` : ''})` : ''),
           changes: [
             { tableName: 'Ordr', recordId: String(id), fieldName: 'Status', oldValue: 'CMP', newValue: 'RLS' },
@@ -2227,17 +2273,19 @@ export class OrdersService {
         tx,
       );
 
-      if (req.requireSignature) {
+      if (req.requireSignature || elevator) {
         await this.esign.sign(
           {
             securedItemKey: REVERSE_SECURED_ITEM,
             meaning: 'Order reversal',
-            userId: actor.id,
-            userLabel: actor.label ?? actor.id,
+            userId: (elevator ?? actor).id,
+            userLabel: elevator ? elevator.label : actor.label ?? actor.id,
             userExplanation: reason ?? null,
             witnessUserId: witness?.id ?? null,
             witnessLabel: witness?.label ?? null,
             witnessExplanation: witness ? dto.witnessExplanation ?? null : null,
+            onBehalfOfUserId: elevator ? actor.id : null,
+            onBehalfOfLabel: elevator ? actor.label ?? actor.id : null,
             masterTable: 'Ordr',
             masterId: String(id),
             auditLogId: auditLog.id,
@@ -2254,7 +2302,7 @@ export class OrdersService {
         restored: restored.map((r) => ({ lot: r.lot, qty: r.qty })),
         skippedRestores,
         linesReset,
-        signed: req.requireSignature,
+        signed: req.requireSignature || !!elevator,
         witness: witness?.label ?? null,
       };
     });
@@ -4623,11 +4671,12 @@ export class OrdersService {
     if (req.requireReason && !dto.reason?.trim()) {
       throw new BadRequestException('A reason is required to publish this revision.');
     }
+    const elevator = await this.resolveElevation(actor, dto, req.allowed, REVISE_SECURED_ITEM, 'publish order revisions');
     const witness = await this.verifySignatures(actor, dto, req, REVISE_SECURED_ITEM, {
       password: 'Your password is required to sign this revision.',
       witnessRequired: 'A witness signature is required to publish this revision.',
       witnessNotPermitted: 'That user is not permitted to witness order revisions.',
-    });
+    }, elevator);
 
     const at = new Date();
     return this.prisma.$transaction(async (tx) => {
@@ -4939,6 +4988,7 @@ export class OrdersService {
             `Order #${orderId} revision ${revision} published — ${draft.revisionComment.trim()} ` +
             `(${updates.length} changed, ${additions.length} added, ${removals.length} removed)` +
             (dto.reason ? ` — ${dto.reason}` : '') +
+            (elevator ? ` (elevated by ${elevator.label})` : '') +
             (witness
               ? ` (witnessed by ${witness.label}${dto.witnessExplanation ? `: ${dto.witnessExplanation}` : ''})`
               : ''),
@@ -4947,17 +4997,19 @@ export class OrdersService {
         tx,
       );
 
-      if (req.requireSignature) {
+      if (req.requireSignature || elevator) {
         await this.esign.sign(
           {
             securedItemKey: REVISE_SECURED_ITEM,
             meaning: 'Order revision published',
-            userId: actor.id,
-            userLabel: actor.label ?? actor.id,
+            userId: (elevator ?? actor).id,
+            userLabel: elevator ? elevator.label : actor.label ?? actor.id,
             userExplanation: dto.reason ?? null,
             witnessUserId: witness?.id ?? null,
             witnessLabel: witness?.label ?? null,
             witnessExplanation: witness ? dto.witnessExplanation ?? null : null,
+            onBehalfOfUserId: elevator ? actor.id : null,
+            onBehalfOfLabel: elevator ? actor.label ?? actor.id : null,
             masterTable: 'Ordr',
             masterId: String(orderId),
             auditLogId: auditLog.id,
@@ -4978,7 +5030,7 @@ export class OrdersService {
         revision,
         status: 'RLS',
         applied: { updated: updates.length, added: additions.length, removed: removals.length },
-        signed: req.requireSignature,
+        signed: req.requireSignature || !!elevator,
         witness: witness?.label ?? null,
       };
     });

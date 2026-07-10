@@ -33,6 +33,21 @@ export class ReverseOrderDto {
   @IsString()
   witnessTotpCode?: string;
 
+  /** Supervisor in-place elevation (L22): credentials of a DIFFERENT user
+   * holding the perform grant (or Override) who authorizes this action for a
+   * blocked operator. The supervisor becomes the ledger signer. */
+  @IsOptional()
+  @IsEmail()
+  elevatorEmail?: string;
+
+  @IsOptional()
+  @IsString()
+  elevatorPassword?: string;
+
+  @IsOptional()
+  @IsString()
+  elevatorTotpCode?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(500)

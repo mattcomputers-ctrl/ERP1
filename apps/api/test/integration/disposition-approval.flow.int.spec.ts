@@ -35,6 +35,10 @@ type Caps = Partial<{
 async function makeRole(code: string, policy?: Caps): Promise<string> {
   const r = await prisma.role.create({ data: { code, name: code }, select: { id: true } });
   if (policy) await prisma.roleApprovalPolicy.create({ data: { roleId: r.id, ...policy } });
+  // L22 enforces the release.disposition PERFORM grant at the gate — every
+  // role in this spec is about approval CAPABILITIES, so grant it uniformly.
+  const item = await prisma.securedItem.findUnique({ where: { key: 'release.disposition' }, select: { id: true } });
+  if (item) await prisma.roleSecuredItem.create({ data: { roleId: r.id, securedItemId: item.id, allow: true, allowWitness: true } });
   return r.id;
 }
 async function makeUser(email: string, roleIds: string[]): Promise<Actor> {

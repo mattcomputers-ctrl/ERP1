@@ -1523,7 +1523,7 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
   const req = useQuery({
     queryKey: ['complete-requirement', me.data?.id],
     queryFn: () =>
-      api.get<{ requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>(
+      api.get<{ allowed: boolean; requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>(
         '/orders/complete-requirement',
       ),
   });
@@ -1536,6 +1536,9 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
   const [witnessPassword, setWitnessPassword] = useState('');
   const [witnessTotp, setWitnessTotp] = useState('');
   const [witnessExplanation, setWitnessExplanation] = useState('');
+  const [elevEmail, setElevEmail] = useState('');
+  const [elevPassword, setElevPassword] = useState('');
+  const [elevTotp, setElevTotp] = useState('');
 
   const r = req.data;
   const sig = !!r?.requireSignature;
@@ -1543,6 +1546,9 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
   const witnessRequired = !!r?.requireWitness;
   const witnessOpen = witnessRequired || showWitness;
   const mfaOn = !!me.data?.mfaEnabled;
+  // Blocked by the perform grant: a supervisor may authorize in place — the
+  // supervisor's credentials replace the operator's own signature.
+  const blocked = !!r && r.allowed === false;
 
   const m = useMutation({
     mutationFn: () =>
@@ -1555,6 +1561,9 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
         witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
         witnessTotpCode: witnessOpen && witnessTotp ? witnessTotp : undefined,
         witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
+        elevatorEmail: elevEmail || undefined,
+        elevatorPassword: elevPassword || undefined,
+        elevatorTotpCode: elevTotp || undefined,
       }),
     onSuccess: (res) => {
       // Advisory yield warning (batchExecution.yieldTolerancePercent) — the
@@ -1570,7 +1579,9 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
   const canSubmit =
     !!r &&
     (!reasonRequired || !!reason.trim()) &&
-    (!sig || (!!password && (!mfaOn || !!totp))) &&
+    (blocked
+      ? !!elevEmail && !!elevPassword
+      : !sig || (!!password && (!mfaOn || !!totp))) &&
     (!witnessRequired || (!!witnessEmail && !!witnessPassword));
 
   if (req.isLoading) return <span className="text-sm text-slate-400">Loading…</span>;
@@ -1585,10 +1596,20 @@ function CompleteControls({ orderId, onDone }: { orderId: number; onDone: () => 
       )}
       <input value={batchSize} onChange={(e) => setBatchSize(e.target.value)} type="number" min="0" step="any" placeholder="Actual batch size" className="w-36 rounded border border-slate-300 px-2 py-1" />
       <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={reasonRequired ? 'Reason (required)' : 'Reason (optional)'} className="w-48 rounded border border-slate-300 px-2 py-1" />
-      {sig && (
+      {blocked && (
+        <>
+          <span className="w-full text-xs text-amber-700">
+            Your group is not permitted to complete orders — a supervisor can authorize it here (their signature goes on the ledger).
+          </span>
+          <input value={elevEmail} onChange={(e) => setElevEmail(e.target.value)} placeholder="Supervisor email" className="w-48 rounded border border-amber-400 px-2 py-1" />
+          <input type="password" autoComplete="off" value={elevPassword} onChange={(e) => setElevPassword(e.target.value)} placeholder="Supervisor password" className="w-44 rounded border border-amber-400 px-2 py-1" />
+          <input autoComplete="one-time-code" value={elevTotp} onChange={(e) => setElevTotp(e.target.value)} placeholder="Supervisor MFA (if enrolled)" className="w-48 rounded border border-amber-400 px-2 py-1" />
+        </>
+      )}
+      {sig && !blocked && (
         <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password (sign)" className="w-44 rounded border border-slate-300 px-2 py-1" />
       )}
-      {sig && mfaOn && (
+      {sig && !blocked && mfaOn && (
         <input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} placeholder="MFA code" className="w-28 rounded border border-slate-300 px-2 py-1" />
       )}
       {sig && witnessOpen && (
@@ -1621,7 +1642,7 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
   const req = useQuery({
     queryKey: ['reverse-requirement', me.data?.id],
     queryFn: () =>
-      api.get<{ requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>(
+      api.get<{ allowed: boolean; requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>(
         '/orders/reverse-requirement',
       ),
     enabled: open,
@@ -1634,6 +1655,9 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
   const [witnessPassword, setWitnessPassword] = useState('');
   const [witnessTotp, setWitnessTotp] = useState('');
   const [witnessExplanation, setWitnessExplanation] = useState('');
+  const [elevEmail, setElevEmail] = useState('');
+  const [elevPassword, setElevPassword] = useState('');
+  const [elevTotp, setElevTotp] = useState('');
 
   const r = req.data;
   const sig = !!r?.requireSignature;
@@ -1641,6 +1665,7 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
   const witnessRequired = !!r?.requireWitness;
   const witnessOpen = witnessRequired || showWitness;
   const mfaOn = !!me.data?.mfaEnabled;
+  const blocked = !!r && r.allowed === false;
 
   const m = useMutation({
     mutationFn: () =>
@@ -1652,6 +1677,9 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
         witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
         witnessTotpCode: witnessOpen && witnessTotp ? witnessTotp : undefined,
         witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
+        elevatorEmail: elevEmail || undefined,
+        elevatorPassword: elevPassword || undefined,
+        elevatorTotpCode: elevTotp || undefined,
       }),
     onSuccess: onDone,
   });
@@ -1662,7 +1690,9 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
   const canSubmit =
     !!r &&
     (!reasonRequired || !!reason.trim()) &&
-    (!sig || (!!password && (!mfaOn || !!totp))) &&
+    (blocked
+      ? !!elevEmail && !!elevPassword
+      : !sig || (!!password && (!mfaOn || !!totp))) &&
     (!witnessRequired || (!!witnessEmail && !!witnessPassword));
 
   if (!open) {
@@ -1692,10 +1722,20 @@ function ReverseControls({ orderId, onDone }: { orderId: number; onDone: () => v
         {!req.isLoading && (
           <>
             <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={reasonRequired ? 'Reason (required)' : 'Reason (optional)'} className="w-56 rounded border border-slate-300 px-2 py-1" />
-            {sig && (
+            {blocked && (
+              <>
+                <span className="w-full text-xs text-amber-700">
+                  Your group is not permitted to reverse completions — a supervisor can authorize it here (their signature goes on the ledger).
+                </span>
+                <input value={elevEmail} onChange={(e) => setElevEmail(e.target.value)} placeholder="Supervisor email" className="w-48 rounded border border-amber-400 px-2 py-1" />
+                <input type="password" autoComplete="off" value={elevPassword} onChange={(e) => setElevPassword(e.target.value)} placeholder="Supervisor password" className="w-44 rounded border border-amber-400 px-2 py-1" />
+                <input autoComplete="one-time-code" value={elevTotp} onChange={(e) => setElevTotp(e.target.value)} placeholder="Supervisor MFA (if enrolled)" className="w-48 rounded border border-amber-400 px-2 py-1" />
+              </>
+            )}
+            {sig && !blocked && (
               <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password (sign)" className="w-44 rounded border border-slate-300 px-2 py-1" />
             )}
-            {sig && mfaOn && (
+            {sig && !blocked && mfaOn && (
               <input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} placeholder="MFA code" className="w-28 rounded border border-slate-300 px-2 py-1" />
             )}
             {sig && witnessOpen && (
@@ -2175,7 +2215,7 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
   const req = useQuery({
     queryKey: ['revise-requirement', me.data?.id],
     queryFn: () =>
-      api.get<{ requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>(
+      api.get<{ allowed: boolean; requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>(
         '/orders/revise-requirement',
       ),
   });
@@ -2187,6 +2227,9 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
   const [witnessPassword, setWitnessPassword] = useState('');
   const [witnessTotp, setWitnessTotp] = useState('');
   const [witnessExplanation, setWitnessExplanation] = useState('');
+  const [elevEmail, setElevEmail] = useState('');
+  const [elevPassword, setElevPassword] = useState('');
+  const [elevTotp, setElevTotp] = useState('');
   const [rejectReason, setRejectReason] = useState('');
 
   const r = req.data;
@@ -2195,6 +2238,7 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
   const witnessRequired = !!r?.requireWitness;
   const witnessOpen = witnessRequired || showWitness;
   const mfaOn = !!me.data?.mfaEnabled;
+  const blocked = !!r && r.allowed === false;
 
   const publish = useMutation({
     mutationFn: () =>
@@ -2210,6 +2254,9 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
         witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
         witnessTotpCode: witnessOpen && witnessTotp ? witnessTotp : undefined,
         witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
+        elevatorEmail: elevEmail || undefined,
+        elevatorPassword: elevPassword || undefined,
+        elevatorTotpCode: elevTotp || undefined,
       }),
     onSuccess: onDone,
   });
@@ -2223,7 +2270,9 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
     !!r &&
     hasComment &&
     (!reasonRequired || !!reason.trim()) &&
-    (!sig || (!!password && (!mfaOn || !!totp))) &&
+    (blocked
+      ? !!elevEmail && !!elevPassword
+      : !sig || (!!password && (!mfaOn || !!totp))) &&
     (!witnessRequired || (!!witnessEmail && !!witnessPassword));
 
   return (
@@ -2241,10 +2290,20 @@ function PublishRevisionControls({ orderId, editId, draftUpdatedAt, draftRevisio
           {reasonRequired && (
             <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (required)" className="w-48 rounded border border-slate-300 px-2 py-1 text-sm" />
           )}
-          {sig && (
+          {blocked && (
+            <>
+              <span className="w-full text-xs text-amber-700">
+                Your group is not permitted to publish revisions — a supervisor can authorize it here (their signature goes on the ledger).
+              </span>
+              <input value={elevEmail} onChange={(e) => setElevEmail(e.target.value)} placeholder="Supervisor email" className="w-48 rounded border border-amber-400 px-2 py-1 text-sm" />
+              <input type="password" autoComplete="off" value={elevPassword} onChange={(e) => setElevPassword(e.target.value)} placeholder="Supervisor password" className="w-44 rounded border border-amber-400 px-2 py-1 text-sm" />
+              <input autoComplete="one-time-code" value={elevTotp} onChange={(e) => setElevTotp(e.target.value)} placeholder="Supervisor MFA (if enrolled)" className="w-48 rounded border border-amber-400 px-2 py-1 text-sm" />
+            </>
+          )}
+          {sig && !blocked && (
             <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password (sign)" className="w-44 rounded border border-slate-300 px-2 py-1 text-sm" />
           )}
-          {sig && mfaOn && (
+          {sig && !blocked && mfaOn && (
             <input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} placeholder="MFA code" className="w-28 rounded border border-slate-300 px-2 py-1 text-sm" />
           )}
           {sig && witnessOpen && (

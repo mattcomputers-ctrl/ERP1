@@ -4,16 +4,7 @@ import { AuthService } from '../../src/auth/auth.service';
 import { AuditService } from '../../src/audit/audit.service';
 import type { Actor } from '../../src/auth/current-user.decorator';
 import type { PrismaService } from '../../src/prisma/prisma.service';
-import {
-  addEntity,
-  addItem,
-  addOrdDetail,
-  addOrder,
-  makePrisma,
-  resetDb,
-  seedActor,
-  services,
-} from './support';
+import { addEntity, addItem, addOrdDetail, addOrder, grantAllSecuredItems, makePrisma, resetDb, seedActor, services } from './support';
 
 // §14 Configuration: the security.* auth-policy wires, the
 // receiving.manfLotRequired receipt policy, and the completion yield
@@ -164,6 +155,7 @@ describe('batchExecution.yieldTolerancePercent drives the completion yield warni
     await prisma.securedItem.create({
       data: { key: 'order.complete', description: 'order.complete', requireReason: false, requireSignature: false, requireWitness: false },
     });
+    await grantAllSecuredItems(prisma, actor.id);
   }
 
   it('warns beyond tolerance, stays quiet within it, and 0 disables', async () => {
