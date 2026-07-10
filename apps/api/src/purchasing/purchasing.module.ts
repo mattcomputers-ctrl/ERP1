@@ -8,11 +8,13 @@ import { SettingsModule } from '../settings/settings.module';
 import { PriceVersionService } from './price-version.service';
 import { PurchasingController } from './purchasing.controller';
 import { PurchasingService } from './purchasing.service';
+import { SupplierPricingController } from './supplier-pricing.controller';
+import { SupplierPricingService } from './supplier-pricing.service';
 
 @Module({
   imports: [AuthModule, SettingsModule, SalesModule, InventoryModule, ApprovalModule, NotificationsModule],
-  controllers: [PurchasingController],
-  providers: [PurchasingService, PriceVersionService],
+  controllers: [PurchasingController, SupplierPricingController],
+  providers: [PurchasingService, PriceVersionService, SupplierPricingService],
   exports: [PurchasingService, PriceVersionService],
 })
 export class PurchasingModule {}

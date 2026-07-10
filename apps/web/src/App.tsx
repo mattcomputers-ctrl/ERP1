@@ -33,6 +33,7 @@ import { Planning } from './pages/Planning';
 import { PackingSlipDoc } from './pages/PackingSlipDoc';
 import { PackingSlips } from './pages/PackingSlips';
 import { PriceLists } from './pages/PriceLists';
+import { SupplierPricing } from './pages/SupplierPricing';
 import { PurchaseOrderDoc } from './pages/PurchaseOrderDoc';
 import { Purchasing } from './pages/Purchasing';
 import { Recall } from './pages/Recall';
@@ -94,6 +95,7 @@ export function App() {
         <Route path="/bills" element={<Bills />} />
         <Route path="/bills/:id/print" element={<BillDoc />} />
         <Route path="/price-lists" element={<PriceLists />} />
+        <Route path="/supplier-pricing" element={<SupplierPricing />} />
         <Route path="/accounting" element={<Accounting />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/inventory-receipts" element={<MiscReceipts />} />
@@ -131,6 +133,7 @@ function Shell({ me, children }: { me: Me; children: ReactNode }) {
     { to: '/orders', label: 'Orders' },
     { to: '/planning', label: 'Planning' },
     { to: '/purchasing', label: 'Purchasing' },
+    { to: '/supplier-pricing', label: 'Supplier Pricing' },
     { to: '/invoices', label: 'Invoices' },
     { to: '/packing-slips', label: 'Packing Slips' },
     { to: '/bills', label: 'Supplier Bills' },
