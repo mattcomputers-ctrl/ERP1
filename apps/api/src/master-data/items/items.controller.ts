@@ -2,7 +2,13 @@ import { Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query, UseGuar
 import { CurrentUser, type Actor } from '../../auth/current-user.decorator';
 import { ProgramGuard, RequireProgram } from '../../auth/program.guard';
 import { SessionAuthGuard } from '../../auth/session-auth.guard';
-import { CreateItemDto, ItemListQuery, UpdateItemDto } from './items.dto';
+import {
+  CreateItemDto,
+  CreatePackagedProductDto,
+  ItemListQuery,
+  UpdateItemDto,
+  UpdateItemPlanningDto,
+} from './items.dto';
 import { ItemsService } from './items.service';
 
 @UseGuards(SessionAuthGuard, ProgramGuard)
@@ -14,6 +20,11 @@ export class ItemsController {
   @Get()
   list(@Query() query: ItemListQuery) {
     return this.items.list(query);
+  }
+
+  @Get('options')
+  options(@Query('q') q?: string, @Query('context') context?: string) {
+    return this.items.itemOptions(q, context);
   }
 
   @Get(':id')
@@ -29,5 +40,25 @@ export class ItemsController {
   @Patch(':id')
   update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateItemDto, @CurrentUser() actor: Actor) {
     return this.items.update(id, dto, actor);
+  }
+
+  @Get(':id/planning')
+  getPlanning(@Param('id', ParseIntPipe) id: number) {
+    return this.items.getPlanning(id);
+  }
+
+  @Patch(':id/planning')
+  updatePlanning(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateItemPlanningDto, @CurrentUser() actor: Actor) {
+    return this.items.updatePlanning(id, dto, actor);
+  }
+
+  @Get(':id/packaged-products')
+  listPackagedProducts(@Param('id', ParseIntPipe) id: number) {
+    return this.items.listPackagedProducts(id);
+  }
+
+  @Post(':id/packaged-products')
+  createPackagedProduct(@Param('id', ParseIntPipe) id: number, @Body() dto: CreatePackagedProductDto, @CurrentUser() actor: Actor) {
+    return this.items.createPackagedProduct(id, dto, actor);
   }
 }

@@ -1,4 +1,4 @@
-import { IsBoolean, IsInt, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class EntityListQuery {
   @IsOptional() @IsString() page?: string;
@@ -22,6 +22,8 @@ export class CreateEntityDto {
   @IsOptional() @IsString() @MaxLength(10) currency?: string;
   @IsOptional() @IsString() @MaxLength(20) terms?: string;
   @IsOptional() @IsString() @MaxLength(20) customerType?: string;
+  // Ship-to hierarchy: a ship-to may sit under a parent customer.
+  @IsOptional() @IsInt() parentId?: number;
 }
 
 export class UpdateEntityDto {
@@ -38,4 +40,38 @@ export class UpdateEntityDto {
   @IsOptional() @IsString() @MaxLength(20) terms?: string;
   @IsOptional() @IsString() @MaxLength(20) customerType?: string;
   @IsOptional() @IsInt() leadTime?: number;
+  // Nullable: pass null to detach from a parent (re-asserted in the service).
+  @IsOptional() @IsInt() parentId?: number | null;
+}
+
+// Address-book link references this install actually uses on entities: the
+// primary document address, and a ship-to address. (Legacy also uses these on
+// Ordr/Location/Waybill; those are document-time snapshots, not entity master
+// data.)
+export const ENTITY_ADDRESS_REFERENCES = ['Address', 'ShipToAddress'] as const;
+
+// The document-facing fields shared by create + edit of an entity address.
+class AddressFieldsDto {
+  @IsOptional() @IsString() @MaxLength(20) department?: string;
+  @IsOptional() @IsString() @MaxLength(255) addrLine1?: string;
+  @IsOptional() @IsString() @MaxLength(255) addrLine2?: string;
+  @IsOptional() @IsString() @MaxLength(255) addrLine3?: string;
+  @IsOptional() @IsString() @MaxLength(255) city?: string;
+  @IsOptional() @IsString() @MaxLength(2) state?: string;
+  @IsOptional() @IsString() @MaxLength(20) zipCode?: string;
+  @IsOptional() @IsString() @MaxLength(2) country?: string;
+  @IsOptional() @IsString() @MaxLength(255) contact?: string;
+  @IsOptional() @IsString() @MaxLength(100) email?: string;
+  @IsOptional() @IsString() @MaxLength(30) phone?: string;
+  @IsOptional() @IsString() @MaxLength(30) fax?: string;
+  @IsOptional() @IsString() emergencyContact?: string;
+}
+
+export class CreateAddressDto extends AddressFieldsDto {
+  @IsString() @MaxLength(255) name!: string;
+  @IsIn(ENTITY_ADDRESS_REFERENCES) reference!: (typeof ENTITY_ADDRESS_REFERENCES)[number];
+}
+
+export class UpdateAddressDto extends AddressFieldsDto {
+  @IsOptional() @IsString() @MaxLength(255) name?: string;
 }

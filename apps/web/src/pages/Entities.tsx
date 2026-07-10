@@ -20,6 +20,7 @@ interface EntityRow {
   customerType?: string | null;
   currency?: string | null;
   terms?: string | null;
+  parentId?: number | null;
 }
 interface ListResp {
   rows: EntityRow[];
@@ -53,6 +54,43 @@ const FLAG_FIELDS: [keyof EntityRow, string][] = [
   ['isLab', 'Lab'],
 ];
 const ROLE_LABELS = FLAG_FIELDS;
+
+type EntityOption = { id: number; code: string; name: string | null };
+
+// Reusable typeahead entity picker (parent selector).
+function EntityPicker({ value, onChange, placeholder, excludeId }: { value: EntityOption | null; onChange: (v: EntityOption | null) => void; placeholder: string; excludeId?: number }) {
+  const [search, setSearch] = useState('');
+  const q = useQuery({
+    queryKey: ['entity-options', search],
+    queryFn: () => api.get<{ rows: EntityOption[] }>(`/entities/options?q=${encodeURIComponent(search)}`),
+    enabled: !value && search.trim().length >= 1,
+  });
+  if (value) {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="rounded-md bg-indigo-50 px-2 py-1 text-sm font-medium text-indigo-700">{value.code}{value.name ? ` — ${value.name}` : ''}</span>
+        <button type="button" onClick={() => onChange(null)} className="text-sm text-slate-500 hover:underline">change</button>
+      </div>
+    );
+  }
+  const rows = (q.data?.rows ?? []).filter((r) => r.id !== excludeId);
+  return (
+    <div>
+      <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={placeholder} />
+      {search.trim().length >= 1 && (
+        <div className="mt-1 max-h-40 overflow-y-auto rounded-md border border-slate-200">
+          {q.isLoading && <div className="px-3 py-2 text-sm text-slate-400">Searching…</div>}
+          {!q.isLoading && rows.length === 0 && <div className="px-3 py-2 text-sm text-slate-400">No entities match.</div>}
+          {rows.map((it) => (
+            <button type="button" key={it.id} onClick={() => { onChange(it); setSearch(''); }} className="flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-slate-50">
+              <span className="font-medium">{it.code}</span><span className="text-xs text-slate-400">{it.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function Entities() {
   const qc = useQueryClient();
@@ -122,7 +160,7 @@ export function Entities() {
         <EditEntity
           row={editing}
           onClose={() => setEditing(null)}
-          onDone={() => { setEditing(null); qc.invalidateQueries({ queryKey: ['entities'] }); }}
+          onDone={() => { qc.invalidateQueries({ queryKey: ['entities'] }); }}
         />
       )}
 
@@ -172,7 +210,11 @@ function CreateEntity({ onDone }: { onDone: () => void }) {
   const [entityCode, setEntityCode] = useState('');
   const [name, setName] = useState('');
   const [flags, setFlags] = useState<Flags>({});
-  const m = useMutation({ mutationFn: () => api.post('/entities', { entityCode, name: name || undefined, ...flags }), onSuccess: onDone });
+  const [parent, setParent] = useState<EntityOption | null>(null);
+  const m = useMutation({
+    mutationFn: () => api.post('/entities', { entityCode, name: name || undefined, ...flags, parentId: parent?.id }),
+    onSuccess: onDone,
+  });
   return (
     <Card>
       <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (entityCode.trim()) m.mutate(); }}>
@@ -181,6 +223,11 @@ function CreateEntity({ onDone }: { onDone: () => void }) {
           <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} maxLength={255} /></Field>
         </div>
         <div><div className="mb-1 text-xs font-medium text-slate-500">Roles</div><FlagChecks flags={flags} onToggle={(k, v) => setFlags((f) => ({ ...f, [k]: v }))} /></div>
+        {flags.isShipTo && (
+          <Field label="Parent customer (optional)">
+            <EntityPicker value={parent} onChange={setParent} placeholder="Search the customer this ship-to belongs to…" />
+          </Field>
+        )}
         <div className="flex items-center gap-3">
           <Button type="submit" disabled={!entityCode.trim() || m.isPending}>{m.isPending ? 'Saving…' : 'Create entity'}</Button>
           {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
@@ -190,46 +237,215 @@ function CreateEntity({ onDone }: { onDone: () => void }) {
   );
 }
 
-// Edit an existing entity's roles, status, and trading terms (PATCH /entities/:id).
+interface EntityAddress {
+  reference: string;
+  id: number;
+  name: string;
+  department?: string | null;
+  addrLine1?: string | null;
+  addrLine2?: string | null;
+  addrLine3?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zipCode?: string | null;
+  country?: string | null;
+  contact?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  fax?: string | null;
+  emergencyContact?: string | null;
+}
+interface EntityDetail extends EntityRow {
+  addresses: EntityAddress[];
+  parentId?: number | null;
+}
+
+// Edit an existing entity: roles, status, terms, parent (ship-to hierarchy), and
+// the address book (documents resolve the To/Ship-To blocks off these).
 function EditEntity({ row, onClose, onDone }: { row: EntityRow; onClose: () => void; onDone: () => void }) {
-  const init: Flags = Object.fromEntries(FLAG_FIELDS.map(([k]) => [k, !!row[k]]));
+  const qc = useQueryClient();
+  const detail = useQuery({ queryKey: ['entity', row.id], queryFn: () => api.get<EntityDetail>(`/entities/${row.id}`) });
+  const d = detail.data;
+  const invalidate = () => { qc.invalidateQueries({ queryKey: ['entity', row.id] }); onDone(); };
+
+  return (
+    <div className="fixed inset-0 z-20 flex items-center justify-center bg-slate-900/30 p-4" onClick={onClose}>
+      <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-start justify-between">
+          <h2 className="text-lg font-medium">Edit {row.entityCode}{row.name ? <span className="text-slate-400"> — {row.name}</span> : null}</h2>
+          <button onClick={onClose} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+        </div>
+        {detail.isLoading && <p className="text-sm text-slate-400">Loading…</p>}
+        {d && (
+          <div className="space-y-6">
+            <RolesTermsForm entity={d} onSaved={invalidate} />
+            <AddressBook entityId={row.id} addresses={d.addresses} onChange={invalidate} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RolesTermsForm({ entity, onSaved }: { entity: EntityDetail; onSaved: () => void }) {
+  const init: Flags = Object.fromEntries(FLAG_FIELDS.map(([k]) => [k, !!entity[k]]));
   const [flags, setFlags] = useState<Flags>(init);
-  const [inactive, setInactive] = useState(!!row.inactive);
-  const [currency, setCurrency] = useState(row.currency ?? '');
-  const [terms, setTerms] = useState(row.terms ?? '');
-  const [customerType, setCustomerType] = useState(row.customerType ?? '');
+  const [inactive, setInactive] = useState(!!entity.inactive);
+  const [currency, setCurrency] = useState(entity.currency ?? '');
+  const [terms, setTerms] = useState(entity.terms ?? '');
+  const [customerType, setCustomerType] = useState(entity.customerType ?? '');
+  const [parent, setParent] = useState<EntityOption | null>(
+    entity.parentId != null ? { id: entity.parentId, code: `#${entity.parentId}`, name: null } : null,
+  );
+  const parentChanged = (parent?.id ?? null) !== (entity.parentId ?? null);
   const m = useMutation({
-    mutationFn: () => api.patch(`/entities/${row.id}`, {
+    mutationFn: () => api.patch(`/entities/${entity.id}`, {
       ...flags,
       inactive,
       currency: currency.trim() || undefined,
       terms: terms.trim() || undefined,
       customerType: customerType.trim() || undefined,
+      ...(parentChanged ? { parentId: parent ? parent.id : null } : {}),
     }),
+    onSuccess: onSaved,
+  });
+  return (
+    <section>
+      <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); m.mutate(); }}>
+        <div><div className="mb-1 text-xs font-medium text-slate-500">Roles</div><FlagChecks flags={flags} onToggle={(k, v) => setFlags((f) => ({ ...f, [k]: v }))} /></div>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Field label="Currency"><Input value={currency} onChange={(e) => setCurrency(e.target.value)} maxLength={10} /></Field>
+          <Field label="Terms"><Input value={terms} onChange={(e) => setTerms(e.target.value)} maxLength={20} /></Field>
+          <Field label="Customer type"><Input value={customerType} onChange={(e) => setCustomerType(e.target.value)} maxLength={20} /></Field>
+        </div>
+        {flags.isShipTo && (
+          <Field label="Parent customer (ship-to hierarchy)">
+            <EntityPicker value={parent} onChange={setParent} placeholder="Search the parent customer…" excludeId={entity.id} />
+          </Field>
+        )}
+        <label className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={inactive} onChange={(e) => setInactive(e.target.checked)} /> Inactive (hidden from pickers)</label>
+        <div className="flex items-center gap-3">
+          <Button type="submit" disabled={m.isPending}>{m.isPending ? 'Saving…' : 'Save changes'}</Button>
+          {m.isSuccess && !m.isPending && <span className="text-sm text-emerald-600">Saved.</span>}
+          {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+        </div>
+      </form>
+    </section>
+  );
+}
+
+const REFERENCES: [string, string][] = [
+  ['Address', 'Primary (document) address'],
+  ['ShipToAddress', 'Ship-to address'],
+];
+
+function AddressBook({ entityId, addresses, onChange }: { entityId: number; addresses: EntityAddress[]; onChange: () => void }) {
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const del = useMutation({
+    mutationFn: (addressId: number) => api.del(`/entities/${entityId}/addresses/${addressId}`),
+    onSuccess: onChange,
+  });
+  const hasPrimary = addresses.some((a) => a.reference === 'Address');
+
+  return (
+    <section>
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-medium text-slate-700">Addresses <span className="font-normal text-slate-400">(To / Ship-To blocks on documents)</span></div>
+        <button type="button" onClick={() => { setAdding((v) => !v); setEditingId(null); }} className="text-sm text-indigo-600 hover:underline">{adding ? 'Cancel' : '+ Add address'}</button>
+      </div>
+      {addresses.length === 0 ? (
+        <p className="text-sm text-slate-400">No addresses.</p>
+      ) : (
+        <ul className="space-y-2">
+          {addresses.map((a) => (
+            <li key={`${a.reference}:${a.id}`} className="rounded-md border border-slate-200 p-3 text-sm">
+              {editingId === a.id ? (
+                <AddressForm entityId={entityId} address={a} onDone={() => { setEditingId(null); onChange(); }} onCancel={() => setEditingId(null)} />
+              ) : (
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="font-medium">{a.name} <span className="text-xs font-normal text-slate-400">{REFERENCES.find(([r]) => r === a.reference)?.[1] ?? a.reference}</span></div>
+                    <div className="text-slate-600">{[a.addrLine1, a.addrLine2, [a.city, a.state].filter(Boolean).join(', '), a.zipCode, a.country].filter(Boolean).join(' · ')}</div>
+                    {(a.contact || a.phone || a.email) && <div className="text-slate-500">{[a.contact, a.phone, a.email].filter(Boolean).join(' · ')}</div>}
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button onClick={() => { setEditingId(a.id); setAdding(false); }} className="text-indigo-600 hover:underline">edit</button>
+                    <button onClick={() => del.mutate(a.id)} disabled={del.isPending} className="text-slate-400 hover:text-red-600">remove</button>
+                  </div>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {del.isError && <span className="text-sm text-red-600">{(del.error as Error).message}</span>}
+      {adding && (
+        <div className="mt-2 rounded-md border border-slate-200 p-3">
+          <AddressForm entityId={entityId} hasPrimary={hasPrimary} onDone={() => { setAdding(false); onChange(); }} onCancel={() => setAdding(false)} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AddressForm({ entityId, address, hasPrimary, onDone, onCancel }: { entityId: number; address?: EntityAddress; hasPrimary?: boolean; onDone: () => void; onCancel: () => void }) {
+  const isEdit = !!address;
+  const [reference, setReference] = useState(address?.reference ?? (hasPrimary ? 'ShipToAddress' : 'Address'));
+  const [f, setF] = useState({
+    name: address?.name ?? '',
+    addrLine1: address?.addrLine1 ?? '',
+    addrLine2: address?.addrLine2 ?? '',
+    city: address?.city ?? '',
+    state: address?.state ?? '',
+    zipCode: address?.zipCode ?? '',
+    country: address?.country ?? '',
+    contact: address?.contact ?? '',
+    phone: address?.phone ?? '',
+    email: address?.email ?? '',
+  });
+  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF((p) => ({ ...p, [k]: e.target.value }));
+  const body = () => {
+    const out: Record<string, unknown> = {};
+    // On EDIT a cleared field is sent as null so the clear persists (the API sets
+    // the column null); on CREATE an empty field is simply omitted.
+    for (const [k, v] of Object.entries(f)) out[k] = (v as string).trim() || (isEdit ? null : undefined);
+    return out;
+  };
+  const m = useMutation({
+    mutationFn: () => isEdit
+      ? api.patch(`/entities/${entityId}/addresses/${address!.id}`, body())
+      : api.post(`/entities/${entityId}/addresses`, { reference, ...body() }),
     onSuccess: onDone,
   });
   return (
-    <div className="fixed inset-0 z-20 flex items-center justify-center bg-slate-900/30 p-4" onClick={onClose}>
-      <div className="w-full max-w-lg rounded-lg bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-3 flex items-start justify-between">
-          <h2 className="text-lg font-medium">Edit {row.entityCode}{row.name ? <span className="text-slate-400"> — {row.name}</span> : null}</h2>
-          <button onClick={onClose} className="text-sm text-slate-500 hover:text-slate-800">Close</button>
+    <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (f.name.trim()) m.mutate(); }}>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {!isEdit && (
+          <Field label="Type">
+            <select value={reference} onChange={(e) => setReference(e.target.value)} className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm">
+              {REFERENCES.filter(([r]) => r !== 'Address' || !hasPrimary).map(([r, l]) => <option key={r} value={r}>{l}</option>)}
+            </select>
+          </Field>
+        )}
+        <Field label="Name"><Input value={f.name} onChange={set('name')} maxLength={255} required /></Field>
+        <Field label="Address line 1"><Input value={f.addrLine1} onChange={set('addrLine1')} maxLength={255} /></Field>
+        <Field label="Address line 2"><Input value={f.addrLine2} onChange={set('addrLine2')} maxLength={255} /></Field>
+        <Field label="City"><Input value={f.city} onChange={set('city')} maxLength={255} /></Field>
+        <div className="grid grid-cols-3 gap-2">
+          <Field label="State"><Input value={f.state} onChange={set('state')} maxLength={2} /></Field>
+          <Field label="Zip"><Input value={f.zipCode} onChange={set('zipCode')} maxLength={20} /></Field>
+          <Field label="Country"><Input value={f.country} onChange={set('country')} maxLength={2} /></Field>
         </div>
-        <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); m.mutate(); }}>
-          <div><div className="mb-1 text-xs font-medium text-slate-500">Roles</div><FlagChecks flags={flags} onToggle={(k, v) => setFlags((f) => ({ ...f, [k]: v }))} /></div>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <Field label="Currency"><Input value={currency} onChange={(e) => setCurrency(e.target.value)} maxLength={10} /></Field>
-            <Field label="Terms"><Input value={terms} onChange={(e) => setTerms(e.target.value)} maxLength={20} /></Field>
-            <Field label="Customer type"><Input value={customerType} onChange={(e) => setCustomerType(e.target.value)} maxLength={20} /></Field>
-          </div>
-          <label className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={inactive} onChange={(e) => setInactive(e.target.checked)} /> Inactive (hidden from pickers)</label>
-          <div className="flex items-center gap-3">
-            <Button type="submit" disabled={m.isPending}>{m.isPending ? 'Saving…' : 'Save changes'}</Button>
-            <button type="button" onClick={onClose} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
-            {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
-          </div>
-        </form>
+        <Field label="Contact"><Input value={f.contact} onChange={set('contact')} maxLength={255} /></Field>
+        <Field label="Phone"><Input value={f.phone} onChange={set('phone')} maxLength={30} /></Field>
+        <Field label="Email"><Input value={f.email} onChange={set('email')} maxLength={100} /></Field>
       </div>
-    </div>
+      <div className="flex items-center gap-3">
+        <Button type="submit" disabled={!f.name.trim() || m.isPending}>{m.isPending ? 'Saving…' : isEdit ? 'Save address' : 'Add address'}</Button>
+        <button type="button" onClick={onCancel} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+        {m.isError && <span className="text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
+    </form>
   );
 }
