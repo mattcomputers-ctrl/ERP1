@@ -296,7 +296,7 @@ export async function onHandForLot(prisma: PrismaClient, lot: string): Promise<n
 
 export async function addEntity(
   prisma: PrismaClient,
-  data: { id?: number; code?: string; isSupplier?: boolean; isManufacturer?: boolean; isBillTo?: boolean; isShipTo?: boolean; isShipVia?: boolean; isSalesman?: boolean; isPriceList?: boolean; priceListId?: number | null },
+  data: { id?: number; code?: string; isSupplier?: boolean; isManufacturer?: boolean; isBillTo?: boolean; isShipTo?: boolean; isShipVia?: boolean; isSalesman?: boolean; isPriceList?: boolean; isWarehouse?: boolean; priceListId?: number | null },
 ): Promise<number> {
   const row = await prisma.entity.create({
     data: {
@@ -309,6 +309,7 @@ export async function addEntity(
       isShipVia: data.isShipVia ?? false,
       isSalesman: data.isSalesman ?? false,
       isPriceList: data.isPriceList ?? false,
+      isWarehouse: data.isWarehouse ?? false,
       priceListId: data.priceListId ?? null,
     },
     select: { id: true },

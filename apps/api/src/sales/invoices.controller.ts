@@ -17,11 +17,18 @@ export class InvoicesController {
     return this.invoices.list(query);
   }
 
-  /** Generate a CI invoice for a shipping order's uninvoiced shipped qty. */
+  /** Generate a CI invoice (TI for warehouse ship-tos) for a shipping order's uninvoiced shipped qty. */
   @Post()
   @RequireProgram('sales.invoice')
   generate(@Body() dto: GenerateInvoiceDto, @CurrentUser() actor: Actor) {
     return this.invoices.generate(dto, actor);
+  }
+
+  /** Reverse (credit) an invoice — same document number, negated lines, ReversedTrans link. */
+  @Post(':id/reverse')
+  @RequireProgram('sales.invoice')
+  reverse(@Param('id', ParseIntPipe) id: number, @CurrentUser() actor: Actor) {
+    return this.invoices.reverse(id, actor);
   }
 
   @Get(':id')

@@ -114,11 +114,21 @@ export class ShippingService {
 
     const ownerEntityId = await this.resolveOwnerEntityId();
 
+    // Zero is neither a sale nor a return (the DTO allows negatives for
+    // return lines; @Min/@Max don't exclude 0 — service re-assert).
+    for (const l of dto.lines) {
+      if (!(l.qtyReqd !== 0) || Number.isNaN(l.qtyReqd)) {
+        throw new BadRequestException('Line quantities must be non-zero (negative = customer return).');
+      }
+    }
+
     // Source each line's sale price from the customer's price list (effective
     // version), unless the operator supplied an explicit price. Read-only lookups
     // before the transaction; null when the customer has no list / no detail.
+    // Return lines (negative qty) price off the ABSOLUTE quantity's tier — the
+    // credit uses the same unit price the sale would.
     const sourced = await Promise.all(
-      dto.lines.map((l) => this.salesPricing.priceForCustomer(billTo.id, l.itemId, l.qtyReqd)),
+      dto.lines.map((l) => this.salesPricing.priceForCustomer(billTo.id, l.itemId, Math.abs(l.qtyReqd))),
     );
 
     const at = new Date();
@@ -286,12 +296,18 @@ export class ShippingService {
     payload: ShLineEditPayload,
   ): Promise<{ item?: { id: number; itemCode: string | null; description: string | null; unit: string | null }; line?: { qtyReqd: number | null; price: Prisma.Decimal | null; entityUnit: string | null; description: string | null } }> {
     if (payload.op === 'add') {
+      if (!(payload.dto.qtyReqd !== 0) || Number.isNaN(payload.dto.qtyReqd)) {
+        throw new BadRequestException('Line quantities must be non-zero (negative = customer return).');
+      }
       const item = await db.item.findUnique({
         where: { id: payload.dto.itemId },
         select: { id: true, itemCode: true, description: true, unit: true },
       });
       if (!item) throw new BadRequestException(`Unknown item id ${payload.dto.itemId}`);
       return { item };
+    }
+    if (payload.op === 'update' && payload.dto.qtyReqd !== undefined && (payload.dto.qtyReqd === 0 || Number.isNaN(payload.dto.qtyReqd))) {
+      throw new BadRequestException('Line quantities must be non-zero (negative = customer return).');
     }
     const line = await db.ordDetail.findUnique({
       where: { id: payload.lineId },
@@ -325,7 +341,7 @@ export class ShippingService {
     if (payload.op === 'add') {
       const dto = payload.dto;
       const item = v.item!;
-      const sourced = order.billToId != null ? await this.salesPricing.priceForCustomer(order.billToId, dto.itemId, dto.qtyReqd) : null;
+      const sourced = order.billToId != null ? await this.salesPricing.priceForCustomer(order.billToId, dto.itemId, Math.abs(dto.qtyReqd)) : null;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
       const odId = ((await tx.ordDetail.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
       const sort = ((await tx.ordDetail.aggregate({ _max: { sortOrder: true }, where: { ordrId: id, context: SH_CONTEXT } }))._max.sortOrder ?? 0) + 1;

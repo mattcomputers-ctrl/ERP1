@@ -137,24 +137,22 @@ schedule **Sync changes** during parallel running).
 
 ## Priority queue (toward "shipped")
 
-1. ~~APPLY THE PARITY SWEEP~~ **DONE 2026-07-09** (ccc4f27): 48 rows closed.
-   ~~QA module group~~ **DONE 2026-07-09**: Test-catalog admin (9d212cd,
-   L129) + native QA sampling (dac1af0, L130/L132/L133). **14 rows open, all
+1. ~~APPLY THE PARITY SWEEP~~ **DONE** (ccc4f27). ~~QA module group~~
+   **DONE** (9d212cd + dac1af0). ~~SH staging (L113)~~ **DONE 2026-07-09**
+   (4723eed, ASSUMPTIONS §22). ~~Warehouse transfers + returns/credits
+   (L115)~~ **DONE 2026-07-09** (ASSUMPTIONS §23). **12 rows open, all
    queued builds.**
-2. **Build the remaining gaps** (details + sizes in the sweep doc), grouped
-   by module — NEXT UP: (a) SH staging — reserve/unreserve parcels +
-   shipping assemblies (L113, 15,855 uses, active daily; Inventory.OrdDetail
-   + ASM locations already mirrored; NOTE the SMP-exclusion precedent in
-   valuation depletion scans — staged ASM parcels must stay consumable at
-   ship time); (b) warehouse transfers (TI invoices, 182 rows, active) +
-   returns/credits (negative SH lines + native invoice reversal — 2,343
-   reversal pairs, growing) (L115); (c) MFA/TOTP + OIDC SSO (L19 — committed
-   greenfield security requirement, not legacy parity); (d) smaller:
-   supervisor in-place elevation (L22), item/entity edit-form gaps
-   (L31/L33/L34), supplier price-version editor (L37/L48), shipment reversal
-   (L60), count sheets (L62), label printing incl. sample labels (L64),
-   recipe expected-cost sub-recipe rollup (L75 — CostingRecipe already
-   imported, pure rollup extension), doc logo upload (L153).
+2. **Build the remaining gaps** (details + sizes in the sweep doc) — NEXT
+   UP: (a) MFA/TOTP + OIDC SSO (L19 — committed greenfield security
+   requirement, not legacy parity); (b) smaller: supervisor in-place
+   elevation (L22), item/entity edit-form gaps (L31/L33/L34), supplier
+   price-version editor (L37/L48), shipment reversal (L60 — RVSSH restores
+   INTO the ASM assembly per §22 discovery; the reversal must also unwind
+   QtyUsed/shipment_lot and respect reversal-pair invoice math), count
+   sheets (L62), label printing incl. sample labels (L64 — the assembly
+   label doc is the print template precedent), recipe expected-cost
+   sub-recipe rollup (L75 — CostingRecipe already imported, pure rollup
+   extension), doc logo upload (L153).
 3. Background chip pending: enforce secured-item PERFORM grant on
    order.complete + release.disposition (+ order.revise now).
 4. OPEN_QUESTIONS: native-Lot marker column if parallel running shows
@@ -171,6 +169,49 @@ schedule **Sync changes** during parallel running).
    leg values the old money column cent-rounded (ASSUMPTIONS §20.12);
    disable the PlanTrace import spec (the native plan takes over — setting
    `planning.source` already flips on first recalc).
+
+## State of the world (as of 2026-07-09 latest, SH staging + L115)
+
+- **SH staging ✅** (4723eed, ASSUMPTIONS §22): the legacy Shipping Assembly
+  flow reconstructed from data and built natively — single-use ASM `Location`
+  assemblies ('EA'+5 native namespace, one order each via
+  `Location.Reference`, parent BRECEIVE, DEL when emptied by shipment),
+  stage/unstage = parcel split/merge + `Inventory.OrdDetail` reservation +
+  legacy-exact valueless PICK legs (US at source first, MK at assembly
+  carrying the line; unpick mirrored), per-event native PICK ChangeSets.
+  **Depleter eligibility rule**: reserved parcels + SMP/ASM(/consigned, §23)
+  locations are untouchable everywhere; ONE carve-out
+  (`allowReservedToLineIds`) lets the owning order's shipLots draw its
+  reservations FIRST. shipLotOptions returns per-line `reserved` (web
+  pre-fill, emerald chips); emptied assemblies DEL'd at ship; printable
+  assembly label at `/assemblies/:id/label`; program `shipping.stage`.
+  Guards: transfer/adjust refuse reserved+SMP/ASM parcels, NST line-remove
+  and lot-enable refuse while reserved, unstage refuses IMPORTED (sync-owned)
+  reservations — staging/unstaging is lot-traced-items-only, which is what
+  makes reservations sync-safe. Review: 16 unique findings, dual-verified
+  (opus fallback when Fable verifiers hit usage limits — the standing
+  recipe), 10 confirmed + fixed (§22.10).
+- **Warehouse transfers + returns/credits ✅** (ASSUMPTIONS §23): TI
+  invoices (T-sequence, price-0 lines, freight refused) minted by
+  `POST /invoices` for IsWarehouse ship-tos; shipLots RELOCATES the shipment
+  into the warehouse's consigned WHS location (auto-created native; valued
+  TRNSFR MK legs, **leg owner = the warehouse entity** — verified ledger
+  owner-change) under an order-linked TRNSFR ChangeSet. Returns: SH lines +
+  ship entries accept negative quantities (sign must match the linked
+  line's; zero refused; warehouse orders refuse returns); negative entries
+  mint returned stock at the receiving location (lot's LATEST sublot) with
+  the legacy return shape (positive line-stamped valued US leg under the SH
+  cs), QtyUsed negative, negative shipment_lot; return lines bill their
+  negative remainder = credit. `POST /invoices/:id/reverse` = the legacy
+  credit pattern (same TransDocument, ReversedTrans link, negated
+  details/taxes/freight; pairs net in billed-qty math so re-billing works);
+  reverse control on the Invoices browser; credit doc prints a CREDIT banner
+  + negated freight/tax rows. **CRITICAL review catch (§23.6): consigned
+  locations joined SMP/ASM as protected stock in BOTH depleters** (owner →
+  IsWarehouse join) + all three pickers; tax round2 is half-away-from-zero
+  (credits negate sales exactly). Planning still nets consigned WHS stock
+  (validated-exact engine — change only with fresh evidence).
+- Suites: 114 unit + 442 integration green (expected — verify the final run).
 
 ## State of the world (as of 2026-07-09 later, QA module group)
 

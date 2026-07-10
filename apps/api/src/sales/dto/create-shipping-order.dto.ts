@@ -20,9 +20,11 @@ export class ShippingLineDto {
   @IsPositive()
   itemId!: number;
 
-  /** Quantity ordered (to ship). */
+  /** Quantity ordered (to ship). NEGATIVE = a customer-return line (96 in the
+   * live data) — the shipment brings the lot back and billing credits it.
+   * Zero is refused in the service. */
   @IsNumber()
-  @IsPositive()
+  @Min(-1_000_000_000)
   @Max(1_000_000_000)
   qtyReqd!: number;
 

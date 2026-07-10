@@ -234,14 +234,28 @@ export class StagingService {
     const locs = locIds.length
       ? await this.prisma.location.findMany({
           where: { id: { in: locIds } },
-          select: { id: true, locationCode: true, context: true, status: true },
+          select: { id: true, locationCode: true, context: true, status: true, ownerId: true },
         })
       : [];
     const locById = new Map(locs.map((l) => [l.id, l]));
+    // Consigned warehouse-owned locations are protected like SMP/ASM (the
+    // depleters refuse them, so they must not be offered to stage either).
+    const ownerIds = [...new Set(locs.map((l) => l.ownerId).filter((v): v is number => v != null))];
+    const warehouseOwners = new Set(
+      ownerIds.length
+        ? (await this.prisma.entity.findMany({ where: { id: { in: ownerIds }, isWarehouse: true }, select: { id: true } })).map((e) => e.id)
+        : [],
+    );
     const eligible = parcels.filter((p) => {
       if (p.locationId == null) return true; // location-less parcels are consumable (depleter rule)
       const loc = locById.get(p.locationId);
-      return loc != null && loc.context !== 'SMP' && loc.context !== 'ASM' && loc.status?.trim() !== 'DEL';
+      return (
+        loc != null &&
+        loc.context !== 'SMP' &&
+        loc.context !== 'ASM' &&
+        loc.status?.trim() !== 'DEL' &&
+        !(loc.ownerId != null && warehouseOwners.has(loc.ownerId))
+      );
     });
     const subIds = [...new Set(eligible.map((p) => p.sublotId!).filter((v) => v != null))];
     const subs = subIds.length

@@ -29,7 +29,9 @@ export class InvoicesService {
       sortable: ['id', 'transDocument', 'documentDate'],
       defaultSort: { id: 'desc' },
     });
-    const where: Record<string, unknown> = { context: 'CI' };
+    // Customer invoices (CI) and warehouse transfer invoices (TI, T-sequence)
+    // both list here — the detail view always rendered TI.
+    const where: Record<string, unknown> = { context: { in: INVOICE_CONTEXTS } };
     if (query.q) {
       const q = query.q.trim();
       const or: Record<string, unknown>[] = [
@@ -139,6 +141,9 @@ export class InvoicesService {
         currency: trans.currency,
         currencyLabel: currencyRow?.description ?? trans.currency,
         salesman: trans.salesmanId != null ? (parties.get(trans.salesmanId)?.name ?? null) : null,
+        // A reversal (credit) prints under the SAME document number as the
+        // original — the doc marks it so the two are distinguishable on paper.
+        isReversal: trans.reversedTransId != null,
       },
       billTo: trans.billToId != null ? parties.get(trans.billToId) ?? null : null,
       shipTo: order?.shipToId != null ? parties.get(order.shipToId) ?? null : null,
@@ -167,14 +172,27 @@ export class InvoicesService {
       where: { id: dto.orderId },
       select: {
         id: true, context: true, status: true, billToId: true, ownerId: true,
-        salesmanId: true, currency: true, poNumber: true,
+        salesmanId: true, currency: true, poNumber: true, shipToId: true,
       },
     });
     if (!order) throw new NotFoundException('Order not found');
     if (order.context !== 'SH') throw new BadRequestException('Invoices are generated from shipping (SH) orders.');
     if (order.billToId == null) throw new BadRequestException('The order has no bill-to customer.');
     if (order.status === 'NST') throw new BadRequestException('The order has not shipped anything yet.');
-    const freight = dto.freightCharge ?? 0;
+    // Warehouse-transfer orders (IsWarehouse ship-to) get a TRANSFER invoice:
+    // Trans Context='TI', the T-sequence document, lines at price 0 and no
+    // taxes/freight — a stock-movement document, not revenue (182 legacy TIs,
+    // every line Price=0.0000).
+    const shipToEntity = order.shipToId != null
+      ? await this.prisma.entity.findUnique({ where: { id: order.shipToId }, select: { id: true, isWarehouse: true } })
+      : null;
+    const isTransfer = !!shipToEntity?.isWarehouse;
+    if (isTransfer && (dto.freightCharge ?? 0) !== 0) {
+      throw new BadRequestException(
+        'Warehouse-transfer invoices are stock-movement documents and carry no freight — remove the freight charge.',
+      );
+    }
+    const freight = isTransfer ? 0 : dto.freightCharge ?? 0;
 
     return this.prisma.$transaction(async (tx) => {
       // Convention: anything reading/mutating one order's state serializes on
@@ -186,10 +204,10 @@ export class InvoicesService {
       const lines = await tx.ordDetail.findMany({
         where: { ordrId: order.id, context: 'SH', itemId: { not: null } },
         orderBy: { id: 'asc' },
-        select: { id: true, itemId: true, qtyUsed: true, price: true, entityUnit: true },
+        select: { id: true, itemId: true, qtyReqd: true, qtyUsed: true, price: true, entityUnit: true },
       });
       const priorInvoices = await tx.trans.findMany({
-        where: { ordrId: order.id, context: 'CI' },
+        where: { ordrId: order.id, context: { in: INVOICE_CONTEXTS } },
         select: { id: true, reversedTransId: true },
       });
       // A reversing invoice restores the reversed one's quantities as
@@ -209,12 +227,17 @@ export class InvoicesService {
         }
       }
 
+      // Billable remainder per line. Normal lines clamp at 0 (never bill a
+      // negative remainder from over-invoicing edge states); RETURN lines
+      // (QtyReqd < 0, 96 in the live data) bill their NEGATIVE shipped
+      // remainder — the credit.
       const billable = lines
-        .map((l) => ({
-          line: l,
-          qty: Math.max(0, num(l.qtyUsed) - (invoicedByLine.get(l.id) ?? 0)),
-        }))
-        .filter((b) => b.qty > 0);
+        .map((l) => {
+          const remainder = num(l.qtyUsed) - (invoicedByLine.get(l.id) ?? 0);
+          const isReturnLine = num(l.qtyReqd) < 0;
+          return { line: l, qty: isReturnLine ? Math.min(0, remainder) : Math.max(0, remainder) };
+        })
+        .filter((b) => Math.abs(b.qty) > 1e-9);
       if (!billable.length) {
         throw new BadRequestException(
           'Nothing to invoice — no shipped quantity remains uninvoiced on this order.',
@@ -224,12 +247,16 @@ export class InvoicesService {
       // Taxes over the billable lines (bill-to's groups x item groups) +
       // freight — computed ON the tx client (this tx holds the Ordr row lock
       // and the id-allocation lock; reads must not borrow pool connections).
-      const taxes = await this.tax.forCustomer(
-        order.billToId!,
-        billable.map((b) => ({ itemId: b.line.itemId, amount: b.qty * num(b.line.price), qty: b.qty })),
-        freight,
-        tx,
-      );
+      // Return lines contribute negative amounts (credit taxes); transfer
+      // invoices carry no taxes at all (price 0).
+      const taxes = isTransfer
+        ? { taxes: [0, 0, 0] as [number, number, number] }
+        : await this.tax.forCustomer(
+            order.billToId!,
+            billable.map((b) => ({ itemId: b.line.itemId, amount: b.qty * num(b.line.price), qty: b.qty })),
+            freight,
+            tx,
+          );
 
       // Line unit: the customer-facing unit when the line has one, else the
       // item's stock unit (what the live TransDetail rows carry).
@@ -239,14 +266,16 @@ export class InvoicesService {
         : [];
       const unitByItem = new Map(unitItems.map((i) => [i.id, i.unit]));
 
-      // Next invoice number: the plant's N-sequence (N + 8 digits, zero-padded,
+      // Next document number: the plant's N-sequence for customer invoices,
+      // T-sequence for transfer invoices (both prefix + 8 digits, zero-padded,
       // so the lexicographic max IS the numeric max). Computed under the
-      // advisory lock; imported legacy rows share the sequence — see
+      // advisory lock; imported legacy rows share the sequences — see
       // OPEN_QUESTIONS on parallel-running collisions.
+      const prefix = isTransfer ? 'T' : 'N';
       const [{ max: lastNum }] = await tx.$queryRaw<[{ max: number | null }]>`
         SELECT MAX(substring("TransDocument" from 2)::int) AS max
-        FROM "Trans" WHERE "TransDocument" ~ '^N[0-9]{8}$'`;
-      const transDocument = `N${String((lastNum ?? 0) + 1).padStart(8, '0')}`;
+        FROM "Trans" WHERE "TransDocument" ~ ${'^' + prefix + '[0-9]{8}$'}`;
+      const transDocument = `${prefix}${String((lastNum ?? 0) + 1).padStart(8, '0')}`;
 
       const transId = ((await tx.trans.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
       const maxDetail = ((await tx.transDetail.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE);
@@ -255,7 +284,7 @@ export class InvoicesService {
       await tx.trans.create({
         data: {
           id: transId,
-          context: 'CI',
+          context: isTransfer ? 'TI' : 'CI',
           transDocument,
           documentDate: at,
           transDate: at,
@@ -279,12 +308,14 @@ export class InvoicesService {
           ordDetailId: b.line.id,
           itemId: b.line.itemId,
           qty: b.qty,
-          price: b.line.price,
+          // Transfer invoices bill at zero — a stock movement, not revenue
+          // (every live TI detail row carries Price 0.0000).
+          price: isTransfer ? 0 : b.line.price,
           unit: b.line.entityUnit ?? (b.line.itemId != null ? unitByItem.get(b.line.itemId) ?? null : null),
         })),
       });
 
-      const subtotal = billable.reduce((s, b) => s + b.qty * num(b.line.price), 0);
+      const subtotal = isTransfer ? 0 : billable.reduce((s, b) => s + b.qty * num(b.line.price), 0);
       await this.audit.record(
         {
           action: 'invoice.generate',
@@ -292,7 +323,7 @@ export class InvoicesService {
           actorLabel: actor.label,
           program: 'sales.invoice',
           summary:
-            `Invoice ${transDocument} generated for shipping order #${order.id} — ` +
+            `${isTransfer ? 'Transfer invoice' : 'Invoice'} ${transDocument} generated for shipping order #${order.id} — ` +
             `${billable.length} line(s), subtotal ${subtotal.toFixed(2)}, tax ${(taxes.taxes[0] + taxes.taxes[1] + taxes.taxes[2]).toFixed(2)}` +
             (freight ? `, freight ${freight.toFixed(2)}` : ''),
           changes: [
@@ -310,6 +341,99 @@ export class InvoicesService {
       );
 
       return { id: transId, invoiceNumber: transDocument, lines: billable.length, subtotal, taxes: taxes.taxes, freight };
+    });
+  }
+
+  /**
+   * Reverse (credit) an invoice — the legacy pattern on all 2,343 live
+   * reversal pairs: a NEW Trans row with the SAME TransDocument, pointing at
+   * the original via ReversedTrans, with every detail quantity negated at the
+   * same price (and header taxes/freight negated). The billed-quantity math
+   * in generate() excludes reversal pairs, so reversing restores the
+   * quantities as invoiceable — the plant re-bills the same number the same
+   * day (330 pairs in 2026 YTD). Atomic under the Ordr row lock + alloc lock;
+   * audited.
+   */
+  async reverse(transId: number, actor: Actor) {
+    const orig = await this.prisma.trans.findUnique({ where: { id: transId } });
+    if (!orig || !INVOICE_CONTEXTS.includes(orig.context ?? '')) throw new NotFoundException('Invoice not found');
+    if (orig.reversedTransId != null) {
+      throw new BadRequestException('That row is itself a reversal — reverse the re-billed invoice instead.');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      // Order-scoped serialization (generate() for the same order holds this
+      // lock too, so reverse-then-rebill can't interleave with a generate).
+      if (orig.ordrId != null) {
+        await tx.$queryRaw`SELECT "Ordr" FROM "Ordr" WHERE "Ordr" = ${orig.ordrId} FOR UPDATE`;
+      }
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+
+      // Dup-check inside the lock: one reversal per invoice, ever.
+      const already = await tx.trans.findFirst({ where: { reversedTransId: transId }, select: { id: true } });
+      if (already) throw new BadRequestException('This invoice has already been reversed.');
+
+      const details = await tx.transDetail.findMany({
+        where: { transId },
+        orderBy: { id: 'asc' },
+        select: { context: true, ordDetailId: true, itemId: true, qty: true, price: true, unit: true },
+      });
+
+      const revId = ((await tx.trans.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+      const maxDetail = ((await tx.transDetail.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE);
+      const at = new Date();
+      await tx.trans.create({
+        data: {
+          id: revId,
+          context: orig.context,
+          transDocument: orig.transDocument, // legacy: the credit carries the SAME number
+          documentDate: at,
+          transDate: at,
+          ordrId: orig.ordrId,
+          billToId: orig.billToId,
+          ownerId: orig.ownerId,
+          salesmanId: orig.salesmanId,
+          currency: orig.currency,
+          poNumber: orig.poNumber,
+          freightCharge: orig.freightCharge != null ? -Number(orig.freightCharge) : null,
+          tax1Amount: orig.tax1Amount != null ? -Number(orig.tax1Amount) : null,
+          tax2Amount: orig.tax2Amount != null ? -Number(orig.tax2Amount) : null,
+          tax3Amount: orig.tax3Amount != null ? -Number(orig.tax3Amount) : null,
+          reversedTransId: transId,
+        },
+      });
+      if (details.length) {
+        await tx.transDetail.createMany({
+          data: details.map((d, i) => ({
+            id: maxDetail + 1 + i,
+            transId: revId,
+            context: d.context,
+            ordDetailId: d.ordDetailId,
+            itemId: d.itemId,
+            qty: d.qty != null ? -d.qty : null,
+            price: d.price,
+            unit: d.unit,
+          })),
+        });
+      }
+
+      await this.audit.record(
+        {
+          action: 'invoice.reverse',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'sales.invoice',
+          summary:
+            `Invoice ${orig.transDocument} reversed (credit) — ${details.length} line(s) negated` +
+            (orig.ordrId != null ? `; order #${orig.ordrId}'s quantities are invoiceable again` : ''),
+          changes: [
+            { tableName: 'Trans', recordId: String(revId), fieldName: 'ReversedTrans', oldValue: null, newValue: String(transId) },
+            { tableName: 'Trans', recordId: String(revId), fieldName: 'TransDocument', oldValue: null, newValue: orig.transDocument },
+          ],
+        },
+        tx,
+      );
+      return { id: revId, reversedId: transId, invoiceNumber: orig.transDocument, lines: details.length };
     });
   }
 

@@ -861,7 +861,8 @@ function CreateShippingOrder({ onDone }: { onDone: (id: number) => void }) {
   const updateLine = (i: number, patch: Partial<ShLine>) => setLines((p) => p.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
   const removeLine = (i: number) => setLines((p) => p.filter((_, idx) => idx !== i));
 
-  const validLines = lines.filter((l) => Number(l.qty) > 0);
+  // Negative quantities are return lines (credit) — only zero/blank drops.
+  const validLines = lines.filter((l) => l.qty.trim() !== '' && Number(l.qty) !== 0 && !Number.isNaN(Number(l.qty)));
   const total = validLines.reduce((s, l) => s + Number(l.qty) * (Number(l.price) || 0), 0);
   const canSubmit = !!customer && validLines.length > 0;
 
@@ -963,7 +964,7 @@ function CreateShippingOrder({ onDone }: { onDone: (id: number) => void }) {
                   <tr key={l.itemId} className="border-b border-slate-100 align-middle">
                     <td className="py-1 pr-2 font-medium">{l.itemCode}</td>
                     <td className="py-1 pr-2 text-slate-600">{l.description}</td>
-                    <td className="py-1 pr-2 text-right"><input type="number" min="0" step="any" value={l.qty} onChange={(e) => updateLine(i, { qty: e.target.value })} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
+                    <td className="py-1 pr-2 text-right"><input type="number" step="any" value={l.qty} onChange={(e) => updateLine(i, { qty: e.target.value })} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
                     <td className="py-1 pr-2"><input value={l.unit} onChange={(e) => updateLine(i, { unit: e.target.value })} maxLength={6} className="w-16 rounded border border-slate-300 px-1.5 py-1" /></td>
                     <td className="py-1 pr-2 text-right"><input type="number" min="0" step="any" value={l.price} onChange={(e) => updateLine(i, { price: e.target.value })} className="w-24 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
                     <td className="py-1 pr-2 text-right tabular-nums">{money(Number(l.qty) * (Number(l.price) || 0))}</td>
@@ -1117,7 +1118,7 @@ function EditShLines({ order, onDone }: { order: OrderFull; onDone: () => void }
             return (
               <tr key={l.id} className="border-b border-slate-100">
                 <td className="py-1 pr-2"><span className="font-medium">{l.itemCode}</span> <span className="text-slate-500">{l.itemDescription}</span></td>
-                <td className="py-1 pr-2 text-right"><input type="number" min="0" step="any" value={d.qty} onChange={(e) => setDraft(l.id, { qty: e.target.value })} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
+                <td className="py-1 pr-2 text-right"><input type="number" step="any" value={d.qty} onChange={(e) => setDraft(l.id, { qty: e.target.value })} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
                 <td className="py-1 pr-2"><input value={d.unit} onChange={(e) => setDraft(l.id, { unit: e.target.value })} maxLength={6} className="w-16 rounded border border-slate-300 px-1.5 py-1" /></td>
                 <td className="py-1 pr-2 text-right"><input type="number" min="0" step="any" value={d.price} onChange={(e) => setDraft(l.id, { price: e.target.value })} className="w-24 rounded border border-slate-300 px-1.5 py-1 text-right" /></td>
                 <td className="py-1 text-right">
@@ -1144,8 +1145,14 @@ function AddShLine({ orderId, onAdded, onPending }: { orderId: number; onAdded: 
     queryFn: () => api.get<{ rows: ShItemOption[] }>(`/shipping-orders/item-options?q=${encodeURIComponent(itemSearch)}`),
     enabled: itemSearch.trim().length >= 1,
   });
+  // Negative = a return line; only a zero/invalid qty falls back to 1.
+  const addQty = Number(qty);
   const add = useMutation({
-    mutationFn: (itemId: number) => api.post<{ pending?: boolean; requestId?: number }>(`/shipping-orders/${orderId}/lines`, { itemId, qtyReqd: Number(qty) > 0 ? Number(qty) : 1 }),
+    mutationFn: (itemId: number) =>
+      api.post<{ pending?: boolean; requestId?: number }>(`/shipping-orders/${orderId}/lines`, {
+        itemId,
+        qtyReqd: addQty !== 0 && !Number.isNaN(addQty) ? addQty : 1,
+      }),
     onSuccess: (r) => { setItemSearch(''); if (r?.pending) onPending(r.requestId); onAdded(); },
   });
   return (
@@ -1153,7 +1160,7 @@ function AddShLine({ orderId, onAdded, onPending }: { orderId: number; onAdded: 
       <div className="mb-2 text-sm font-medium text-slate-700">Add a line</div>
       <div className="flex items-center gap-2">
         <span className="text-xs text-slate-500">Qty</span>
-        <input type="number" min="0" step="any" value={qty} onChange={(e) => setQty(e.target.value)} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" />
+        <input type="number" step="any" value={qty} onChange={(e) => setQty(e.target.value)} className="w-20 rounded border border-slate-300 px-1.5 py-1 text-right" />
         <Input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)} placeholder="Search item by code or description…" />
       </div>
       {itemSearch.trim().length >= 1 && (
@@ -1351,7 +1358,7 @@ function ShipLots({ orderId, onDone }: { orderId: number; onDone: () => void }) 
     mutationFn: () =>
       api.post(`/orders/${orderId}/ship-lots`, {
         lots: rows
-          .filter((r) => r.lot.trim() && Number(r.qty) > 0)
+          .filter((r) => r.lot.trim() && Number(r.qty) !== 0 && !Number.isNaN(Number(r.qty)))
           .map((r) => ({ lot: r.lot.trim(), qty: Number(r.qty), ordDetailId: r.ordDetailId })),
         shippedAt: shippedAt || undefined,
       }),
@@ -1359,7 +1366,8 @@ function ShipLots({ orderId, onDone }: { orderId: number; onDone: () => void }) 
   });
 
   const addRow = (lot: string, ordDetailId?: number) => setRows((p) => [...p, { lot, qty: '', ordDetailId }]);
-  const valid = rows.some((r) => r.lot.trim() && Number(r.qty) > 0);
+  // Negative = a customer return (the lot comes back into stock, bills as credit).
+  const valid = rows.some((r) => r.lot.trim() && Number(r.qty) !== 0 && !Number.isNaN(Number(r.qty)));
 
   if (!open) {
     return (
@@ -1428,7 +1436,7 @@ function ShipLots({ orderId, onDone }: { orderId: number; onDone: () => void }) 
           {rows.map((r, i) => (
             <div key={i} className="mb-2 flex items-center gap-2">
               <input value={r.lot} onChange={(e) => setRows((p) => p.map((x, j) => (j === i ? { ...x, lot: e.target.value } : x)))} maxLength={50} placeholder="Lot #" className="w-48 rounded border border-slate-300 px-2 py-1 text-sm" />
-              <input type="number" min="0" step="any" value={r.qty} onChange={(e) => setRows((p) => p.map((x, j) => (j === i ? { ...x, qty: e.target.value } : x)))} placeholder="Qty shipped" className="w-32 rounded border border-slate-300 px-2 py-1 text-right text-sm" />
+              <input type="number" step="any" value={r.qty} onChange={(e) => setRows((p) => p.map((x, j) => (j === i ? { ...x, qty: e.target.value } : x)))} placeholder="Qty (- = return)" className="w-32 rounded border border-slate-300 px-2 py-1 text-right text-sm" />
               <button type="button" onClick={() => setRows((p) => p.filter((_, j) => j !== i))} className="text-sm text-slate-400 hover:text-red-600">remove</button>
             </div>
           ))}

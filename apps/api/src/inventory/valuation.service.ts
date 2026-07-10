@@ -147,6 +147,11 @@ export class ValuationService {
     // allowReservedToLineIds carve-out) — never by batch consumption or another
     // order's shipment.
     const allowedLines = opts?.allowReservedToLineIds ?? [];
+    // Protected-location set: SMP retained samples, ASM staging assemblies,
+    // and CONSIGNED warehouse locations (Owner is an IsWarehouse entity —
+    // stock that physically sits at the customer's warehouse; drawing it for
+    // a plant order would also corrupt the per-owner ledger algebra, since
+    // its MK legs belong to the warehouse entity — 2026-07-09 L115 review).
     const rows = await tx.$queryRaw<{ id: number; itemId: number | null; sublotId: number; locationId: number | null; qty: number | null; ordDetailId: number | null }[]>`
       SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Location" AS "locationId", "Qty" AS qty, "OrdDetail" AS "ordDetailId" FROM "Inventory"
       WHERE "Sublot" = ANY(${subs.map((s) => s.id)}) AND "Qty" > 0
@@ -154,7 +159,11 @@ export class ValuationService {
           ("OrdDetail" IS NOT NULL AND "OrdDetail" = ANY(${allowedLines}))
           OR (
             "OrdDetail" IS NULL
-            AND ("Location" IS NULL OR "Location" NOT IN (SELECT "Location" FROM "Location" WHERE "Context" IN ('SMP', 'ASM')))
+            AND ("Location" IS NULL OR "Location" NOT IN (
+              SELECT l."Location" FROM "Location" l
+              LEFT JOIN "Entity" e ON e."Entity" = l."Owner"
+              WHERE l."Context" IN ('SMP', 'ASM') OR e."IsWarehouse" = true
+            ))
           )
         )
       ORDER BY "Inventory" ASC
@@ -267,13 +276,17 @@ export class ValuationService {
 
     // The single locked scan (lock-order invariant — one statement, global
     // ascending id, across ALL requested items). SMP retained-sample parcels
-    // excluded — never consumable stock; SH-reserved parcels (OrdDetail set)
-    // and ASM staging locations likewise — staged stock belongs to a shipping
-    // order and only ITS shipment may draw it (see depleteSpecificMany).
+    // excluded — never consumable stock; SH-reserved parcels (OrdDetail set),
+    // ASM staging locations, and CONSIGNED warehouse-owned locations likewise
+    // (see depleteSpecificMany's protected-location rationale).
     const rows = await tx.$queryRaw<{ id: number; itemId: number; sublotId: number | null; locationId: number | null; qty: number | null }[]>`
       SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Location" AS "locationId", "Qty" AS qty FROM "Inventory"
       WHERE "Item" = ANY(${itemIds}) AND "Qty" > 0 AND "Sublot" IS NOT NULL AND "OrdDetail" IS NULL
-        AND ("Location" IS NULL OR "Location" NOT IN (SELECT "Location" FROM "Location" WHERE "Context" IN ('SMP', 'ASM')))
+        AND ("Location" IS NULL OR "Location" NOT IN (
+          SELECT l."Location" FROM "Location" l
+          LEFT JOIN "Entity" e ON e."Entity" = l."Owner"
+          WHERE l."Context" IN ('SMP', 'ASM') OR e."IsWarehouse" = true
+        ))
       ORDER BY "Inventory" ASC
       FOR UPDATE`;
     if (!rows.length) return result;

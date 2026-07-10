@@ -63,6 +63,20 @@ describe('computeTaxes', () => {
     expect(r.appliedRules[0]?.description).toBe('SALES TAX');
   });
 
+  it('a credit exactly negates its sale, including half-cent rounding ties', () => {
+    // 10% of 33.55 = 3.355 — a half-cent tie. Round-half-up would give 3.36
+    // for the sale but -3.35 for the credit; half-away-from-zero keeps the
+    // pair symmetric (a reversal must net to exactly zero — L115 review).
+    const sale = computeTaxes(PLANT_RULES, ['SALES TAX', null, null], [
+      { amount: 33.55, qty: 1, itemTaxGroups: [null, null, null] },
+    ]);
+    const credit = computeTaxes(PLANT_RULES, ['SALES TAX', null, null], [
+      { amount: -33.55, qty: -1, itemTaxGroups: [null, null, null] },
+    ]);
+    expect(credit.taxes[0]).toBe(-sale.taxes[0]);
+    expect(sale.taxes[0] + credit.taxes[0]).toBe(0);
+  });
+
   it('charges no tax for an unmatched customer group', () => {
     const r = computeTaxes(PLANT_RULES, [null, null, null], [
       { amount: 100, qty: 1, itemTaxGroups: [null, null, null] },

@@ -12,6 +12,7 @@ import {
   IsString,
   Max,
   MaxLength,
+  Min,
   ValidateNested,
 } from 'class-validator';
 
@@ -22,9 +23,11 @@ export class ShippedLotDto {
   @MaxLength(50)
   lot!: string;
 
-  /** Quantity of that lot shipped. */
+  /** Quantity of that lot shipped. NEGATIVE = a customer return — the lot
+   * comes back INTO stock and bills as a credit (96 legacy return lines).
+   * Zero is refused in the service. */
   @IsNumber()
-  @IsPositive()
+  @Min(-1_000_000_000)
   @Max(1_000_000_000)
   qty!: number;
 

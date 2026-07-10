@@ -13,7 +13,7 @@ interface Invoice {
   header: {
     invoiceNumber: string | null; documentDate: string | null; poNumber: string | null; orderId: number | null;
     termsText: string | null; carrier: string | null; fob: string | null; currency: string | null;
-    currencyLabel: string | null; salesman: string | null;
+    currencyLabel: string | null; salesman: string | null; isReversal?: boolean;
   };
   billTo: Party | null;
   shipTo: Party | null;
@@ -61,6 +61,11 @@ export function InvoiceDoc() {
         <button onClick={() => window.print()} className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">Print</button>
       </div>
 
+      {h.isReversal && (
+        <div className="mb-2 border-2 border-red-600 px-3 py-1 text-center text-sm font-bold uppercase tracking-widest text-red-600">
+          Credit — reversal of invoice {h.invoiceNumber}
+        </div>
+      )}
       <div className="flex items-start justify-between">
         <h2 className="text-2xl font-bold tracking-wide">Invoice</h2>
         <table className="text-sm">
@@ -108,8 +113,8 @@ export function InvoiceDoc() {
 
       <div className="mt-3 flex flex-col items-end gap-1 text-sm">
         <div className="flex w-64 justify-between"><span className="text-slate-500">Sub Total</span><span className="tabular-nums">{money(data.totals.subtotal)}</span></div>
-        {data.totals.freight > 0 && <div className="flex w-64 justify-between"><span className="text-slate-500">Freight</span><span className="tabular-nums">{money(data.totals.freight)}</span></div>}
-        {data.totals.tax > 0 && <div className="flex w-64 justify-between"><span className="text-slate-500">Tax</span><span className="tabular-nums">{money(data.totals.tax)}</span></div>}
+        {data.totals.freight !== 0 && <div className="flex w-64 justify-between"><span className="text-slate-500">Freight</span><span className="tabular-nums">{money(data.totals.freight)}</span></div>}
+        {data.totals.tax !== 0 && <div className="flex w-64 justify-between"><span className="text-slate-500">Tax</span><span className="tabular-nums">{money(data.totals.tax)}</span></div>}
         <div className="text-xs text-slate-400">All amounts are in {h.currencyLabel ?? 'US Dollars'}</div>
         <div className="flex w-64 justify-between border-t border-slate-400 pt-1 text-base font-bold"><span>Total Amount Due:</span><span className="tabular-nums">{money(data.totals.total)}</span></div>
       </div>

@@ -47,7 +47,10 @@ const FREIGHT_GROUP = 'freight';
 
 const norm = (v: string | null | undefined) => (v ?? '').trim().toLowerCase();
 const asNum = (v: unknown) => (v == null ? 0 : Number(v));
-const round2 = (v: number) => Math.round((v + Number.EPSILON) * 100) / 100;
+// Half-away-from-zero: a credit's tax must EXACTLY negate its sale's tax —
+// Math.round's round-half-up is asymmetric across zero (round2(-0.125) would
+// differ from -round2(0.125) by a cent on half-cent ties; L115 review).
+const round2 = (v: number) => (v < 0 ? -1 : 1) * (Math.round((Math.abs(v) + Number.EPSILON) * 100) / 100);
 
 /** Resolve the rule for one (level, entity group, item group) — UG order. */
 export function resolveRule(

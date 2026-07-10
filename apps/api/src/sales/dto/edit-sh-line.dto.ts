@@ -5,9 +5,10 @@ import { IsNumber, IsOptional, IsPositive, IsString, Max, MaxLength, Min } from 
 // ShippingLineDto; the item of an existing line is not re-pointed — remove + add
 // to change the item.)
 export class UpdateShippingOrderLineDto {
+  /** NEGATIVE = a customer-return line; zero refused in the service. */
   @IsOptional()
   @IsNumber()
-  @IsPositive()
+  @Min(-1_000_000_000)
   @Max(1_000_000_000)
   qtyReqd?: number;
 

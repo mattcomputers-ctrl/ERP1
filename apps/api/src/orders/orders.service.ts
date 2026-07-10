@@ -2510,11 +2510,20 @@ export class OrdersService {
           ? this.prisma.sublot.findMany({ where: { id: { in: subIds } }, select: { id: true, lot: true } })
           : Promise.resolve([]),
         locIds.length
-          ? this.prisma.location.findMany({ where: { id: { in: locIds } }, select: { id: true, locationCode: true, context: true } })
+          ? this.prisma.location.findMany({ where: { id: { in: locIds } }, select: { id: true, locationCode: true, context: true, ownerId: true } })
           : Promise.resolve([]),
       ]);
       const lotBySub = new Map(subs.map((s) => [s.id, s.lot]));
       const locById = new Map(locs.map((l) => [l.id, l]));
+      // Consigned warehouse-owned locations are protected stock like SMP/ASM
+      // (the depleter refuses them — offering them would promise phantom
+      // availability).
+      const locOwnerIds = [...new Set(locs.map((l) => l.ownerId).filter((v): v is number => v != null))];
+      const warehouseOwners = new Set(
+        locOwnerIds.length
+          ? (await this.prisma.entity.findMany({ where: { id: { in: locOwnerIds }, isWarehouse: true }, select: { id: true } })).map((e) => e.id)
+          : [],
+      );
       // Sum qty per (item, lot, location) so the picker lists each parcel once.
       const agg = new Map<string, { itemId: number; lot: string; onHand: number; locationId: number | null; locationCode: string | null }>();
       for (const r of inv) {
@@ -2528,7 +2537,7 @@ export class OrdersService {
           reservedByLine.set(r.ordDetailId, arr);
           continue;
         }
-        if (loc && (loc.context === 'SMP' || loc.context === 'ASM')) continue; // not free stock
+        if (loc && (loc.context === 'SMP' || loc.context === 'ASM' || (loc.ownerId != null && warehouseOwners.has(loc.ownerId)))) continue; // not free stock
         const key = `${r.itemId}|${lot}|${r.locationId ?? ''}`;
         const cur = agg.get(key) ?? {
           itemId: r.itemId,
@@ -2586,12 +2595,26 @@ export class OrdersService {
   async shipLots(id: number, dto: ShipLotsDto, actor: Actor) {
     const order = await this.prisma.ordr.findUnique({
       where: { id },
-      select: { id: true, context: true, poNumber: true },
+      select: { id: true, context: true, poNumber: true, shipToId: true },
     });
     if (!order) throw new NotFoundException('Order not found');
     if (order.context !== 'SH') {
       throw new BadRequestException('Only shipping (SH) orders ship finished-good lots.');
     }
+    // Zero is neither a shipment nor a return (DTO @Min allows negatives for
+    // return entries — service re-assert).
+    for (const l of dto.lots) {
+      if (!(l.qty !== 0) || Number.isNaN(l.qty)) {
+        throw new BadRequestException('Shipped quantities must be non-zero (negative = customer return).');
+      }
+    }
+    // Warehouse transfer orders (ship-to is an IsWarehouse entity — the
+    // PRESS TECH consignment pattern, 182 TI invoices): shipped stock is NOT
+    // consumed, it RELOCATES into the destination's consigned location.
+    const shipToEntity = order.shipToId != null
+      ? await this.prisma.entity.findUnique({ where: { id: order.shipToId }, select: { id: true, entityCode: true, isWarehouse: true } })
+      : null;
+    const isWarehouseTransfer = !!shipToEntity?.isWarehouse;
 
     // Ship date: the pick-list date if given, else now (close time). UTC-stored
     // like every other timestamp (see datetime-timezone-handling).
@@ -2640,7 +2663,7 @@ export class OrdersService {
       if (refLineIds.length) {
         const validLines = await tx.ordDetail.findMany({
           where: { id: { in: refLineIds }, ordrId: id },
-          select: { id: true, itemId: true, context: true },
+          select: { id: true, itemId: true, context: true, qtyReqd: true },
         });
         const lineById = new Map(validLines.map((l) => [l.id, l]));
         for (const l of dto.lots) {
@@ -2657,7 +2680,30 @@ export class OrdersService {
               `Lot ${l.lot.trim()} is not line ${l.ordDetailId}'s item — link each shipped lot to its own order line.`,
             );
           }
+          // Sign discipline: a return entry must link a return (negative)
+          // line and a shipment a sale line — a negative entry on a sale line
+          // would net QtyUsed below the invoiced quantity and the credit
+          // could never bill (the remainder clamps at 0 — L115 review).
+          const reqd = line.qtyReqd != null ? Number(line.qtyReqd) : null;
+          if (reqd != null && reqd !== 0 && (l.qty < 0) !== (reqd < 0)) {
+            throw new BadRequestException(
+              l.qty < 0
+                ? `Line ${l.ordDetailId} is a sale line — record returns on a return (negative-quantity) line.`
+                : `Line ${l.ordDetailId} is a return line — link shipped quantities to a sale line.`,
+            );
+          }
         }
+      }
+
+      // Warehouse-transfer orders cannot take return entries: the return
+      // would mint plant stock while the consigned parcel (and its MK leg)
+      // stays — double-counted stock. Legacy has zero precedent for
+      // warehouse returns; consigned stock comes back via a plain transfer
+      // (ASSUMPTIONS §23.5).
+      if (isWarehouseTransfer && dto.lots.some((l) => l.qty < 0)) {
+        throw new BadRequestException(
+          'Warehouse-transfer orders cannot take return entries — bring consigned stock back with an inventory transfer from the consigned location.',
+        );
       }
 
       // Native-id lock BEFORE the parcel scan (the SH change set + movement
@@ -2674,9 +2720,14 @@ export class OrdersService {
       const orderLineIds = (
         await tx.ordDetail.findMany({ where: { ordrId: id, context: 'SH' }, select: { id: true } })
       ).map((l) => l.id);
+      // Positive entries deplete; NEGATIVE entries are customer returns — the
+      // lot comes back INTO stock (96 legacy return lines: SH change set with
+      // POSITIVE line-stamped US legs at the stock location).
+      const shipEntriesIn = dto.lots.filter((l) => l.qty > 0);
+      const returnEntries = dto.lots.filter((l) => l.qty < 0);
       const depletions = await this.valuation.depleteSpecificMany(
         tx,
-        dto.lots.map((l) => ({ lot: l.lot.trim(), qty: l.qty })),
+        shipEntriesIn.map((l) => ({ lot: l.lot.trim(), qty: l.qty })),
         { allowReservedToLineIds: orderLineIds },
       );
       const shortfalls = [...depletions.entries()]
@@ -2701,36 +2752,135 @@ export class OrdersService {
       // viewer and at-date, absent from shipment-detail (ASSUMPTIONS §20).
       // Shortfalls fall on the LAST entries (front-fill), matching the draw.
       const entriesByLot = new Map<string, { remaining: number; lineId: number | null }[]>();
-      for (const l of dto.lots) {
+      for (const l of shipEntriesIn) {
         const code = l.lot.trim();
         entriesByLot.set(code, [...(entriesByLot.get(code) ?? []), { remaining: l.qty, lineId: l.ordDetailId ?? null }]);
       }
       const shipTakes = [...depletions.values()].flatMap((d) => d.takes);
-      if (shipTakes.length) {
-        const costByLot = await this.movements.unitCostByLot(tx, shipTakes.map((t) => t.lot));
-        const owner = await this.movements.defaultOwnerId(tx);
-        const shipEvents: MovementEvent[] = [];
-        for (const t of shipTakes) {
-          const uc = costByLot.get(t.lot) ?? null;
-          const entries = entriesByLot.get(t.lot) ?? [];
-          let left = t.take;
-          while (left > 1e-9) {
-            const entry = entries.find((e) => e.remaining > 1e-9);
-            const slice = entry ? Math.min(left, entry.remaining) : left;
-            if (entry) entry.remaining -= slice;
-            shipEvents.push({
-              context: 'SH', changeSetId: shipCsId, itemId: t.itemId, sublotId: t.sublotId,
-              legs: [{
-                context: 'US', ownerId: owner, locationId: t.locationId,
-                ordDetailId: entry?.lineId ?? null,
-                qty: -slice, value: uc != null ? this.movements.money4(-slice * uc) : null,
-              }],
-            });
-            left -= slice;
-          }
+      const allLotCodes = [...new Set(dto.lots.map((l) => l.lot.trim()))];
+      const costByLot = await this.movements.unitCostByLot(tx, allLotCodes);
+      const owner = await this.movements.defaultOwnerId(tx);
+      const shipEvents: MovementEvent[] = [];
+      for (const t of shipTakes) {
+        const uc = costByLot.get(t.lot) ?? null;
+        const entries = entriesByLot.get(t.lot) ?? [];
+        let left = t.take;
+        while (left > 1e-9) {
+          const entry = entries.find((e) => e.remaining > 1e-9);
+          const slice = entry ? Math.min(left, entry.remaining) : left;
+          if (entry) entry.remaining -= slice;
+          shipEvents.push({
+            context: 'SH', changeSetId: shipCsId, itemId: t.itemId, sublotId: t.sublotId,
+            legs: [{
+              context: 'US', ownerId: owner, locationId: t.locationId,
+              ordDetailId: entry?.lineId ?? null,
+              qty: -slice, value: uc != null ? this.movements.money4(-slice * uc) : null,
+            }],
+          });
+          left -= slice;
         }
-        await this.movements.record(tx, shipEvents);
       }
+
+      // Customer returns: the lot comes back INTO stock at the receiving dock
+      // — mint/merge an unreserved parcel and post the legacy return shape
+      // (a POSITIVE line-stamped US leg, valued at the lot's cost, under the
+      // same SH change set — order 182437's verified legs).
+      const returnedInto: { lot: string; qty: number; locationId: number }[] = [];
+      if (returnEntries.length) {
+        const returnLocId = await this.valuation.resolveLocationId(tx, 'inventory.receivingLocation');
+        if (returnLocId == null) throw new BadRequestException('No stock location available to receive the returned lot(s).');
+        for (const l of returnEntries) {
+          const code = l.lot.trim();
+          const backQty = -l.qty; // positive
+          // The lot's latest sublot carries the returned stock (a return of a
+          // multi-sublot lot credits its most recent identity — assumption §23).
+          const sub = await tx.sublot.findFirst({ where: { lot: code }, orderBy: { id: 'desc' }, select: { id: true } });
+          if (!sub) throw new BadRequestException(`Lot ${code} has no sublot to return stock into.`);
+          const lotRow = lotByCode.get(code)!;
+          const merge = await tx.inventory.findFirst({
+            where: { itemId: lotRow.itemId ?? undefined, sublotId: sub.id, locationId: returnLocId, status: null, ordDetailId: null },
+            select: { id: true, qty: true },
+          });
+          if (merge) {
+            await tx.inventory.update({ where: { id: merge.id }, data: { qty: (merge.qty ?? 0) + backQty } });
+          } else {
+            const invId =
+              ((await tx.inventory.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+            await tx.inventory.create({
+              data: { id: invId, itemId: lotRow.itemId ?? 0, sublotId: sub.id, locationId: returnLocId, qty: backQty, status: null },
+            });
+          }
+          const uc = costByLot.get(code) ?? null;
+          shipEvents.push({
+            context: 'SH', changeSetId: shipCsId, itemId: lotRow.itemId ?? null, sublotId: sub.id,
+            legs: [{
+              context: 'US', ownerId: owner, locationId: returnLocId,
+              ordDetailId: l.ordDetailId ?? null,
+              qty: backQty, value: uc != null ? this.movements.money4(backQty * uc) : null,
+            }],
+          });
+          returnedInto.push({ lot: code, qty: backQty, locationId: returnLocId });
+        }
+      }
+
+      // Warehouse transfers (IsWarehouse ship-to): the shipped stock is not
+      // consumed — it RELOCATES to the destination's consigned WHS location,
+      // changing stock owner to the warehouse entity (the verified legacy
+      // pair: valued SH US legs out + valued TRNSFR MK legs in, leg owner =
+      // the warehouse entity, both change sets order-linked).
+      let transferCsId: number | null = null;
+      if (isWarehouseTransfer && shipTakes.length && order.shipToId != null) {
+        let consigned = await tx.location.findFirst({
+          where: { ownerId: order.shipToId, context: 'WHS' },
+          orderBy: { id: 'asc' },
+          select: { id: true },
+        });
+        if (!consigned) {
+          const locId =
+            ((await tx.location.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+          consigned = await tx.location.create({
+            data: {
+              id: locId,
+              context: 'WHS',
+              ownerId: order.shipToId,
+              description: `Consigned stock — ${shipToEntity?.entityCode ?? order.shipToId}`,
+            },
+            select: { id: true },
+          });
+        }
+        transferCsId =
+          ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+        await tx.changeSet.create({ data: { id: transferCsId, context: 'TRNSFR', ordrId: id, changeDate: shippedAt } });
+        for (const t of shipTakes) {
+          // Consigned parcel: merge into the same-identity unreserved parcel
+          // at the consigned location, else mint (native id).
+          const merge = await tx.inventory.findFirst({
+            where: { itemId: t.itemId ?? undefined, sublotId: t.sublotId, locationId: consigned.id, ordDetailId: null },
+            select: { id: true, qty: true },
+          });
+          if (merge) {
+            await tx.inventory.update({ where: { id: merge.id }, data: { qty: (merge.qty ?? 0) + t.take } });
+          } else {
+            const invId =
+              ((await tx.inventory.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+            await tx.inventory.create({
+              data: { id: invId, itemId: t.itemId ?? 0, sublotId: t.sublotId, locationId: consigned.id, qty: t.take, status: null },
+            });
+          }
+          const uc = costByLot.get(t.lot) ?? null;
+          shipEvents.push({
+            context: 'TRNSFR', changeSetId: transferCsId, itemId: t.itemId, sublotId: t.sublotId,
+            legs: [{
+              // Leg owner = the WAREHOUSE entity: consigned stock changes
+              // owner on the ledger (verified legacy legs, Owner=100877).
+              context: 'MK', ownerId: order.shipToId, locationId: consigned.id,
+              qty: t.take, value: uc != null ? this.movements.money4(t.take * uc) : null,
+            }],
+          });
+        }
+      }
+
+      if (shipEvents.length) await this.movements.record(tx, shipEvents);
 
       await tx.shipmentLot.createMany({
         data: dto.lots.map((l) => {
@@ -2789,6 +2939,8 @@ export class OrdersService {
           summary:
             `Shipping order #${id} recorded ${dto.lots.length} shipped lot${dto.lots.length === 1 ? '' : 's'}` +
             (order.poNumber ? ` (PO ${order.poNumber})` : '') +
+            (returnedInto.length ? `; ${returnedInto.length} returned lot(s) back into stock` : '') +
+            (transferCsId != null ? `; relocated to ${shipToEntity?.entityCode ?? 'warehouse'} consigned stock (TRNSFR ${transferCsId})` : '') +
             (shortfalls.length ? `; ${shortfalls.length} lot(s) short on-hand` : '') +
             (closedAssemblies.length ? `; assembly ${closedAssemblies.map((a) => a.code).join(', ')} emptied and closed` : '') +
             (dto.reason ? ` — ${dto.reason}` : ''),
@@ -2814,7 +2966,15 @@ export class OrdersService {
         },
         tx,
       );
-      return { id, shipped: dto.lots.length, shippedAt: shippedAt.toISOString(), shortfalls, packingSlipId: shipCsId };
+      return {
+        id,
+        shipped: dto.lots.length,
+        shippedAt: shippedAt.toISOString(),
+        shortfalls,
+        packingSlipId: shipCsId,
+        returned: returnedInto,
+        warehouseTransfer: transferCsId != null ? { changeSetId: transferCsId, shipToId: order.shipToId } : null,
+      };
     });
   }
 
@@ -3108,9 +3268,19 @@ export class OrdersService {
       });
       const invLocIds = [...new Set(inv.map((r) => r.locationId).filter((v): v is number => v != null))];
       const invLocs = invLocIds.length
-        ? await this.prisma.location.findMany({ where: { id: { in: invLocIds } }, select: { id: true, context: true } })
+        ? await this.prisma.location.findMany({ where: { id: { in: invLocIds } }, select: { id: true, context: true, ownerId: true } })
         : [];
-      const specialLocIds = new Set(invLocs.filter((l) => l.context === 'SMP' || l.context === 'ASM').map((l) => l.id));
+      const invLocOwnerIds = [...new Set(invLocs.map((l) => l.ownerId).filter((v): v is number => v != null))];
+      const invWarehouseOwners = new Set(
+        invLocOwnerIds.length
+          ? (await this.prisma.entity.findMany({ where: { id: { in: invLocOwnerIds }, isWarehouse: true }, select: { id: true } })).map((e) => e.id)
+          : [],
+      );
+      const specialLocIds = new Set(
+        invLocs
+          .filter((l) => l.context === 'SMP' || l.context === 'ASM' || (l.ownerId != null && invWarehouseOwners.has(l.ownerId)))
+          .map((l) => l.id),
+      );
       const onHandByLot = new Map<string, number>();
       for (const g of inv) {
         if (g.locationId != null && specialLocIds.has(g.locationId)) continue;

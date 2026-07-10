@@ -1544,3 +1544,88 @@ data:
    merge-candidate TOCTOU vs the import mirror (the sync can never write
    OrdDetail on rows the staging flows produce — lot-tracked items are
    sync-skipped).
+
+## Warehouse transfers + returns/credits (§23 / L115, built 2026-07-09)
+
+Live discovery (all verified same-day):
+
+1. **Warehouse transfer** = a plain SH order whose ShipTo is an IsWarehouse
+   entity (PRESS TECH CONSIGN, InTransitLocation unused in the actual flow).
+   The shipment posts BOTH movements: valued SH US legs out of the (staged)
+   source AND valued TRNSFR MK legs into the warehouse's consigned WHS
+   location (exactly one per entity, LocationCode NULL, Owner = the
+   warehouse) — **the MK leg Owner is the WAREHOUSE entity** (verified legs:
+   US Owner=4 / MK Owner=100877): consigned stock changes owner on the
+   ledger. The TRNSFR ChangeSet carries the Ordr. The invoice is Trans
+   Context='TI', TransDocument 'T'+8 digits (T00000178 live max), BillTo =
+   the order's own-site BillTo, **every detail Price = 0.0000** (a stock
+   document, not revenue).
+2. **Customer returns** = negative-QtyReqd SH lines (96 live; latest
+   2026-04-01, ShipTo=PRESS TECH the plain customer). The ship event posts
+   POSITIVE line-stamped US legs valued at cost (order 182437 landed at the
+   main WHS location 10669), QtyUsed goes negative, billing nets the credit.
+3. **Credits / invoice reversal** = a NEW Trans with the SAME TransDocument,
+   ReversedTrans → the original, all detail quantities negated at the same
+   price (2,343 live pairs; N00132772 shows bill→reverse→re-bill→reverse→
+   re-bill all in one day).
+
+**ERP1-native design:**
+
+1. `shipLots` detects the IsWarehouse ship-to: after the normal depletion
+   (reserved-first staging carve-out still applies) it mints/merges
+   unreserved consigned parcels (native ids; the consigned location is
+   resolved by (Owner=shipTo, Context='WHS') and auto-created natively when
+   missing) and emits one TRNSFR MK leg per parcel draw, valued at the lot
+   cost, leg owner = the warehouse entity, under a native order-linked
+   TRNSFR ChangeSet. On-hand is conserved. Consigned
+   locations are PROTECTED stock for consumption (see §23.6) but remain
+   nettable in planning (context WHS) — the §10 engine was validated exact
+   against the live legacy plan while PRESS TECH held consigned parcels, so
+   changing planning's treatment needs fresh evidence first.
+2. `invoices.generate` mints Context='TI' with the T-sequence and price-0
+   lines (no taxes/freight) for warehouse ship-tos; the browser lists CI+TI;
+   prior-invoice math counts both contexts. The T-sequence shares the
+   parallel-running collision caveat with the N-sequence (OPEN_QUESTIONS).
+3. Returns: DTOs allow NEGATIVE quantities on SH lines and ship entries
+   (zero refused in-service; price sourcing uses the ABSOLUTE qty's tier).
+   A negative ship entry mints/merges the returned stock at the receiving
+   location into the lot's LATEST sublot (a multi-sublot lot credits its
+   most recent identity — assumption), posts the legacy return leg shape,
+   stamps QtyUsed negative, records a negative shipment_lot (recall shows
+   the return). Return lines bill their negative remainder (Math.min(0,..)
+   clamp) — normal lines still clamp at 0 so over-billing edge states never
+   emit surprise credits.
+4. `invoices.reverse` (`POST /invoices/:id/reverse`, program sales.invoice):
+   the legacy credit pattern exactly (same document number, negated details/
+   taxes/freight, ReversedTrans link); refused on reversal rows and
+   already-reversed invoices (dup-check inside the Ordr-lock + alloc-lock
+   tx). generate() already excluded reversal pairs, so reversing restores
+   the quantities as invoiceable. A reverse control with confirm sits on the
+   Invoices browser.
+5. **Consign pullbacks are NOT modeled**: a return line on a warehouse order
+   brings stock into the RECEIVING location (own stock) without decrementing
+   the consigned location — the consigned balance is corrected with a plain
+   transfer FROM the consigned location when the physical pullback happens
+   (documented limitation; the legacy pullback evidence is too thin to build
+   against — 4 own-site TIs ever).
+
+6. **Review round (§23.6)**: 4 lenses → 17 unique findings → dual adversarial
+   verification (38 agents, zero failures). 8 distinct defects confirmed and
+   fixed; 6 refuted. The CRITICAL: consigned parcels were eligible free stock
+   for every depleter — any customer order or batch could silently draw stock
+   that physically sits at the warehouse, and the US legs would post under
+   the plant owner against MK legs owned by the warehouse entity (per-owner
+   ledger corruption). Both depleter scans now exclude locations owned by an
+   IsWarehouse entity (joined via Location.Owner → Entity.IsWarehouse), and
+   the three pickers (ship-lot options, batch dispense, stage candidates)
+   match. Majors: ship-entry sign must match the linked line's QtyReqd sign
+   (a return on a sale line netted QtyUsed below the invoiced qty and the
+   credit could never bill past the 0-clamp); warehouse-transfer orders
+   refuse return entries (the return would double-count — consigned parcel
+   and MK leg never reversed; pullbacks stay a plain transfer, §23.5); the
+   create-order form and add-line panel silently dropped/clamped negative
+   quantities client-side. Minors: credit invoices print negated freight/tax
+   rows (non-zero, not >0, conditions) and carry a CREDIT banner
+   (get() exposes isReversal); tax round2 is now half-away-from-zero so a
+   credit's tax exactly negates its sale on half-cent ties; TI generation
+   REFUSES a freight charge instead of silently zeroing it.
