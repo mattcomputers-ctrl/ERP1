@@ -14,6 +14,7 @@ import { IptResultsDto } from './dto/ipt-results.dto';
 import { RecordLineDto } from './dto/record-line.dto';
 import { RejectEditApprovalDto } from './dto/edit-approval.dto';
 import { ReverseOrderDto } from './dto/reverse-order.dto';
+import { ReverseShipmentDto } from './dto/reverse-shipment.dto';
 import {
   AddRevisionLineDto,
   PublishRevisionDto,
@@ -355,5 +356,22 @@ export class OrdersController {
   @RequireProgram('orders.ship')
   shipLots(@Param('id', ParseIntPipe) id: number, @Body() dto: ShipLotsDto, @CurrentUser() actor: Actor) {
     return this.orders.shipLots(id, dto, actor);
+  }
+
+  // The order's native shipment events (packing slips) with lots + reversal state.
+  @Get(':id/shipments')
+  @RequireProgram('orders.ship')
+  shipments(@Param('id', ParseIntPipe) id: number) {
+    return this.orders.shipments(id);
+  }
+
+  // Reverse ONE shipment event (the legacy RejectWaybill flow, RVSSH): restores
+  // the shipped stock where it left, negates the stored movement legs, unwinds
+  // QtyUsed, and marks the shipment's lots reversed. Same secured item /
+  // perform grant / elevation as the batch reversal.
+  @Post(':id/reverse-shipment')
+  @RequireProgram('orders.reverse')
+  reverseShipment(@Param('id', ParseIntPipe) id: number, @Body() dto: ReverseShipmentDto, @CurrentUser() actor: Actor) {
+    return this.orders.reverseShipment(id, dto, actor);
   }
 }

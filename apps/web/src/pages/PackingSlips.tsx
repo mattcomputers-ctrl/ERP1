@@ -10,6 +10,7 @@ interface Row {
   orderId: number | null;
   poNumber: string | null;
   customer: string | null;
+  reversed: boolean;
 }
 interface ListResp { rows: Row[]; total: number; page: number; pageSize: number }
 
@@ -32,7 +33,15 @@ export function PackingSlips() {
   });
 
   const columns: GridColumn<Row>[] = [
-    { key: 'packingSlipNumber', header: 'Packing Slip #', sortable: true, render: (r) => r.id },
+    {
+      key: 'packingSlipNumber', header: 'Packing Slip #', sortable: true,
+      render: (r) => (
+        <span>
+          {r.id}
+          {r.reversed && <span className="ml-2 rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700">REVERSED</span>}
+        </span>
+      ),
+    },
     { key: 'date', header: 'Date', sortable: true, value: (r) => fmtDate(r.date), render: (r) => fmtDate(r.date) },
     { key: 'customer', header: 'Customer' },
     { key: 'orderId', header: 'Order #' },

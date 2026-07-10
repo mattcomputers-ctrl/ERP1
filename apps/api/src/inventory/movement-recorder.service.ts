@@ -177,8 +177,11 @@ export interface MovementEvent {
    * PICK = shipping-assembly staging (legacy: 41,299 movements, valueless
    * US-at-source / MK-at-ASM pairs, the MK leg carrying the reserved SH
    * line; unpick mirrors it with the signs flipped — ERP1 emits it at the
-   * stage/unstage seams). */
-  context: 'PO' | 'MISC' | 'COUNT' | 'TRNSFR' | 'SH' | 'CMNGL' | 'PCKAGE' | 'SAMPLE' | 'PICK';
+   * stage/unstage seams).
+   * RVSSH = shipment reversal (legacy: 1,406 movements — unlike RVSMFP,
+   * whose movements keep the forward PCKAGE context, shipment-reversal
+   * movements carry the RVSSH context themselves; verified census). */
+  context: 'PO' | 'MISC' | 'COUNT' | 'TRNSFR' | 'SH' | 'CMNGL' | 'PCKAGE' | 'SAMPLE' | 'PICK' | 'RVSSH';
   changeSetId: number;
   itemId?: number | null;
   sublotId?: number | null;

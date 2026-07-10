@@ -45,6 +45,14 @@ export class PackingSlipService {
     const orders = await this.prisma.ordr.findMany({ where: { id: { in: orderIds } }, select: { id: true, billToId: true } });
     const billToByOrder = new Map(orders.map((o) => [o.id, o.billToId]));
     const parties = await this.party.resolve(orders.map((o) => o.billToId));
+    // Reversed slips (an RVSSH change set points back at them) list marked.
+    const reversals = rows.length
+      ? await this.prisma.changeSet.findMany({
+          where: { context: 'RVSSH', reverseChangeSetId: { in: rows.map((r) => r.id) } },
+          select: { reverseChangeSetId: true },
+        })
+      : [];
+    const reversedSet = new Set(reversals.map((r) => r.reverseChangeSetId));
 
     return {
       rows: rows.map((r) => {
@@ -56,6 +64,7 @@ export class PackingSlipService {
           orderId: r.ordrId,
           poNumber: r.poNumber,
           customer: billTo != null ? (parties.get(billTo)?.name ?? null) : null,
+          reversed: reversedSet.has(r.id),
         };
       }),
       total, page, pageSize,
@@ -66,10 +75,13 @@ export class PackingSlipService {
     const cs = await this.prisma.changeSet.findUnique({ where: { id } });
     if (!cs || cs.context !== 'SH') throw new NotFoundException('Packing slip not found');
 
-    const [order, shipment, trans] = await Promise.all([
+    const [order, shipment, trans, reversal] = await Promise.all([
       cs.ordrId != null ? this.prisma.ordr.findUnique({ where: { id: cs.ordrId } }) : Promise.resolve(null),
       this.prisma.changeSetShipment.findUnique({ where: { changeSetId: id }, select: { waybillId: true } }),
       cs.transId != null ? this.prisma.trans.findUnique({ where: { id: cs.transId }, select: { transDocument: true } }) : Promise.resolve(null),
+      // A reversed shipment (RVSSH back-pointer) prints marked, like the
+      // legacy REJ'd waybill — the paper must not read as a live shipment.
+      this.prisma.changeSet.findFirst({ where: { context: 'RVSSH', reverseChangeSetId: id }, select: { id: true } }),
     ]);
     const waybill = shipment?.waybillId != null
       ? await this.prisma.waybill.findUnique({ where: { id: shipment.waybillId }, select: { id: true, dateShipped: true, status: true, shipViaId: true, trailerNumber: true } })
@@ -119,6 +131,7 @@ export class PackingSlipService {
         status: waybill?.status ?? null,
         trailerNumber: waybill?.trailerNumber ?? null,
         termsText: terms?.description ?? order?.terms ?? null,
+        reversed: reversal != null,
       },
       billTo: order?.billToId != null ? parties.get(order.billToId) ?? null : null,
       shipTo: order?.shipToId != null ? parties.get(order.shipToId) ?? null : null,

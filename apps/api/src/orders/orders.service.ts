@@ -28,6 +28,7 @@ import type { EditOrderDto } from './dto/edit-order.dto';
 import type { IptResultsDto } from './dto/ipt-results.dto';
 import type { RecordLineDto } from './dto/record-line.dto';
 import type { ReverseOrderDto } from './dto/reverse-order.dto';
+import type { ReverseShipmentDto } from './dto/reverse-shipment.dto';
 import type {
   AddRevisionLineDto,
   PublishRevisionDto,
@@ -1892,7 +1893,12 @@ export class OrdersService {
             `Cannot reverse — produced lot ${downstream.parentLot} was already consumed (by lot ${downstream.childLot}).`,
           );
         }
-        const shipped = await tx.shipmentLot.findFirst({ where: { lot: { in: producedCodes } }, select: { lot: true } });
+        // Live shipments only: a shipment that was itself reversed (RVSSH) put
+        // the stock back, so it no longer pins the batch.
+        const shipped = await tx.shipmentLot.findFirst({
+          where: { lot: { in: producedCodes }, reversedByChangeSetId: null },
+          select: { lot: true },
+        });
         if (shipped) {
           throw new BadRequestException(`Cannot reverse — produced lot ${shipped.lot} was already shipped.`);
         }
@@ -2946,6 +2952,9 @@ export class OrdersService {
             // Default the shipped unit to the item's stock unit when not given.
             unit: l.unit?.trim() || item?.unit || null,
             shippedAt,
+            // The shipment event these rows belong to — the grain reversal
+            // (reverseShipment) operates at.
+            changeSetId: shipCsId,
           };
         }),
       });
@@ -3025,6 +3034,586 @@ export class OrdersService {
         packingSlipId: shipCsId,
         returned: returnedInto,
         warehouseTransfer: transferCsId != null ? { changeSetId: transferCsId, shipToId: order.shipToId } : null,
+      };
+    });
+  }
+
+  /**
+   * The order's native shipment events (packing slips) with their recorded
+   * lots and reversal state — the data behind the Shipments panel and its
+   * Reverse control. Imported legacy shipments (SH change sets below the
+   * native id range) are history, not reversible here, and carry no
+   * shipment_lot rows anyway.
+   */
+  async shipments(id: number) {
+    const order = await this.prisma.ordr.findUnique({ where: { id }, select: { id: true, context: true } });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.context !== 'SH') return { shipments: [] };
+    const csRows = await this.prisma.changeSet.findMany({
+      where: { ordrId: id, context: 'SH', id: { gte: NATIVE_ID_BASE } },
+      orderBy: { id: 'desc' },
+      select: { id: true, changeDate: true },
+    });
+    if (!csRows.length) return { shipments: [] };
+    const reversals = await this.prisma.changeSet.findMany({
+      where: { ordrId: id, context: 'RVSSH', reverseChangeSetId: { in: csRows.map((c) => c.id) } },
+      select: { id: true, reverseChangeSetId: true },
+    });
+    const reversalByFwd = new Map(reversals.map((r) => [r.reverseChangeSetId, r.id]));
+    const lots = await this.prisma.shipmentLot.findMany({
+      where: { changeSetId: { in: csRows.map((c) => c.id) } },
+      orderBy: { id: 'asc' },
+      select: { changeSetId: true, lot: true, qty: true, unit: true, ordDetailId: true },
+    });
+    const lotsByCs = new Map<number, { lot: string; qty: number | null; unit: string | null; ordDetailId: number | null }[]>();
+    for (const l of lots) {
+      if (l.changeSetId == null) continue;
+      lotsByCs.set(l.changeSetId, [
+        ...(lotsByCs.get(l.changeSetId) ?? []),
+        { lot: l.lot, qty: l.qty, unit: l.unit, ordDetailId: l.ordDetailId },
+      ]);
+    }
+    return {
+      shipments: csRows.map((c) => ({
+        packingSlipId: c.id,
+        shippedAt: c.changeDate,
+        lots: lotsByCs.get(c.id) ?? [],
+        reversedByChangeSetId: reversalByFwd.get(c.id) ?? null,
+      })),
+    };
+  }
+
+  /**
+   * Reverse ONE shipment event (packing slip) of a shipping order — the legacy
+   * RejectWaybill flow (RVSSH: 293 change sets, every year 2019–2026, always
+   * reverse → fix → re-ship). Verified legacy shape, reproduced here:
+   * - a reversing ChangeSet Context='RVSSH' with ReverseChangeSet → the
+   *   forward SH change set, effective-dated to the FORWARD's ChangeDate
+   *   (all 293 legacy reversals copy it to the second — the at-date axis
+   *   nets to zero from the shipment date on);
+   * - movement headers Context='RVSSH' whose legs NEGATE THE STORED forward
+   *   legs 1:1 (same location/owner/line; qty and value sign-flipped — never
+   *   re-derived from current cost, which may have moved since);
+   * - shipped stock restored WHERE IT LEFT: 291/293 legacy reversals restore
+   *   into the ASM shipping assembly (re-opened if the shipment emptied and
+   *   closed it) so the follow-up re-ship draws it again; restored assembly
+   *   parcels are re-reserved to their line (the depleter fence requires ASM
+   *   stock to be line-reserved — unreserved-at-ASM would be orphaned);
+   * - customer-return entries (positive forward US legs) are un-returned: the
+   *   restocked quantity is removed again, refused if it has since moved;
+   * - a warehouse (consigned) shipment's relocation is unwound exactly like
+   *   legacy order 144976: a plain TRNSFR change set negates the consigned MK
+   *   legs (bidirectional ReverseChangeSet linkage, both directions stamped)
+   *   while the RVSSH change set negates the SH side;
+   * - OrdDetail.QtyUsed unwound by the reversed quantities (billing reads it);
+   * - shipment_lot rows MARKED reversed (legacy keeps the rejected waybill as
+   *   Status='REJ'), so recall no longer lists the shipment as live.
+   *
+   * Invoicing: legacy reversed shipment + invoice atomically (every RVSSH
+   * carries the credit Trans). ERP1 decouples them — the invoice must be
+   * reversed FIRST via POST /invoices/:id/reverse when the shipped quantity
+   * is already billed (refused otherwise, per line, sign-aware for return
+   * lines) — invoice reversal is its own audited, program-gated action and
+   * the reversal-pair netting already makes re-billing work.
+   *
+   * Only native shipments (SH change set id ≥ 1e9 — ERP1 recorded the lots,
+   * legs and QtyUsed itself) are reversible; imported legacy shipments'
+   * footprint is not ERP1-shaped. Gated like the batch reversal: program
+   * orders.reverse + the order.reverse secured item (reason/signature/witness
+   * per configuration, perform grant with supervisor elevation).
+   */
+  async reverseShipment(id: number, dto: ReverseShipmentDto, actor: Actor) {
+    const order = await this.prisma.ordr.findUnique({
+      where: { id },
+      select: { id: true, context: true, shipToId: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.context !== 'SH') throw new BadRequestException('Only shipping (SH) orders have shipments to reverse.');
+    const fwdCsId = dto.packingSlipId;
+    if (fwdCsId < NATIVE_ID_BASE) {
+      throw new BadRequestException(
+        'Only shipments recorded in ERP1 can be reversed — this packing slip was imported from the legacy system.',
+      );
+    }
+
+    const req = await this.securedRequirements(actor.id, REVERSE_SECURED_ITEM);
+    if (req.requireReason && !dto.reason?.trim()) {
+      throw new BadRequestException('A reason is required to reverse this shipment.');
+    }
+    const elevator = await this.resolveElevation(actor, dto, req.allowed, REVERSE_SECURED_ITEM, 'reverse shipments');
+    const witness = await this.verifySignatures(actor, dto, req, REVERSE_SECURED_ITEM, {
+      password: 'Your password is required to sign this shipment reversal.',
+      witnessRequired: 'A witness signature is required to reverse this shipment.',
+      witnessNotPermitted: 'That user is not permitted to witness shipment reversal.',
+    }, elevator);
+
+    return this.prisma.$transaction(async (tx) => {
+      // Lock order (system convention 1c): Ordr row lock → the id-allocation
+      // lock → the single parcel FOR UPDATE scan. Everything below allocates
+      // (change sets, movements, minted parcels), and every precondition is
+      // re-asserted INSIDE the locked tx — a concurrent reversal of the same
+      // packing slip serializes on the row lock and finds it already reversed.
+      await this.lockOrdr(tx, id);
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${NATIVE_ID_ALLOC_LOCK})`;
+
+      const fwd = await tx.changeSet.findUnique({
+        where: { id: fwdCsId },
+        select: { id: true, context: true, ordrId: true, changeDate: true },
+      });
+      if (!fwd || fwd.context !== 'SH' || fwd.ordrId !== id) {
+        throw new BadRequestException(`Packing slip ${fwdCsId} is not a shipment of order #${id}.`);
+      }
+      const already = await tx.changeSet.findFirst({
+        where: { context: 'RVSSH', reverseChangeSetId: fwdCsId },
+        select: { id: true },
+      });
+      if (already) throw new BadRequestException('This shipment has already been reversed.');
+
+      // The recorded shipment entries (QtyUsed/billing grain) and the stored
+      // movement legs (physical/ledger grain — shortfall draws mean the two
+      // can differ; each side unwinds its own record).
+      const slRows = await tx.shipmentLot.findMany({
+        where: { changeSetId: fwdCsId },
+        select: { id: true, lot: true, qty: true, ordDetailId: true },
+      });
+      const fwdMovements = await tx.invMovement.findMany({
+        where: { changeSetId: fwdCsId },
+        orderBy: { id: 'asc' },
+        select: { id: true, context: true, itemId: true, sublotId: true },
+      });
+      if (!slRows.length && !fwdMovements.length) {
+        throw new BadRequestException(`Packing slip ${fwdCsId} recorded nothing to reverse.`);
+      }
+
+      // A warehouse (consigned) shipment's paired TRNSFR change set: shipLots
+      // allocates it immediately after the SH change set in the same tx under
+      // the same alloc lock, so it is EXACTLY id+1 (order-linked, same
+      // effective date) when it exists. Direction discriminator (review round):
+      // an all-shortfall warehouse shipment gets NO pair, and a SIBLING
+      // reversal's TRNSFR NEGATION cs can then land at id+1 — a negation cs
+      // points BACKWARD (reverseChangeSetId < its own id) while a genuine
+      // forward pair points at null or its LATER negation, so the backward
+      // pointer is excluded here instead of throwing 'already reversed' at a
+      // shipment that never was.
+      const pairedTrnsfr = await tx.changeSet.findFirst({
+        where: {
+          id: fwdCsId + 1, context: 'TRNSFR', ordrId: id,
+          OR: [{ reverseChangeSetId: null }, { reverseChangeSetId: { gt: fwdCsId + 1 } }],
+        },
+        select: { id: true, changeDate: true, reverseChangeSetId: true },
+      });
+      if (pairedTrnsfr?.reverseChangeSetId != null) {
+        throw new BadRequestException('This shipment has already been reversed.');
+      }
+      const trnsfrMovements = pairedTrnsfr
+        ? await tx.invMovement.findMany({
+            where: { changeSetId: pairedTrnsfr.id },
+            orderBy: { id: 'asc' },
+            select: { id: true, context: true, itemId: true, sublotId: true },
+          })
+        : [];
+
+      const allMovementIds = [...fwdMovements, ...trnsfrMovements].map((m) => m.id);
+      const allLegs = allMovementIds.length
+        ? await tx.invMovementDtl.findMany({
+            where: { invMovementId: { in: allMovementIds } },
+            orderBy: { id: 'asc' },
+            select: {
+              id: true, invMovementId: true, context: true, ownerId: true,
+              locationId: true, ordDetailId: true, qty: true, value: true,
+            },
+          })
+        : [];
+      const movementById = new Map([...fwdMovements, ...trnsfrMovements].map((m) => [m.id, m]));
+      const trnsfrMovementIds = new Set(trnsfrMovements.map((m) => m.id));
+
+      // --- invoice guard (per line, sign-aware): after unwinding, the
+      // non-reversed billed quantity must still fit inside QtyUsed — anything
+      // else means an active invoice bills stock this reversal un-ships.
+      // Same billed-qty algebra as InvoicesService.generate (reversal pairs
+      // excluded), re-read under the Ordr row lock generate() also holds.
+      const revByLine = new Map<number, number>();
+      for (const r of slRows) {
+        if (r.ordDetailId != null) revByLine.set(r.ordDetailId, (revByLine.get(r.ordDetailId) ?? 0) + (r.qty ?? 0));
+      }
+      if (revByLine.size) {
+        const lines = await tx.ordDetail.findMany({
+          where: { id: { in: [...revByLine.keys()] } },
+          select: { id: true, qtyReqd: true, qtyUsed: true },
+        });
+        const priorInvoices = await tx.trans.findMany({
+          where: { ordrId: id, context: { in: ['CI', 'TI'] } },
+          select: { id: true, transDocument: true, reversedTransId: true },
+        });
+        const reversedIds = new Set(priorInvoices.map((t) => t.reversedTransId).filter((v): v is number => v != null));
+        const active = priorInvoices.filter((t) => t.reversedTransId == null && !reversedIds.has(t.id));
+        const invoicedByLine = new Map<number, number>();
+        const invoiceDocByLine = new Map<number, string>();
+        if (active.length) {
+          const prior = await tx.transDetail.findMany({
+            where: { transId: { in: active.map((t) => t.id) } },
+            select: { transId: true, ordDetailId: true, qty: true },
+          });
+          const docByTrans = new Map(active.map((t) => [t.id, t.transDocument ?? String(t.id)]));
+          for (const p of prior) {
+            if (p.ordDetailId == null) continue;
+            invoicedByLine.set(p.ordDetailId, (invoicedByLine.get(p.ordDetailId) ?? 0) + (p.qty != null ? Number(p.qty) : 0));
+            if (p.transId != null) invoiceDocByLine.set(p.ordDetailId, docByTrans.get(p.transId) ?? '');
+          }
+        }
+        for (const line of lines) {
+          const rev = revByLine.get(line.id) ?? 0;
+          const newUsed = (line.qtyUsed != null ? Number(line.qtyUsed) : 0) - rev;
+          const billed = invoicedByLine.get(line.id) ?? 0;
+          const isReturnLine = (line.qtyReqd != null ? Number(line.qtyReqd) : 0) < 0;
+          const overBilled = isReturnLine ? billed < newUsed - 1e-9 : billed > newUsed + 1e-9;
+          if (overBilled) {
+            const doc = invoiceDocByLine.get(line.id);
+            throw new BadRequestException(
+              `Line ${line.id}'s shipped quantity is already invoiced${doc ? ` (${doc})` : ''} — reverse the invoice first, then reverse the shipment.`,
+            );
+          }
+        }
+      }
+
+      // --- classify the stored forward legs. ERP1's forward SH/TRNSFR
+      // emission writes exactly one qty leg per movement; anything outside
+      // the three known shapes is not ERP1-shaped and is refused rather than
+      // guessed at (the ledger-corruption escape hatch).
+      type StoredLeg = typeof allLegs[number];
+      const restores: { leg: StoredLeg; itemId: number | null; sublotId: number | null; qty: number }[] = [];
+      const removals: { leg: StoredLeg; itemId: number | null; sublotId: number | null; qty: number; kind: 'return' | 'consigned' }[] = [];
+      for (const leg of allLegs) {
+        const mov = movementById.get(leg.invMovementId)!;
+        const qty = leg.qty != null ? Number(leg.qty) : null;
+        if (qty == null) continue; // value-only legs: negated below, no parcel action
+        const fromTrnsfr = trnsfrMovementIds.has(leg.invMovementId);
+        if (!fromTrnsfr && leg.context === 'US' && qty < 0) {
+          restores.push({ leg, itemId: mov.itemId, sublotId: mov.sublotId, qty: -qty });
+        } else if (!fromTrnsfr && leg.context === 'US' && qty > 0) {
+          removals.push({ leg, itemId: mov.itemId, sublotId: mov.sublotId, qty, kind: 'return' });
+        } else if (fromTrnsfr && leg.context === 'MK' && qty > 0) {
+          removals.push({ leg, itemId: mov.itemId, sublotId: mov.sublotId, qty, kind: 'consigned' });
+        } else {
+          throw new BadRequestException(
+            `Packing slip ${fwdCsId} has a movement leg outside the known shipment shape (${leg.context} ${qty}) — not reversible.`,
+          );
+        }
+      }
+
+      // Pre-link shipments (recorded before the reversal upgrade, or left
+      // unlinked by an ambiguous backfill): QtyUsed was stamped from entries
+      // this change set can no longer be tied to — restoring the stock
+      // without unwinding QtyUsed would let the order re-ship AND bill the
+      // same goods. Refuse rather than half-reverse.
+      if (!slRows.length && allLegs.some((l) => l.ordDetailId != null && !trnsfrMovementIds.has(l.invMovementId))) {
+        throw new BadRequestException(
+          `Packing slip ${fwdCsId} predates the reversal upgrade (its shipment entries are not linked to it) — not reversible.`,
+        );
+      }
+
+      // --- ONE global ascending-id locked scan over every parcel this
+      // reversal may touch (restore merges + return/consigned removals) —
+      // the system-wide lock-order invariant.
+      const touchedSublots = [...new Set(
+        [...restores, ...removals].map((r) => r.sublotId).filter((v): v is number => v != null),
+      )];
+      type LockedParcel = { id: number; itemId: number | null; sublotId: number; locationId: number | null; qty: number | null; ordDetailId: number | null; status: string | null };
+      const lockedParcels: LockedParcel[] = touchedSublots.length
+        ? await tx.$queryRaw<LockedParcel[]>`
+            SELECT "Inventory" AS id, "Item" AS "itemId", "Sublot" AS "sublotId", "Location" AS "locationId",
+                   "Qty" AS qty, "OrdDetail" AS "ordDetailId", "Status" AS status
+            FROM "Inventory"
+            WHERE "Sublot" = ANY(${touchedSublots})
+            ORDER BY "Inventory" ASC
+            FOR UPDATE`
+        : [];
+      const qtyById = new Map(lockedParcels.map((p) => [p.id, p.qty ?? 0]));
+
+      // --- removals FIRST (depletion before restore — convention #3): the
+      // un-return / un-consign must find the restocked quantity still there.
+      const removedParcels: { parcelId: number; qty: number; kind: 'return' | 'consigned' }[] = [];
+      for (const r of removals) {
+        let left = r.qty;
+        const candidates = lockedParcels.filter(
+          (p) => p.sublotId === r.sublotId && p.locationId === r.leg.locationId && p.ordDetailId == null,
+        );
+        for (const p of candidates) {
+          if (left <= 1e-9) break;
+          const avail = qtyById.get(p.id) ?? 0;
+          if (avail <= 0) continue;
+          const take = Math.min(avail, left);
+          qtyById.set(p.id, avail - take);
+          await tx.inventory.update({ where: { id: p.id }, data: { qty: avail - take } });
+          removedParcels.push({ parcelId: p.id, qty: take, kind: r.kind });
+          left -= take;
+        }
+        if (left > 1e-9) {
+          throw new BadRequestException(
+            r.kind === 'return'
+              ? `Cannot reverse — ${left} of the returned quantity is no longer at its restock location (moved or consumed since).`
+              : `Cannot reverse — ${left} of the consigned quantity is no longer at the warehouse location (drawn down since).`,
+          );
+        }
+      }
+
+      // --- restores: put the shipped quantity back WHERE IT LEFT. At an ASM
+      // assembly the parcel is re-reserved to its line (staged state — the
+      // depleter fence requires it; an unreserved ASM parcel is invisible to
+      // every depleter) and a DEL'd assembly is re-opened (legacy reuses the
+      // assembly for the corrected re-ship). Merge into the same-identity
+      // parcel when one exists, else mint (native id).
+      const restoreLocIds = [...new Set(restores.map((r) => r.leg.locationId).filter((v): v is number => v != null))];
+      const restoreLocs = restoreLocIds.length
+        ? await tx.location.findMany({
+            where: { id: { in: restoreLocIds } },
+            select: { id: true, context: true, status: true, locationCode: true },
+          })
+        : [];
+      const locById = new Map(restoreLocs.map((l) => [l.id, l]));
+
+      // Free-entry-drawn-from-ASM legs (review round): NEVER place an
+      // unreserved parcel at an ASM location — it is invisible to every
+      // depleter and refused by unstage (orphaned stock). Reserve it to the
+      // order's line for the item (the staged parcel necessarily served a
+      // line of this item); a pathological off-order free entry falls back
+      // to the receiving/default stock location instead.
+      const needsAsmFallback = restores.some((r) => {
+        const loc = r.leg.locationId != null ? locById.get(r.leg.locationId) : undefined;
+        return loc?.context === 'ASM' && r.leg.ordDetailId == null;
+      });
+      const lineByItem = new Map<number, number>();
+      let asmFallbackLocId: number | null = null;
+      if (needsAsmFallback) {
+        const shLines = await tx.ordDetail.findMany({
+          where: { ordrId: id, context: 'SH', itemId: { not: null } },
+          orderBy: { id: 'asc' },
+          select: { id: true, itemId: true },
+        });
+        for (const l of shLines) if (l.itemId != null && !lineByItem.has(l.itemId)) lineByItem.set(l.itemId, l.id);
+        asmFallbackLocId = await this.valuation.resolveLocationId(tx, RECEIVING_LOCATION_SETTING);
+      }
+
+      const reopenedAssemblies: { id: number; code: string }[] = [];
+      const restoredParcels: { parcelId: number; sublotId: number | null; qty: number; locationId: number | null; reservedToLineId: number | null }[] = [];
+      for (const r of restores) {
+        const loc = r.leg.locationId != null ? locById.get(r.leg.locationId) : undefined;
+        const isAsm = loc?.context === 'ASM';
+        let reserveTo = isAsm ? r.leg.ordDetailId ?? null : null;
+        let targetLocId = r.leg.locationId;
+        let intoAsm = isAsm;
+        if (isAsm && reserveTo == null) {
+          reserveTo = (r.itemId != null ? lineByItem.get(r.itemId) : undefined) ?? null;
+          if (reserveTo == null) {
+            if (asmFallbackLocId == null) {
+              throw new BadRequestException(
+                'Cannot reverse — no stock location available to restore a free-entry assembly draw.',
+              );
+            }
+            targetLocId = asmFallbackLocId;
+            intoAsm = false;
+          }
+        }
+        if (intoAsm && loc && loc.status?.trim() === 'DEL' && !reopenedAssemblies.some((a) => a.id === loc.id)) {
+          await tx.location.update({ where: { id: loc.id }, data: { status: null } });
+          reopenedAssemblies.push({ id: loc.id, code: loc.locationCode ?? String(loc.id) });
+        }
+        const merge = lockedParcels.find(
+          (p) =>
+            p.sublotId === r.sublotId &&
+            p.locationId === targetLocId &&
+            p.ordDetailId === reserveTo &&
+            p.status == null,
+        );
+        if (merge) {
+          const next = (qtyById.get(merge.id) ?? 0) + r.qty;
+          qtyById.set(merge.id, next);
+          await tx.inventory.update({ where: { id: merge.id }, data: { qty: next } });
+          restoredParcels.push({ parcelId: merge.id, sublotId: r.sublotId, qty: r.qty, locationId: targetLocId, reservedToLineId: reserveTo });
+        } else {
+          if (r.itemId == null || r.sublotId == null || targetLocId == null) {
+            throw new BadRequestException(`Packing slip ${fwdCsId} has a movement leg without lot identity — not reversible.`);
+          }
+          const invId =
+            ((await tx.inventory.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+          await tx.inventory.create({
+            data: {
+              id: invId, itemId: r.itemId, sublotId: r.sublotId, locationId: targetLocId,
+              qty: r.qty, status: null, ordDetailId: reserveTo,
+            },
+          });
+          // Later legs of the same identity merge into the just-minted parcel.
+          const minted: LockedParcel = {
+            id: invId, itemId: r.itemId, sublotId: r.sublotId, locationId: targetLocId,
+            qty: r.qty, ordDetailId: reserveTo, status: null,
+          };
+          lockedParcels.push(minted);
+          qtyById.set(invId, r.qty);
+          restoredParcels.push({ parcelId: invId, sublotId: r.sublotId, qty: r.qty, locationId: targetLocId, reservedToLineId: reserveTo });
+        }
+      }
+
+      // --- the reversing change sets. Legacy order: the TRNSFR negation
+      // change set FIRST (bidirectionally linked to its forward — 54931↔54933),
+      // then the RVSSH change set (back-pointer to the SH change set). Both
+      // effective-dated to their forward's ChangeDate (all 293 legacy
+      // reversals copy it): the at-date axis nets to zero from the shipment
+      // date on — a reversed shipment never happened, ledger-wise.
+      let trnsfrRevCsId: number | null = null;
+      if (pairedTrnsfr) {
+        trnsfrRevCsId =
+          ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+        await tx.changeSet.create({
+          data: {
+            id: trnsfrRevCsId, context: 'TRNSFR', ordrId: id,
+            changeDate: pairedTrnsfr.changeDate, reverseChangeSetId: pairedTrnsfr.id,
+          },
+        });
+        await tx.changeSet.update({ where: { id: pairedTrnsfr.id }, data: { reverseChangeSetId: trnsfrRevCsId } });
+      }
+      const rvsCsId =
+        ((await tx.changeSet.aggregate({ _max: { id: true }, where: { id: { gte: NATIVE_ID_BASE } } }))._max.id ?? NATIVE_ID_BASE) + 1;
+      await tx.changeSet.create({
+        data: { id: rvsCsId, context: 'RVSSH', ordrId: id, changeDate: fwd.changeDate, reverseChangeSetId: fwdCsId },
+      });
+
+      // --- movement negation: one reversing movement per stored forward
+      // movement, legs sign-flipped 1:1 (qty AND stored value — NULL values
+      // stay NULL). SH-side headers carry Context='RVSSH' under the RVSSH
+      // change set (the verified legacy shape — 1,406 legacy movements);
+      // TRNSFR-side headers keep Context='TRNSFR' under the TRNSFR negation
+      // change set (legacy 54933).
+      const legsByMovement = new Map<bigint, StoredLeg[]>();
+      for (const leg of allLegs) {
+        legsByMovement.set(leg.invMovementId, [...(legsByMovement.get(leg.invMovementId) ?? []), leg]);
+      }
+      const negationEvents: MovementEvent[] = [];
+      for (const mov of [...trnsfrMovements, ...fwdMovements]) {
+        const fromTrnsfr = trnsfrMovementIds.has(mov.id);
+        const legs = legsByMovement.get(mov.id) ?? [];
+        if (!legs.length) continue;
+        negationEvents.push({
+          context: fromTrnsfr ? 'TRNSFR' : 'RVSSH',
+          changeSetId: fromTrnsfr ? trnsfrRevCsId! : rvsCsId,
+          itemId: mov.itemId,
+          sublotId: mov.sublotId,
+          legs: legs.map((l) => ({
+            context: l.context as 'MK' | 'US' | 'MKCA' | 'USCA',
+            ownerId: l.ownerId ?? 0,
+            locationId: l.locationId,
+            ordDetailId: l.ordDetailId,
+            qty: l.qty != null ? -Number(l.qty) : null,
+            value: l.value != null ? this.movements.money4(-Number(l.value)) : null,
+          })),
+        });
+      }
+      await this.movements.record(tx, negationEvents);
+
+      // --- unwind the shipped-so-far stamp (billing reads QtyUsed) and mark
+      // the shipment entries reversed (mark, not delete — the legacy pattern
+      // keeps the rejected waybill; recall reads live rows only). The
+      // before-values feed the audit rows (true before/after, same row lock).
+      const usedBefore = new Map<number, number>();
+      if (revByLine.size) {
+        const beforeRows = await tx.ordDetail.findMany({
+          where: { id: { in: [...revByLine.keys()] } },
+          select: { id: true, qtyUsed: true },
+        });
+        for (const b of beforeRows) usedBefore.set(b.id, b.qtyUsed != null ? Number(b.qtyUsed) : 0);
+      }
+      for (const [lineId, rev] of revByLine) {
+        await tx.$executeRaw`UPDATE "OrdDetail" SET "QtyUsed" = COALESCE("QtyUsed", 0) - ${rev} WHERE "OrdDetail" = ${lineId}`;
+      }
+      await tx.shipmentLot.updateMany({
+        where: { changeSetId: fwdCsId },
+        data: { reversedByChangeSetId: rvsCsId },
+      });
+
+      const reason = dto.reason?.trim();
+      const restoredTotal = restoredParcels.reduce((s, r) => s + r.qty, 0);
+      const auditLog = await this.audit.record(
+        {
+          action: 'order.reverse-shipment',
+          actorUserId: actor.id,
+          actorLabel: actor.label,
+          program: 'orders.reverse',
+          summary:
+            `Shipment ${fwdCsId} of order #${id} reversed (RVSSH ${rvsCsId}) — restored ${restoredTotal} to stock` +
+            (removedParcels.some((r) => r.kind === 'return') ? '; returned stock removed again' : '') +
+            (trnsfrRevCsId != null ? `; consigned relocation unwound (TRNSFR ${trnsfrRevCsId})` : '') +
+            (reopenedAssemblies.length ? `; assembly ${reopenedAssemblies.map((a) => a.code).join(', ')} re-opened` : '') +
+            (reason ? ` — ${reason}` : '') +
+            (elevator ? ` (elevated by ${elevator.label})` : '') +
+            (witness ? ` (witnessed by ${witness.label}${dto.witnessExplanation ? `: ${dto.witnessExplanation}` : ''})` : ''),
+          changes: [
+            { tableName: 'ChangeSet', recordId: String(rvsCsId), fieldName: 'Context', oldValue: null, newValue: 'RVSSH' },
+            { tableName: 'ChangeSet', recordId: String(rvsCsId), fieldName: 'ReverseChangeSet', oldValue: null, newValue: String(fwdCsId) },
+            ...(trnsfrRevCsId != null
+              ? [
+                  { tableName: 'ChangeSet', recordId: String(trnsfrRevCsId), fieldName: 'ReverseChangeSet', oldValue: null, newValue: String(pairedTrnsfr!.id) },
+                  // The bidirectional back-stamp mutates the POSTED forward
+                  // TRNSFR change set — record it (every mutation audited).
+                  { tableName: 'ChangeSet', recordId: String(pairedTrnsfr!.id), fieldName: 'ReverseChangeSet', oldValue: null, newValue: String(trnsfrRevCsId) },
+                ]
+              : []),
+            // The shipment entries' reversal mark (updateMany above).
+            {
+              tableName: 'shipment_lot', recordId: String(fwdCsId), fieldName: 'reversedByChangeSetId',
+              oldValue: null, newValue: String(rvsCsId),
+            },
+            ...restoredParcels.map((r) => ({
+              tableName: 'Inventory', recordId: String(r.parcelId), fieldName: 'restored',
+              oldValue: null, newValue: String(r.qty),
+            })),
+            ...removedParcels.map((r) => ({
+              tableName: 'Inventory', recordId: String(r.parcelId), fieldName: r.kind === 'return' ? 'unreturned' : 'unconsigned',
+              oldValue: String(r.qty), newValue: null,
+            })),
+            ...reopenedAssemblies.map((a) => ({
+              tableName: 'Location', recordId: String(a.id), fieldName: 'Status', oldValue: 'DEL', newValue: null,
+            })),
+            ...[...revByLine.entries()].map(([lineId, rev]) => {
+              const before = usedBefore.get(lineId) ?? 0;
+              return {
+                tableName: 'OrdDetail', recordId: String(lineId), fieldName: 'QtyUsed',
+                oldValue: String(before), newValue: String(before - rev),
+              };
+            }),
+          ],
+        },
+        tx,
+      );
+
+      if (req.requireSignature || elevator) {
+        await this.esign.sign(
+          {
+            securedItemKey: REVERSE_SECURED_ITEM,
+            meaning: 'Shipment reversal',
+            userId: (elevator ?? actor).id,
+            userLabel: elevator ? elevator.label : actor.label ?? actor.id,
+            userExplanation: reason ?? null,
+            witnessUserId: witness?.id ?? null,
+            witnessLabel: witness?.label ?? null,
+            witnessExplanation: witness ? dto.witnessExplanation ?? null : null,
+            onBehalfOfUserId: elevator ? actor.id : null,
+            onBehalfOfLabel: elevator ? actor.label ?? actor.id : null,
+            masterTable: 'ChangeSet',
+            masterId: String(fwdCsId),
+            auditLogId: auditLog.id,
+          },
+          tx,
+        );
+      }
+
+      return {
+        id,
+        packingSlipId: fwdCsId,
+        reversedBy: rvsCsId,
+        transferReversedBy: trnsfrRevCsId,
+        restored: restoredParcels.map((r) => ({ parcelId: r.parcelId, qty: r.qty, reservedToLineId: r.reservedToLineId })),
+        reopenedAssemblies: reopenedAssemblies.map((a) => a.code),
+        signed: req.requireSignature || !!elevator,
+        witness: witness?.label ?? null,
       };
     });
   }

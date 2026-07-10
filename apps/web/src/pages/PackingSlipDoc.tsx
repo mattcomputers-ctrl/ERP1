@@ -13,7 +13,7 @@ interface PackingSlip {
   header: {
     packingSlipNumber: number; date: string | null; orderId: number | null; invoiceNumber: string | null;
     poNumber: string | null; carrier: string | null; fob: string | null; status: string | null;
-    trailerNumber: string | null; termsText: string | null;
+    trailerNumber: string | null; termsText: string | null; reversed: boolean;
   };
   billTo: Party | null;
   shipTo: Party | null;
@@ -58,6 +58,13 @@ export function PackingSlipDoc() {
         <h1 className="text-xl font-semibold">Packing Slip {h.packingSlipNumber}</h1>
         <button onClick={() => window.print()} className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500">Print</button>
       </div>
+
+      {/* A reversed shipment (legacy: the waybill goes REJ) must never print as live paper. */}
+      {h.reversed && (
+        <div className="mb-3 rounded border-2 border-red-600 px-3 py-1 text-center text-lg font-bold tracking-widest text-red-600">
+          REVERSED
+        </div>
+      )}
 
       <div className="flex items-start justify-between">
         <div><DocLogo /><h2 className="text-2xl font-bold tracking-wide">Packing Slip</h2></div>

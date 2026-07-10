@@ -331,8 +331,10 @@ export class GenealogyService {
    */
   private async shipmentsForLots(lots: string[]) {
     if (!lots.length) return [];
+    // Live shipments only — a reversed shipment (RVSSH) put the stock back;
+    // the lot never reached that customer.
     const rows = await this.prisma.shipmentLot.findMany({
-      where: { lot: { in: lots } },
+      where: { lot: { in: lots }, reversedByChangeSetId: null },
       orderBy: { shippedAt: 'desc' },
       select: { lot: true, ordrId: true, itemId: true, qty: true, unit: true, shippedAt: true },
     });

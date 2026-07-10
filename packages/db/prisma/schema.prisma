@@ -1454,9 +1454,17 @@ model ShipmentLot {
   unit        String?  @map("unit") @db.VarChar(20)
   shippedAt   DateTime @map("shipped_at")
   createdAt   DateTime @default(now()) @map("created_at")
+  // The shipment event (native SH ChangeSet = the packing slip) the row was
+  // recorded under — the grain shipment reversal (RVSSH) operates at.
+  changeSetId Int?     @map("change_set")
+  // Reversal mark (the RVSSH ChangeSet that undid this shipment). Marked, not
+  // deleted — legacy keeps the rejected waybill as Status='REJ'; recall and
+  // the batch-reverse shipped-guard read only live (null) rows.
+  reversedByChangeSetId Int? @map("reversed_by_change_set")
 
   @@index([lot])
   @@index([ordrId])
+  @@index([changeSetId])
   @@map("shipment_lot")
 }
 

@@ -134,6 +134,14 @@ export function Orders() {
     qc.invalidateQueries({ queryKey: ['order-execution', selected] });
     qc.invalidateQueries({ queryKey: ['order-variance', selected] });
     qc.invalidateQueries({ queryKey: ['order-revisions', selected] });
+    // SH panels: a ship records a new packing slip; a reversal restores /
+    // re-reserves assembly stock and unwinds QtyUsed — refresh the shipments
+    // panel and the staging-family queries (mirrors StagingPanel's own
+    // refreshStaging). All are enabled-when-open, so this is cheap.
+    qc.invalidateQueries({ queryKey: ['order-shipments', selected] });
+    qc.invalidateQueries({ queryKey: ['sh-staging', selected] });
+    qc.invalidateQueries({ queryKey: ['ship-lot-options', selected] });
+    qc.invalidateQueries({ queryKey: ['stage-candidates', selected] });
     setReason('');
   };
   const action = useMutation({
@@ -330,6 +338,9 @@ export function Orders() {
             <StagingPanel key={`stg-${detail.data.id}`} orderId={detail.data.id} onDone={refresh} />
           )}
           {detail.data.context === 'SH' && <ShipLots key={`shl-${detail.data.id}`} orderId={detail.data.id} onDone={refresh} />}
+          {detail.data.context === 'SH' && (
+            <ShipmentsPanel key={`shp-${detail.data.id}`} orderId={detail.data.id} onDone={refresh} />
+          )}
           {detail.data.context === 'SH' && lifeState(detail.data.status) !== 'NST' && (
             <GenerateInvoice orderId={detail.data.id} onDone={refresh} />
           )}
@@ -1454,6 +1465,199 @@ function ShipLots({ orderId, onDone }: { orderId: number; onDone: () => void }) 
         </>
       )}
     </Card>
+  );
+}
+
+// The order's shipment events (packing slips) with their recorded lots and a
+// Reverse control — the legacy RejectWaybill flow (RVSSH). Reversing restores
+// the shipped stock where it left (back into the shipping assembly when it was
+// staged), negates the stored movement legs, unwinds the shipped quantities,
+// and marks the shipment reversed for recall. Shares the order.reverse secured
+// item (reason/signature/witness/elevation per configuration).
+interface ShipmentRow {
+  packingSlipId: number;
+  shippedAt: string | null;
+  lots: { lot: string; qty: number | null; unit: string | null; ordDetailId: number | null }[];
+  reversedByChangeSetId: number | null;
+}
+function ShipmentsPanel({ orderId, onDone }: { orderId: number; onDone: () => void }) {
+  const q = useQuery({
+    queryKey: ['order-shipments', orderId],
+    queryFn: () => api.get<{ shipments: ShipmentRow[] }>(`/orders/${orderId}/shipments`),
+  });
+  // A failed fetch must not silently hide the reversal controls (review round)
+  // — render the error with a retry, like the sibling panels.
+  if (q.isError) {
+    return (
+      <Card className="mb-4">
+        <p className="text-sm text-red-600">
+          Couldn’t load shipments: {(q.error as Error).message}{' '}
+          <button type="button" onClick={() => q.refetch()} className="underline">Retry</button>
+        </p>
+      </Card>
+    );
+  }
+  if (!q.data?.shipments.length) return null;
+  return (
+    <Card className="mb-4">
+      <div className="mb-2 text-sm font-medium text-slate-700">
+        Shipments <span className="font-normal text-slate-400">— this order's packing slips; a reversal puts the stock back and reopens billing</span>
+      </div>
+      <div className="space-y-2">
+        {q.data.shipments.map((s) => (
+          <div key={s.packingSlipId} className="rounded-md border border-slate-200 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <a href={`/packing-slips/${s.packingSlipId}/print`} target="_blank" rel="noreferrer" className="font-medium text-indigo-600 hover:underline">
+                Packing slip {s.packingSlipId}
+              </a>
+              <span className="text-slate-400">{fmtDate(s.shippedAt)}</span>
+              {s.reversedByChangeSetId != null && (
+                <span className="rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700">REVERSED (RVSSH {s.reversedByChangeSetId})</span>
+              )}
+            </div>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {s.lots.map((l, i) => (
+                <span key={i} className={`rounded-full px-2 py-0.5 text-xs ${s.reversedByChangeSetId != null ? 'bg-slate-100 text-slate-400 line-through' : 'bg-indigo-50 text-indigo-700'}`}>
+                  {l.lot} · {l.qty}{l.unit ? ` ${l.unit}` : ''}
+                </span>
+              ))}
+            </div>
+            {s.reversedByChangeSetId == null && (
+              <ReverseShipmentControls orderId={orderId} packingSlipId={s.packingSlipId} onDone={() => { q.refetch(); onDone(); }} />
+            )}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// Reverse one shipment event, with the e-signature its secured item requires —
+// mirrors ReverseControls (batch reversal): reason, signer password/MFA,
+// optional witness, supervisor elevation when the operator lacks the perform
+// grant. The server refuses when the shipped quantity is still invoiced
+// (reverse the invoice first) or when the restocked/consigned stock has moved.
+function ReverseShipmentControls({ orderId, packingSlipId, onDone }: { orderId: number; packingSlipId: number; onDone: () => void }) {
+  const me = useMe();
+  const [open, setOpen] = useState(false);
+  const req = useQuery({
+    queryKey: ['reverse-requirement', me.data?.id],
+    queryFn: () =>
+      api.get<{ allowed: boolean; requireReason: boolean; requireSignature: boolean; requireWitness: boolean }>(
+        '/orders/reverse-requirement',
+      ),
+    enabled: open,
+  });
+  const [reason, setReason] = useState('');
+  const [password, setPassword] = useState('');
+  const [totp, setTotp] = useState('');
+  const [showWitness, setShowWitness] = useState(false);
+  const [witnessEmail, setWitnessEmail] = useState('');
+  const [witnessPassword, setWitnessPassword] = useState('');
+  const [witnessTotp, setWitnessTotp] = useState('');
+  const [witnessExplanation, setWitnessExplanation] = useState('');
+  const [elevEmail, setElevEmail] = useState('');
+  const [elevPassword, setElevPassword] = useState('');
+  const [elevTotp, setElevTotp] = useState('');
+
+  const r = req.data;
+  const sig = !!r?.requireSignature;
+  const reasonRequired = !!r?.requireReason;
+  const witnessRequired = !!r?.requireWitness;
+  const witnessOpen = witnessRequired || showWitness;
+  const mfaOn = !!me.data?.mfaEnabled;
+  const blocked = !!r && r.allowed === false;
+
+  const m = useMutation({
+    mutationFn: () =>
+      api.post(`/orders/${orderId}/reverse-shipment`, {
+        packingSlipId,
+        reason: reason || undefined,
+        password: password || undefined,
+        totpCode: sig && totp ? totp : undefined,
+        witnessEmail: witnessOpen && witnessEmail ? witnessEmail : undefined,
+        witnessPassword: witnessOpen && witnessPassword ? witnessPassword : undefined,
+        witnessTotpCode: witnessOpen && witnessTotp ? witnessTotp : undefined,
+        witnessExplanation: witnessOpen && witnessExplanation ? witnessExplanation : undefined,
+        elevatorEmail: elevEmail || undefined,
+        elevatorPassword: elevPassword || undefined,
+        elevatorTotpCode: elevTotp || undefined,
+      }),
+    onSuccess: onDone,
+  });
+
+  const canSubmit =
+    !!r &&
+    (!reasonRequired || !!reason.trim()) &&
+    (blocked
+      ? !!elevEmail && !!elevPassword
+      : !sig || (!!password && (!mfaOn || !!totp))) &&
+    (!witnessRequired || (!!witnessEmail && !!witnessPassword));
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="mt-1 text-xs font-medium text-red-600 hover:underline">
+        Reverse shipment…
+      </button>
+    );
+  }
+  return (
+    <div className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2">
+      <p className="mb-2 text-xs text-red-800">
+        Reversing puts the shipped stock back where it left (into the shipping assembly when staged), unwinds the
+        shipped quantities, and marks this packing slip reversed. An invoice covering it must be reversed first.
+      </p>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        {req.isLoading && <span className="text-slate-400">Loading…</span>}
+        {req.isError && (
+          <span className="text-red-600">
+            Couldn’t load signing requirements.{' '}
+            <button type="button" onClick={() => req.refetch()} className="underline">Retry</button>
+          </span>
+        )}
+        {!req.isLoading && (
+          <>
+            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder={reasonRequired ? 'Reason (required)' : 'Reason (optional)'} className="w-56 rounded border border-slate-300 px-2 py-1" />
+            {blocked && (
+              <>
+                <span className="w-full text-xs text-amber-700">
+                  Your group is not permitted to reverse shipments — a supervisor can authorize it here (their signature goes on the ledger).
+                </span>
+                <input value={elevEmail} onChange={(e) => setElevEmail(e.target.value)} placeholder="Supervisor email" className="w-48 rounded border border-amber-400 px-2 py-1" />
+                <input type="password" autoComplete="off" value={elevPassword} onChange={(e) => setElevPassword(e.target.value)} placeholder="Supervisor password" className="w-44 rounded border border-amber-400 px-2 py-1" />
+                <input autoComplete="one-time-code" value={elevTotp} onChange={(e) => setElevTotp(e.target.value)} placeholder="Supervisor MFA (if enrolled)" className="w-48 rounded border border-amber-400 px-2 py-1" />
+              </>
+            )}
+            {sig && !blocked && (
+              <input type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Your password (sign)" className="w-44 rounded border border-slate-300 px-2 py-1" />
+            )}
+            {sig && !blocked && mfaOn && (
+              <input autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} placeholder="MFA code" className="w-28 rounded border border-slate-300 px-2 py-1" />
+            )}
+            {sig && witnessOpen && (
+              <>
+                <input value={witnessEmail} onChange={(e) => setWitnessEmail(e.target.value)} placeholder={`Witness email${witnessRequired ? ' (required)' : ''}`} className="w-48 rounded border border-slate-300 px-2 py-1" />
+                <input type="password" autoComplete="off" value={witnessPassword} onChange={(e) => setWitnessPassword(e.target.value)} placeholder="Witness password" className="w-44 rounded border border-slate-300 px-2 py-1" />
+                <input autoComplete="one-time-code" value={witnessTotp} onChange={(e) => setWitnessTotp(e.target.value)} placeholder="Witness MFA (if enrolled)" className="w-44 rounded border border-slate-300 px-2 py-1" />
+                <input value={witnessExplanation} onChange={(e) => setWitnessExplanation(e.target.value)} maxLength={500} placeholder="Witness note (optional)" className="w-48 rounded border border-slate-300 px-2 py-1" />
+              </>
+            )}
+            {sig && !witnessRequired && !showWitness && (
+              <button type="button" onClick={() => setShowWitness(true)} className="text-xs text-indigo-600 hover:underline">+ add witness</button>
+            )}
+            <button
+              onClick={() => m.mutate()}
+              disabled={m.isPending || !canSubmit}
+              className="rounded-md bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+            >
+              Reverse shipment
+            </button>
+            <button type="button" onClick={() => setOpen(false)} className="text-sm text-slate-500 hover:text-slate-800">Cancel</button>
+          </>
+        )}
+        {m.isError && <span className="w-full text-sm text-red-600">{(m.error as Error).message}</span>}
+      </div>
+    </div>
   );
 }
 

@@ -1967,3 +1967,114 @@ per-parcel adjust core under one COUNT ChangeSet; no new depletion/movement logi
    uncounted line** now shows blank book/adjust (a line snapshotted but never
    counted was computing a false `0 − 0 = 0` book). Full suite after: 502
    integration + 114 unit green.
+
+## Shipment reversal (§30 / L60, built 2026-07-10)
+
+The last parity build: reverse ONE shipment event (packing slip) of an SH
+order — the legacy **RejectWaybill** flow. Discovery (read-only legacy DB):
+
+1. **Legacy shape (all 293 RVSSH change sets verified)**: trigger = Waybill →
+   `WaybillDataSet.RejectWaybill` (waybill kept, Status='REJ' — marked, never
+   deleted). Every RVSSH row carries BOTH `ReverseChangeSet` → the forward SH
+   change set AND `Trans` → a credit invoice (same TransDocument,
+   ReversedTrans link). Every reversal was same-day, and the RVSSH
+   `ChangeDate` **copies the forward's timestamp to the second** (CS 5617 vs
+   5608 — nine ids apart, identical time; the reject Log entry runs ~1 min
+   after the copied date on CS 131356): the at-date axis nets to zero from
+   the shipment date on. Every one of the 293 was followed by a later SH on
+   the same order — the plant's universal pattern is reverse → fix → re-ship.
+   Movement headers under RVSSH change sets carry **Context='RVSSH'** (1,406
+   movements) — unlike RVSMFP, whose movements keep the forward PCKAGE
+   context. Legs are EXACT negations of the stored forward legs (same
+   location/owner/OrdDetail, qty+value sign-flipped; even the later-posted
+   USCA cost-trueup legs were negated). Restore destination: **291/293 into
+   the ASM assembly** the shipment drew from (2 into WHS — one unstaged
+   consignment, one return reversal); the assembly is then reused by the
+   re-ship. Warehouse-transfer reversal (order 144976): TWO change sets — a
+   plain TRNSFR cs negating the consigned MK leg, **bidirectionally** linked
+   (54931.ReverseChangeSet=54933 AND 54933.ReverseChangeSet=54931), plus the
+   RVSSH cs negating the SH US legs. Legacy SH orders stay CMP through the
+   whole cycle (15,721 CMP / 29 RTS — no CLS).
+2. **ERP1 design** (`POST /orders/:id/reverse-shipment`, program
+   `orders.reverse`, secured item `order.reverse` — perform grant enforced,
+   supervisor elevation, reason/signature/witness per configuration; e-sig
+   pinned to the immutable `packingSlipId`, masterTable ChangeSet): target is
+   one NATIVE SH change set (id ≥ 1e9; imported legacy shipments refused —
+   their footprint is not ERP1-shaped). Whole-event reversal only, like
+   legacy. Tx order: Ordr row lock → NATIVE_ID_ALLOC_LOCK → one ascending-id
+   parcel `FOR UPDATE` scan; every precondition (cs identity, not already
+   reversed via the RVSSH back-pointer AND the TRNSFR bidirectional pointer,
+   invoice math, return/consigned stock sufficiency) re-asserted in-tx.
+3. **Stored-leg negation (§20 rule)**: one reversing movement per stored
+   forward movement, legs sign-flipped 1:1 (qty AND stored Value; NULL stays
+   NULL) — never re-derived from current cost. SH-side headers Context='RVSSH'
+   under the RVSSH cs; TRNSFR-side headers keep Context='TRNSFR' under the
+   TRNSFR negation cs. Both reversing change sets are effective-dated to
+   their FORWARD's ChangeDate (the verified legacy convention). A leg outside
+   the three known forward shapes (US−out / US+return / TRNSFR MK+consigned)
+   refuses the whole reversal — the ledger-corruption escape hatch.
+4. **Restores go WHERE THE STOCK LEFT** (the stored legs' locations): merge
+   into the same-identity parcel (item+sublot+location+reservation, status
+   null) else mint native. At an ASM location the restored parcel is
+   **re-reserved to its line** (leg.OrdDetail) — the depleter fence requires
+   ASM stock to be line-reserved, and this reconstructs the staged state the
+   follow-up re-ship draws FIRST; a DEL'd assembly receiving restored stock
+   is re-opened (Status → NULL, audited) exactly as legacy reuses it. A
+   free-entry leg (no line) restores unreserved at its non-ASM location; a
+   free-entry leg drawn FROM an ASM assembly (reachable: the depleter
+   carve-out is call-wide, so a lineless entry can consume staged stock) is
+   re-reserved to the order's line for the item — an unreserved parcel at an
+   ASM location is invisible to every depleter AND refused by unstage
+   (review round); with no matching line it restores unreserved at the
+   receiving/default location instead. Never unreserved-at-ASM. Return entries
+   (positive forward US legs) are un-returned: the restocked quantity is
+   removed from the exact (item, sublot, location) — refused if drawn down
+   since. Consigned (warehouse) legs likewise; the TRNSFR negation pair is
+   bidirectionally linked and the paired forward TRNSFR cs is found by id
+   adjacency (shipLots allocates it as SH cs id + 1 in the same locked tx —
+   deterministic under the alloc lock).
+5. **Invoice guard — deviation from legacy**: legacy reversed shipment +
+   invoice atomically (every RVSSH carries the credit Trans). ERP1 requires
+   the invoice be reversed FIRST via the existing `POST /invoices/:id/reverse`
+   — per line, sign-aware: a sale line refuses when non-reversed billed qty >
+   QtyUsed − reversedQty; a return line mirrors it (credit exceeding the
+   remaining returned qty). Invoice reversal is its own audited, program-gated
+   action and the reversal-pair netting already makes re-billing work; the
+   RVSSH cs therefore carries no Trans (documented deviation). TI (warehouse)
+   invoices participate in the same guard.
+6. **QtyUsed** unwound per shipment_lot rows (billing grain — shortfall draws
+   mean legs can cover less than the recorded entries; each side unwinds its
+   own record: parcels/ledger per legs, QtyUsed/billing per entries).
+   `shipment_lot` gained `change_set` (stamped by shipLots; backfilled by
+   ordr+shipped_at↔ChangeDate match) and `reversed_by_change_set` — rows are
+   MARKED reversed, never deleted (the legacy REJ'd-waybill pattern). Readers
+   filter: recall (`shipmentsForLots`), the batch-reverse shipped-guard (a
+   reversed shipment no longer pins the producing batch), packing-slip
+   list/doc render a REVERSED badge/banner. Order status is untouched
+   (legacy keeps CMP; ship/re-ship/invoice all work from CMP/CLS).
+7. **Web**: Shipments panel on the SH order detail (per-event packing slip
+   link, lots, REVERSED badge, Reverse control mirroring the batch-reverse
+   form incl. elevation); packing-slip browser/document REVERSED marks.
+
+8. **Review round (§30.8)**: 8 lenses → 22 raw → 10 deduped → 7 confirmed by
+   ≥2 of 3 adversarial verifiers (Opus fallback after Fable verifier usage
+   limits — the standing recipe), all fixed: (a) MAJOR free-entry-drawn-from-
+   ASM restore minted an unreserved-at-ASM parcel (orphaned — see point 4's
+   corrected rule; the original §30 text wrongly claimed unstage could
+   recover it); (b) MAJOR ship-lots recording never refreshed the Shipments
+   panel (['order-shipments'] + the staging-family keys now invalidated in
+   the shared refresh()); (c) pairedTrnsfr id-adjacency could false-match a
+   SIBLING reversal's TRNSFR negation cs when an all-shortfall warehouse
+   shipment is pair-less — the lookup now discriminates by back-pointer
+   direction (a negation cs points backward, a forward pair at null/later);
+   (d) the forward-TRNSFR bidirectional back-stamp and the shipment_lot
+   reversal marks were unaudited mutations of posted records (audit rows
+   added); (e) QtyUsed audit rows stored an inverted delta ('--40' on return
+   lines) instead of true before/after; (f) reversal didn't invalidate the
+   staging/ship-lot-options caches; (g) ShipmentsPanel silently vanished on
+   fetch errors. Belt-and-braces beyond the confirmed list (rejected 2:1 but
+   cheap and strictly safer): the migration backfill now links ONLY
+   unambiguous (single-candidate) ordr+shipped_at matches, and reverseShipment
+   REFUSES a cs whose line-stamped legs have no linked shipment_lot rows
+   ("predates the reversal upgrade") — restoring stock without unwinding
+   QtyUsed would let the order re-ship and bill the same goods.
