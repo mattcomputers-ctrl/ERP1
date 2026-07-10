@@ -149,20 +149,19 @@ schedule **Sync changes** during parallel running).
 
 1. ~~Parity sweep~~ ✅ · ~~QA module group~~ ✅ · ~~SH staging (L113)~~ ✅ ·
    ~~Warehouse transfers/returns (L115)~~ ✅ · ~~MFA/TOTP + OIDC SSO
-   (L19)~~ **DONE 2026-07-10** (f6ffdfc, ASSUMPTIONS §24) · ~~Supervisor
-   in-place elevation + perform-grant enforcement (L22, closed the grant
-   chip too)~~ **DONE 2026-07-10** (ASSUMPTIONS §25) · ~~Costing &
-   documents bundle: recipe cost rollup (L75) + container labels (L64) +
-   doc logo (L153)~~ **DONE 2026-07-10** (ASSUMPTIONS §26). **7 rows open,
-   all queued builds.**
-2. **Build the remaining gaps** (details + sizes in the sweep doc) — NEXT
-   UP: count sheets (L62 — mirror + import InventoryCount/-Detail, native
-   count workflow posting per-parcel adjustments under ONE COUNT ChangeSet
-   through the existing adjust engine); item/entity edit-form gaps
-   (L31/L33/L34); supplier price-version editor (L37/L48); shipment
-   reversal (L60 — RVSSH restores INTO the ASM assembly per §22 discovery;
-   the reversal must also unwind QtyUsed/shipment_lot and respect
-   reversal-pair invoice math).
+   (L19)~~ ✅ (§24) · ~~Supervisor elevation + perform-grant (L22)~~ ✅ (§25) ·
+   ~~Costing & documents bundle (L75/L64/L153)~~ ✅ (§26) · ~~Item/entity
+   edit-form gaps (L31/L33/L34)~~ **DONE 2026-07-10** (§27) · ~~Supplier
+   price-version editor (L37/L48)~~ **DONE 2026-07-10** (§28) · ~~Inventory
+   count sheets (L62)~~ **DONE 2026-07-10** (§29). **1 parity row open:
+   shipment reversal (L60) — RESERVED FOR FABLE (see the Fable handoff at the
+   end of the 2026-07-10 Opus session).**
+2. **Shipment reversal (L60) — the last parity build, reserved for Fable.**
+   RVSSH restores INTO the ASM assembly per §22 discovery; the reversal must
+   also unwind QtyUsed/shipment_lot, negate the STORED forward SH movement legs
+   (never re-derive from current cost — §20), respect reversal-pair invoice math
+   (§23), and refuse when already invoiced. This is where review rounds keep
+   finding ledger-corruption majors — do it with the full adversarial review.
 3. OPEN_QUESTIONS: Entra tenant details for SSO (issuer/clientId/secret +
    sub-vs-oid provisioning — new 2026-07-10); native-Lot marker column if
    parallel running shows YYMMDD### collisions; N-sequence invoice numbers
@@ -181,7 +180,47 @@ schedule **Sync changes** during parallel running).
    four newly-enforced perform grants (order.complete/reverse/revise,
    release.disposition) are seed-granted to ADMIN; grant them to the
    operator groups on the Secured Items page before parallel running, or
-   operators will need supervisor elevation for every completion.
+   operators will need supervisor elevation for every completion. **NEW: the
+   first full import/sync now also pulls InventoryCount + InventoryCountDetail
+   (log-driven); the new programs `purchasing.priceVersions`/
+   `priceVersionEditor` + `inventory.count` are seed-granted to ADMIN — grant
+   to the relevant operator groups before parallel running.**
+
+## State of the world (as of 2026-07-10 latest, Opus-safe queue: L31/L33/L34 + L37/L48 + L62)
+
+- **Item/entity edit-form gaps ✅** (69991a1, ASSUMPTIONS §27): NAME aliases
+  (`Item.replacedById`), ItemEntity ST planning knobs (`/items/:id/planning` —
+  mints a native ST row against the derived site owner), ItemPackagedProduct
+  binding create, entity address-book CRUD (`/entities/:id/addresses` over
+  Address + AddressReference). **The entity address references this install uses
+  are `Address` (primary/document) + `ShipToAddress` — NOT the sweep's
+  "Main/Remit/Ship"** (documents resolve off `Reference='Address'`, now the
+  standard). `updateAddress` COPY-ON-WRITES a legacy/shared Address (referenced
+  by Ordr/Waybill/Location document snapshots) so history isn't rewritten.
+  `Entity.parentId` (ship-to hierarchy) exposed. Review: 5 lenses → 9 raw → 5
+  dual-confirmed, all fixed (the major = the copy-on-write).
+- **Supplier price-version editor ✅** (6c7a2e4, ASSUMPTIONS §28):
+  `SupplierPricingService` / `/supplier-pricing` — the write side of the
+  PriceVersion/PriceDetail the PO line-sourcing reads. Supplier-keyed
+  (`PriceVersion.Entity = supplierId`; details off `Item`). **Multiple details
+  per item are ALLOWED** (362 live cases — package sizes/manufacturers); only an
+  exact item+package+manufacturer duplicate is refused. Effective-version rule
+  REUSED from `PriceVersionService`. Programs `purchasing.priceVersions`/
+  `priceVersionEditor`. Review: 4 dual-confirmed (2 UX nits refuted), both in
+  `updateDetail` — merged-state packaging guard (the by-package ÷ entityQuantity
+  trap) + in-tx exact-dup re-check.
+- **Inventory count sheets ✅** (f1f6e30, ASSUMPTIONS §29): `InventoryCount` +
+  `InventoryCountDetail` mirrored + imported (log-driven sync); native per-parcel
+  count workflow (`InventoryCountService` / `/inventory-counts`, program
+  `inventory.count`) posting every counted line under ONE COUNT ChangeSet via the
+  SHARED `InventoryService.setParcelQtyInTx` core extracted from `adjust()`.
+  **Discovery: legacy counted at item+location aggregate (Sublot NULL on all
+  21,053 rows); ERP1 counts per-parcel (lot-traced grain) — a documented
+  refinement; the escape hatch was NOT triggered.** Review: 5 lenses → 7
+  dual-confirmed / 4 distinct, all fixed (adjust SMP no-op fence regression;
+  deleteCount/enterCounts TOCTOU vs concurrent post; posted-uncounted-line book).
+- **Suites: 114 unit + 502 integration green; CI #127 (a) / #128 (b) green,
+  #129 (c) pending at handoff-write — verify.**
 
 ## State of the world (as of 2026-07-10 later, costing & documents bundle)
 
