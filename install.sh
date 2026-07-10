@@ -242,6 +242,22 @@ if [ ${MIGRATE_RC} -ne 0 ]; then
   fi
 fi
 
+# Drift repair for db-push-era descendants (see scripts/migrate.sh): a
+# baselined database can predate columns that were folded into the init
+# migration before it froze — schema.prisma is authoritative, apply the delta.
+# No-op on migration-built databases.
+log "Checking for schema drift..."
+set +e
+run_as_erp1 sh -c "cd '${ERP1_DIR}' && pnpm --filter @erp1/db exec prisma migrate diff --from-url \"\$DATABASE_URL\" --to-schema-datamodel prisma/schema.prisma --exit-code --script > /tmp/erp1-drift.sql 2>/dev/null"
+DRIFT_RC=$?
+set -e
+if [ ${DRIFT_RC} -ne 0 ]; then
+  log "Schema drift detected (db-push-era baseline) — repairing..."
+  cat /tmp/erp1-drift.sql
+  run_as_erp1 sh -c "cd '${ERP1_DIR}' && pnpm --filter @erp1/db exec prisma db execute --url \"\$DATABASE_URL\" --file /tmp/erp1-drift.sql" >/dev/null
+  log "Drift repaired."
+fi
+
 log "Seeding baseline data (idempotent)..."
 run_as_erp1 sh -c "cd '${ERP1_DIR}' && pnpm --filter @erp1/db seed" >/dev/null
 

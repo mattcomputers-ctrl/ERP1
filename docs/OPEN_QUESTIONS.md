@@ -25,8 +25,24 @@ default was chosen and recorded in ASSUMPTIONS.md).
   recipes using ingredient X, clone+replace with Y, republish).
 
 ## Platform
-- (none currently — the native installer is validated in a container;
-  a real Proxmox-VM install pass is still worth doing before cutover)
+- **Real Proxmox-VM install pass (fresh + upgrade)**: still outstanding —
+  the VM is not reachable from the dev-host sessions (no SSH access
+  configured; only the legacy MSSQL at 10.10.10.11 is reachable). The
+  installer remains container-validated only. When the user provides VM
+  access (or runs `curl -fsSL .../install.sh | sudo bash` themselves), the
+  remaining steps are: set LEGACY_MSSQL_PASSWORD in /etc/erp1.env, run the
+  full Legacy Import, grant the operator groups the four perform grants +
+  the new programs (see HANDOFF), and run one native plan recalc
+  (planning.source flips to native automatically). (2026-07-10)
+- **Live legacy-DB import validated on the dev host (2026-07-10, Fable
+  session)**: the local compose stack was upgraded IN PLACE on a 2026-06-20
+  database (migrations incl. numeric(19,4) + shipment_lot applied cleanly;
+  seed idempotent), then a FULL `POST /import/run` ran against the real
+  legacy MSSQL. Note: the old DB predated the log-watermark engine, so
+  `POST /import/sync` correctly refused with "run a full Legacy Import
+  first" — on any pre-watermark upgrade the full import IS the required
+  first step (it is anyway, for the 4dp leg values). See HANDOFF for the
+  run's outcome figures.
 
 - **Native lot marker**: ERP1-native Lot rows have no explicit marker column;
   the import sync protects native PRODUCED lots via `ordDetailId >= 1e9`, but

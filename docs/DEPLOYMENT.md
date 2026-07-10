@@ -22,7 +22,7 @@ Overrides (env vars after `sudo`): `ERP1_DOMAIN` (enables HTTPS via Caddy),
 | Node 22 | NodeSource; `corepack` activates the repo-pinned pnpm |
 | App | cloned to `/opt/erp1`, owned by the system user `erp1` (nologin) |
 | Config | `/etc/erp1.env`, root-only (0600) — all secrets live here |
-| Schema | `prisma migrate deploy` (versioned migrations; a pre-migrations db-push database is auto-baselined via the P3005 → `migrate resolve --applied 000000000000_init` path) + idempotent seed |
+| Schema | `prisma migrate deploy` (versioned migrations; a pre-migrations db-push database is auto-baselined via the P3005 → `migrate resolve --applied 000000000000_init` path) + **post-deploy drift repair** (a baselined db-push-era database can predate columns folded into init before it froze — the installer computes `migrate diff` against schema.prisma and applies the delta; no-op on migration-built databases; found live 2026-07-10 when a stale baseline was missing `RecipeDetail.TotalVolume` + `approval_request` and the full import rejected 177K rows) + idempotent seed |
 | Services | systemd `erp1-api` + `erp1-worker` |
 | Web | Caddy serves `/opt/erp1/apps/web/dist` (SPA fallback) and reverse-proxies `/api/*` to the API |
 

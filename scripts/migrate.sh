@@ -26,6 +26,27 @@ else
   fi
 fi
 
+# Drift repair for db-push-era descendants: baselining marks the init
+# migration applied WITHOUT running it, so anything folded into init before
+# it froze (2026-07-02) but after the database's db-push snapshot never
+# materializes (found live 2026-07-10: RecipeDetail.TotalVolume/UseFrom and
+# the approval_request table were missing — the full import rejected all
+# 177K RecipeDetail rows). schema.prisma is authoritative and these installs
+# carry no manual schema customizations, so apply the computed delta.
+# Migration-built databases never drift — this is a no-op for them.
+echo "[migrate] Checking for schema drift..."
+if pnpm --filter @erp1/db exec prisma migrate diff \
+    --from-url "$DATABASE_URL" \
+    --to-schema-datamodel prisma/schema.prisma \
+    --exit-code --script > /tmp/drift.sql 2>/dev/null; then
+  echo "[migrate] No drift."
+else
+  echo "[migrate] Schema drift detected (db-push-era baseline) — repairing with:"
+  cat /tmp/drift.sql
+  pnpm --filter @erp1/db exec prisma db execute --url "$DATABASE_URL" --file /tmp/drift.sql
+  echo "[migrate] Drift repaired."
+fi
+
 echo "[migrate] Seeding baseline data (idempotent)..."
 pnpm --filter @erp1/db seed
 

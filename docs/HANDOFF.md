@@ -143,48 +143,81 @@ Install on an Ubuntu 24.04 VM (Proxmox):
 (validated end-to-end in a container — fresh + upgrade modes; see
 docs/DEPLOYMENT.md). Then set `LEGACY_MSSQL_PASSWORD` in `/etc/erp1.env`,
 restart, and run **Administration → Legacy Import** (full import, then
-schedule **Sync changes** during parallel running).
+**Sync changes** run on demand during parallel running). **Imports are
+OPERATOR-TRIGGERED ONLY** (user decision 2026-07-10): the only entry points
+are the admin page's two buttons (`POST /import/run` / `/import/sync`,
+program `admin.import`) — never wire a scheduler/worker job for them; the
+user controls when the live environment imports.
 
 ## Priority queue (toward "shipped")
 
-1. ~~Parity sweep~~ ✅ · ~~QA module group~~ ✅ · ~~SH staging (L113)~~ ✅ ·
-   ~~Warehouse transfers/returns (L115)~~ ✅ · ~~MFA/TOTP + OIDC SSO
-   (L19)~~ ✅ (§24) · ~~Supervisor elevation + perform-grant (L22)~~ ✅ (§25) ·
-   ~~Costing & documents bundle (L75/L64/L153)~~ ✅ (§26) · ~~Item/entity
-   edit-form gaps (L31/L33/L34)~~ **DONE 2026-07-10** (§27) · ~~Supplier
-   price-version editor (L37/L48)~~ **DONE 2026-07-10** (§28) · ~~Inventory
-   count sheets (L62)~~ **DONE 2026-07-10** (§29). **1 parity row open:
-   shipment reversal (L60) — RESERVED FOR FABLE (see the Fable handoff at the
-   end of the 2026-07-10 Opus session).**
-2. **Shipment reversal (L60) — the last parity build, reserved for Fable.**
-   RVSSH restores INTO the ASM assembly per §22 discovery; the reversal must
-   also unwind QtyUsed/shipment_lot, negate the STORED forward SH movement legs
-   (never re-derive from current cost — §20), respect reversal-pair invoice math
-   (§23), and refuse when already invoiced. This is where review rounds keep
-   finding ledger-corruption majors — do it with the full adversarial review.
-3. OPEN_QUESTIONS: Entra tenant details for SSO (issuer/clientId/secret +
+1. **FULL PARITY REACHED 2026-07-10**: ~~Parity sweep~~ ✅ · ~~QA module
+   group~~ ✅ · ~~SH staging (L113)~~ ✅ · ~~Warehouse transfers/returns
+   (L115)~~ ✅ · ~~MFA/TOTP + OIDC SSO (L19)~~ ✅ (§24) · ~~Supervisor
+   elevation + perform-grant (L22)~~ ✅ (§25) · ~~Costing & documents bundle
+   (L75/L64/L153)~~ ✅ (§26) · ~~Item/entity edit-form gaps (L31/L33/L34)~~ ✅
+   (§27) · ~~Supplier price-version editor (L37/L48)~~ ✅ (§28) · ~~Inventory
+   count sheets (L62)~~ ✅ (§29) · ~~**Shipment reversal (L60)**~~ **DONE
+   2026-07-10 (Fable session, §30) — every FEATURE_PARITY row is now ✅
+   or ⏸️.**
+2. OPEN_QUESTIONS: Entra tenant details for SSO (issuer/clientId/secret +
    sub-vs-oid provisioning — new 2026-07-10); native-Lot marker column if
    parallel running shows YYMMDD### collisions; N-sequence invoice numbers
    can collide during parallel running (reserve an E-prefix or cut
    invoicing over in one go); Ordr.ReserveAmount on SH orders (45 rows) —
    surface on documents?; items.create uses plain autoincrement, not the
    native-id range (2026-07-05).
-4. Before cutover: one real install pass on the actual Proxmox VM; a live
-   `POST /import/sync` against the real legacy DB (seam-fake tested only —
-   NOTE: the first sync after upgrading now also pulls the full 609K+972K
-   InvMovement family if the full import predates the mirror); a FULL
-   re-import (or re-run) after the numeric(19,4) migration restores the 4dp
-   leg values the old money column cent-rounded (ASSUMPTIONS §20.12);
-   disable the PlanTrace import spec (the native plan takes over — setting
-   `planning.source` already flips on first recalc). Post-upgrade note: the
-   four newly-enforced perform grants (order.complete/reverse/revise,
-   release.disposition) are seed-granted to ADMIN; grant them to the
-   operator groups on the Secured Items page before parallel running, or
-   operators will need supervisor elevation for every completion. **NEW: the
-   first full import/sync now also pulls InventoryCount + InventoryCountDetail
-   (log-driven); the new programs `purchasing.priceVersions`/
-   `priceVersionEditor` + `inventory.count` are seed-granted to ADMIN — grant
-   to the relevant operator groups before parallel running.**
+4. **LIVE LEGACY-DB PASS DONE 2026-07-10 (Fable session)** on the dev host's
+   compose stack, upgraded IN PLACE on a 2026-06-20 database: full
+   `POST /import/run` against the real legacy MSSQL succeeded in 19 min —
+   53 tables, InvMovement 609,791 + InvMovementDtl 973,302 (417,459 legs
+   carry sub-cent 4dp values — the numeric(19,4) restore verified: the
+   discovery legs ±46.3017/±57.1262/±0.0013 round-tripped exactly),
+   InventoryCount 1,499 + Detail 21,053 imported, genealogy 27,949 edges,
+   then a live `POST /import/sync` (log-walk) ran clean, pendingLogs 0.
+   **Found + fixed live: the db-push-era BASELINE DRIFT bug** — baselining
+   marks init applied without running it, so columns folded into init
+   before it froze (RecipeDetail.TotalVolume/UseFrom + the approval_request
+   table) were missing and the full import rejected all 177K RecipeDetail
+   rows; migrate.sh + install.sh now run a post-deploy `migrate diff` drift
+   repair (no-op on migration-built DBs — see DEPLOYMENT.md). Old-DB note:
+   a pre-watermark database correctly refuses `sync` until a full import
+   runs (the June runs predate the watermark engine). STILL OUTSTANDING
+   (needs the user's VM — no access from dev-host sessions, see
+   OPEN_QUESTIONS): the real Proxmox install pass; then set
+   LEGACY_MSSQL_PASSWORD, run the full import from Administration → Legacy
+   Import, grant the operator groups the four perform grants
+   (order.complete/reverse/revise, release.disposition) + programs
+   `purchasing.priceVersions`/`priceVersionEditor`/`inventory.count`, and
+   run one native plan recalc (`planning.source` flips automatically).
+   **Imports are OPERATOR-TRIGGERED ONLY (user decision — see Deployment
+   section above); never schedule them.**
+
+## State of the world (as of 2026-07-10 FINAL, shipment reversal L60 — FULL PARITY)
+
+- **Shipment reversal ✅** (fc28be4, CI #131, ASSUMPTIONS §30): the legacy
+  RejectWaybill flow. `POST /orders/:id/reverse-shipment` (program
+  orders.reverse, secured item order.reverse — perform grant/elevation, e-sig
+  pinned to packingSlipId) + `GET /orders/:id/shipments` + Shipments panel /
+  Reverse control on the SH order; REVERSED marks on packing-slip browser+doc.
+  Verified legacy contract reproduced: RVSSH cs COPIES the forward ChangeDate
+  (all 293 legacy rows, to the second); movement headers Context='RVSSH';
+  legs negate the STORED forward legs 1:1; stock restores where it left —
+  into the ASM assembly (reopened if DEL'd, parcels re-reserved to their
+  line; free-entry ASM draws re-reserve to the item's line — NEVER
+  unreserved-at-ASM); returns un-returned, consigned relocations unwound via
+  a bidirectionally-linked TRNSFR negation pair (id-adjacency + back-pointer
+  -direction discriminator for pair-less all-shortfall shipments). QtyUsed
+  unwound per shipment_lot entries; `shipment_lot.change_set` (unambiguous
+  backfill only) + `reversed_by_change_set` (MARK, never delete); recall +
+  batch-reverse shipped-guard read live rows; a cs with line-stamped legs but
+  no linked entries refuses ("predates the reversal upgrade"). DELIBERATE
+  DEVIATION: invoice must be reversed FIRST (sign-aware per-line guard over
+  CI/TI netting; the RVSSH cs carries no Trans — legacy credited atomically).
+  Review: 8 lenses → 22 raw → 10 dedup → 7 confirmed by ≥2/3 (Fable verifier
+  usage limits mid-run → resumed the same Workflow with model:'opus' on the
+  verify stage; finders replayed from cache), all fixed (§30.8).
+- Suites: 114 unit + 516 integration green.
 
 ## State of the world (as of 2026-07-10 latest, Opus-safe queue: L31/L33/L34 + L37/L48 + L62)
 
